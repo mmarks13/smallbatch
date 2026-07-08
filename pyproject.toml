@@ -1,0 +1,53 @@
+[project]
+name = "smallbatch"
+version = "0.1.0"
+description = "Small-batch distillation: compile a frontier model's ability on one narrow task into a small local model."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Michael Marks" }]
+keywords = ["lora", "fine-tuning", "distillation", "classification", "peft", "small-models"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    # Pascal cards need a <2.7/cu124 build (see README hardware notes);
+    # Blackwell (RTX 50xx) needs >=2.7/cu128 — so no upper bound here
+    "torch>=2.4",
+    "transformers>=4.51",
+    "peft>=0.14",
+    "trl>=0.13",
+    "datasets>=2.19",
+    "accelerate>=0.30",
+]
+
+[project.optional-dependencies]
+qlora = ["bitsandbytes>=0.46.1"]
+dev = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/mmarks13/smallbatch"
+Repository = "https://github.com/mmarks13/smallbatch"
+Issues = "https://github.com/mmarks13/smallbatch/issues"
+
+[project.scripts]
+smallbatch = "smallbatch.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["assets/"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/smallbatch"]

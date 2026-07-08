@@ -1,0 +1,233 @@
+"""smallbatch CLI: label, compile, run, status."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+from . import artifacts
+from .spec import load_spec
+
+
+def _load_items(path: Path) -> list[dict]:
+    text = path.read_text()
+    if path.suffix == ".jsonl":
+        return [json.loads(l) for l in text.splitlines() if l.strip()]
+    data = json.loads(text)
+    if isinstance(data, dict):  # tolerate {"items": [...]}-shaped files
+        for v in data.values():
+            if isinstance(v, list):
+                return v
+        raise ValueError(f"no item list found in {path}")
+    return data
+
+
+def cmd_label(args) -> int:
+    from .api import label
+
+    spec = load_spec(args.spec)
+    items = _load_items(Path(args.items))
+    result = label(spec, items, out_dir=args.out)
+    print(json.dumps(result.meta, indent=2))
+    if result.compressed:
+        hist = result.meta["label_histogram"]
+        top_share = max(hist.values()) / sum(hist.values())
+        print(
+            f"note: labels are compressed ({top_share:.0%} in one bin) — "
+            "consider sharpening the rubric anchors and relabeling"
+        )
+    return 0
+
+
+def cmd_compile(args) -> int:
+    from .api import compile as compile_fn
+
+    try:
+        result = compile_fn(
+            load_spec(args.spec),
+            data_dir=args.data,
+            artifacts_root=args.artifacts,
+            base=args.base,
+            precision=args.precision,
+            sweep_name=getattr(args, "sweep_name", None),
+            tag=getattr(args, "tag", None),
+            arm=getattr(args, "arm", None),
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    print(json.dumps({"metrics": result.metrics, "gate": result.gate}, indent=2))
+    print(f"{'PASS' if result.passed else 'FAIL'}: {result.version_dir}")
+    return 0 if result.passed else 2
+
+
+def cmd_run(args) -> int:
+    from .runtime import load_fn
+
+    fn = load_fn(args.name, artifacts_root=args.artifacts, allow_failed=args.allow_failed)
+    if args.json:
+        print(fn(json.loads(args.json)))
+    else:
+        items = _load_items(Path(args.input_file))
+        for item, out in zip(items, fn.batch(items)):
+            print(json.dumps({"output": out, "input": item}, ensure_ascii=False))
+    return 0
+
+
+def cmd_export(args) -> int:
+    from .export import export
+
+    try:
+        export(
+            args.name,
+            artifacts_root=args.artifacts,
+            version=args.version,
+            quant=args.quant,
+            adapter_only=args.adapter_only,
+            allow_failed=args.allow_failed,
+            llama_cpp=args.llama_cpp,
+            keep_merged=args.keep_merged,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_push(args) -> int:
+    from .hub import push
+
+    try:
+        push(
+            args.name,
+            repo_id=args.repo,
+            artifacts_root=args.artifacts,
+            version=args.version,
+            private=not args.public,
+            allow_failed=args.allow_failed,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_sweep(args) -> int:
+    import shlex
+
+    from .sweep import load_sweep, run_sweep
+
+    sweep = load_sweep(args.sweep_yaml)
+    override = os.environ.get("SMALLBATCH_COMPILE")
+    compile_prefix = shlex.split(override) if override else None
+    return run_sweep(
+        sweep,
+        data_dir=args.data,
+        artifacts_root=args.artifacts,
+        compile_prefix=compile_prefix,
+    )
+
+
+def cmd_status(args) -> int:
+    root = Path(args.artifacts)
+    if not root.is_dir():
+        print(f"no artifacts under {root}")
+        return 0
+    for fn_dir in sorted(root.iterdir()):
+        for v in artifacts.versions(root, fn_dir.name):
+            m = artifacts.read_manifest(v)
+            stale = artifacts.staleness(v)
+            flags = []
+            flags.append("PASS" if m["gate"]["passed"] else "FAIL")
+            if stale:
+                flags.append(f"STALE ({stale})")
+            agr = m["metrics"]["adapter"]["agreement"]
+            print(f"{fn_dir.name}/{v.name}  [{' '.join(flags)}]  agreement={agr:.2%}  base={m['base_model']}")
+        for v in artifacts.sweep_runs(root, fn_dir.name):
+            m = artifacts.read_manifest(v)
+            gate = "PASS" if m["gate"]["passed"] else "FAIL"
+            agr = m["metrics"]["adapter"]["agreement"]
+            print(f"{fn_dir.name}/{m['version']}  [{gate}]  agreement={agr:.2%}  base={m['base_model']}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="smallbatch")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    lp = sub.add_parser("label", help="generate a teacher-labeled dataset for a spec")
+    lp.add_argument("spec")
+    lp.add_argument("--items", required=True, help="JSON/JSONL file of real input items")
+    lp.add_argument("--out", help="output dir (default data/<name>)")
+    lp.set_defaults(fn=cmd_label)
+
+    cp = sub.add_parser("compile", help="train + evaluate + gate an adapter")
+    cp.add_argument("spec")
+    cp.add_argument("--data", help="labeled data dir (default data/<name>)")
+    cp.add_argument("--base", help="override train.base model id")
+    cp.add_argument("--precision", choices=["auto", "fp32", "bf16", "qlora"])
+    cp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    # sweep-internal: route the artifact into artifacts/<fn>/<sweep>/<tag> and
+    # stamp the manifest, instead of a dated version dir (see cmd_sweep)
+    cp.add_argument("--sweep-name", help=argparse.SUPPRESS)
+    cp.add_argument("--tag", help=argparse.SUPPRESS)
+    cp.add_argument("--arm", help=argparse.SUPPRESS)
+    cp.set_defaults(fn=cmd_compile)
+
+    rp = sub.add_parser("run", help="call a compiled function")
+    rp.add_argument("name")
+    rp.add_argument("--json", help="single input item as JSON")
+    rp.add_argument("--input-file", help="JSON/JSONL file of items")
+    rp.add_argument("--allow-failed", action="store_true")
+    rp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    rp.set_defaults(fn=cmd_run)
+
+    ep = sub.add_parser(
+        "export", help="export a compiled function to GGUF (+ grammar + Modelfile)"
+    )
+    ep.add_argument("name")
+    ep.add_argument("--version", help="artifact version dir name (default: latest passing)")
+    ep.add_argument("--quant", default="q4_k_m", choices=["f16", "q8_0", "q4_k_m"])
+    ep.add_argument(
+        "--adapter-only", action="store_true",
+        help="convert just the LoRA for llama-server --lora over a shared base",
+    )
+    ep.add_argument("--allow-failed", action="store_true")
+    ep.add_argument("--llama-cpp", help="llama.cpp checkout dir (or set LLAMA_CPP_DIR)")
+    ep.add_argument("--keep-merged", action="store_true", help=argparse.SUPPRESS)
+    ep.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    ep.set_defaults(fn=cmd_export)
+
+    pp = sub.add_parser(
+        "push", help="upload an artifact to the Hugging Face Hub (private by default)"
+    )
+    pp.add_argument("name")
+    pp.add_argument("--repo", required=True, help="Hub repo id, e.g. you/fn-name")
+    pp.add_argument("--version", help="artifact version dir name (default: latest passing)")
+    pp.add_argument("--public", action="store_true", help="create the repo public")
+    pp.add_argument("--allow-failed", action="store_true")
+    pp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    pp.set_defaults(fn=cmd_push)
+
+    wp = sub.add_parser("sweep", help="run a grid of model x arm compiles")
+    wp.add_argument("sweep_yaml")
+    wp.add_argument("--data", help="labeled data dir (default data/<name>)")
+    wp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    wp.set_defaults(fn=cmd_sweep)
+
+    sp = sub.add_parser("status", help="list compiled functions and staleness")
+    sp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    sp.set_defaults(fn=cmd_status)
+
+    args = p.parse_args(argv)
+    if args.cmd == "run" and not (args.json or args.input_file):
+        p.error("run requires --json or --input-file")
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
