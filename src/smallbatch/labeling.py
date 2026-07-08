@@ -4,16 +4,20 @@ variants for coverage, and everything is relabeled through one path."""
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from . import prompts
 from .spec import FunctionSpec
 from .teacher import Teacher
 
-Row = dict[str, Any]  # {"input": {...}, "score": ..., "reason": str, "origin": ...}
+# {"id", "input": {...}, "score", "reason", "origin", "split", ...provenance;
+# variant rows also carry "source_ids": the train reals shown to the teacher
+# when the variant was generated}
+Row = dict[str, Any]
 
 
 def _score_values(spec: FunctionSpec) -> list[Any]:
@@ -25,6 +29,17 @@ def _score_values(spec: FunctionSpec) -> list[Any]:
 
 def _valid(spec: FunctionSpec, score: Any) -> bool:
     return score in _score_values(spec)
+
+
+def row_id(input_obj: dict) -> str:
+    """Stable id for a row, keyed on its (projected) input."""
+    canon = json.dumps(input_obj, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canon.encode()).hexdigest()[:12]
+
+
+def resolve_count(value: float | int, n_real: int) -> int:
+    """A split target: float < 1 is a fraction of real rows, int is absolute."""
+    return int(value) if isinstance(value, int) else round(n_real * value)
 
 
 def label_items(
@@ -55,8 +70,10 @@ def label_items(
                     continue
                 if 0 <= local_id < len(batch_ids) and _valid(spec, score):
                     gid = batch_ids[local_id]
+                    inp = {k: items[gid].get(k) for k in spec.input_schema}
                     rows[gid] = {
-                        "input": {k: items[gid].get(k) for k in spec.input_schema},
+                        "id": row_id(inp),
+                        "input": inp,
                         "score": score,
                         "reason": str(entry.get("reason", "")).strip(),
                         "origin": origin,
@@ -67,16 +84,23 @@ def label_items(
     return [rows[i] for i in sorted(rows)]
 
 
-def plan_variant_bands(spec: FunctionSpec, real: list[Row], target_total: int) -> dict[Any, int]:
+def plan_variant_bands(
+    spec: FunctionSpec,
+    real: list[Row],
+    target_total: int,
+    n_new: Optional[int] = None,
+) -> dict[Any, int]:
     """How many variants to request per score value: fill toward uniform
-    coverage so rare bands exist in training. (Holdout stays real-distribution;
-    variants are relabeled afterward, so these are targets, not labels.)"""
+    coverage so rare bands exist in training. `n_new` overrides the count
+    derived from target_total (used for balance-driven top-ups on an already
+    full dataset). Variants are relabeled afterward, so these are targets,
+    not labels."""
     values = _score_values(spec)
-    needed = max(0, target_total - len(real))
-    if needed == 0:
+    needed = n_new if n_new is not None else max(0, target_total - len(real))
+    if needed <= 0:
         return {}
     counts = {v: sum(1 for r in real if r["score"] == v) for v in values}
-    per_bin = target_total / len(values)
+    per_bin = (len(real) + needed) / len(values)
     deficits = {v: max(0.0, per_bin - counts[v]) for v in values}
     total_deficit = sum(deficits.values()) or 1.0
     plan = {v: round(needed * d / total_deficit) for v, d in deficits.items() if d > 0}
@@ -88,20 +112,36 @@ def generate_variants(
     spec: FunctionSpec,
     real: list[Row],
     target_total: int,
+    n_new: Optional[int] = None,
     per_call: int = 20,
     seed: int = 17,
-) -> list[dict]:
+    hist_rows: Optional[list[Row]] = None,
+) -> tuple[list[dict], list[list[str]]]:
+    """Generate band-targeted synthetic items from `real` example rows.
+
+    `real` must be TRAIN-split real rows only: the style examples shown to the
+    teacher leak into the variants, so dev/gate rows must never appear here.
+    `hist_rows` (default: `real`) is what band coverage is measured against —
+    pass all train rows so existing variants count toward their bands.
+    Returns (items, source_ids) — source_ids[i] lists the ids of the example
+    rows the teacher saw when writing items[i].
+    """
     rng = random.Random(seed)
     spec_text = spec.spec_files_text()
-    plan = plan_variant_bands(spec, real, target_total)
+    plan = plan_variant_bands(spec, hist_rows if hist_rows is not None else real,
+                              target_total, n_new=n_new)
     variants: list[dict] = []
+    sources: list[list[str]] = []
     for band, n in plan.items():
         remaining = n
         while remaining > 0:
             count = min(per_call, remaining)
-            examples = [r["input"] for r in rng.sample(real, min(3, len(real)))]
+            examples = rng.sample(real, min(3, len(real)))
+            example_ids = [r.get("id", row_id(r["input"])) for r in examples]
             reply = teacher.complete(
-                prompts.teacher_variant_prompt(spec, examples, str(band), count, spec_text)
+                prompts.teacher_variant_prompt(
+                    spec, [r["input"] for r in examples], str(band), count, spec_text
+                )
             )
             try:
                 new_items = prompts.extract_json(reply)
@@ -110,8 +150,9 @@ def generate_variants(
                 continue
             usable = [it for it in new_items if isinstance(it, dict)][:count]
             variants.extend(usable)
+            sources.extend([example_ids] * len(usable))
             remaining -= count
-    return variants
+    return variants, sources
 
 
 def split_holdout(rows: list[Row], frac: float, seed: int = 17) -> tuple[list[Row], list[Row]]:
@@ -132,48 +173,168 @@ def split_holdout(rows: list[Row], frac: float, seed: int = 17) -> tuple[list[Ro
     return train, holdout
 
 
-def build_dataset(
-    teacher: Teacher, spec: FunctionSpec, items: list[dict], out_dir: Path
-) -> dict[str, Any]:
-    """The full labeling pipeline. Writes labeled/train/holdout JSONL + meta."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    real = label_items(teacher, spec, items, origin="real")
-    if not real:
-        raise RuntimeError("labeling produced no usable rows")
+def _stratified_take(pool: list[Row], k: int, rng: random.Random) -> list[Row]:
+    """Take ~k rows from pool, stratified by score, exactly k when possible."""
+    if k <= 0 or not pool:
+        return []
+    k = min(k, len(pool))
+    by_score: dict[Any, list[Row]] = {}
+    for r in pool:
+        by_score.setdefault(r["score"], []).append(r)
+    taken: list[Row] = []
+    for group in by_score.values():
+        rng.shuffle(group)
+        taken.extend(group[: round(len(group) * k / len(pool))])
+    rng.shuffle(taken)
+    taken = taken[:k]
+    if len(taken) < k:  # rounding shortfall: top up from anywhere
+        taken_ids = {id(r) for r in taken}
+        rest = [r for r in pool if id(r) not in taken_ids]
+        rng.shuffle(rest)
+        taken.extend(rest[: k - len(taken)])
+    return taken
 
-    variants_raw = generate_variants(teacher, spec, real, spec.teacher.examples)
-    variant_rows = (
-        label_items(teacher, spec, variants_raw, origin="variant") if variants_raw else []
+
+def assign_splits(rows: list[Row], gate_target: int, dev_target: int, seed: int = 17) -> None:
+    """Assign a `split` (train/dev/gate) to every row that lacks one.
+
+    Sticky: a row that already has a split keeps it — the gate must never be
+    reshuffled once anything trained against the rest of the data. Only REAL
+    rows are eligible for gate/dev (and, because assignment happens before
+    variant generation, gate/dev rows never have variant siblings in train).
+    Variants always land in train.
+    """
+    rng = random.Random(seed)
+    for r in rows:
+        if r["origin"] != "real":
+            r["split"] = r.get("split") or "train"
+    reals = [r for r in rows if r["origin"] == "real"]
+    pool = [r for r in reals if not r.get("split")]
+    for split_name, target in (("gate", gate_target), ("dev", dev_target)):
+        have = sum(1 for r in reals if r.get("split") == split_name)
+        for r in _stratified_take(pool, target - have, rng):
+            r["split"] = split_name
+        pool = [r for r in pool if not r.get("split")]
+    for r in pool:
+        r["split"] = "train"
+
+
+def _migrate_legacy_splits(rows: list[Row], out_dir: Path) -> None:
+    """Give pre-v0.2 datasets ids and splits: holdout.jsonl members become the
+    (sticky) gate, everything else train. Dev gets carved from new rows later."""
+    for r in rows:
+        r.setdefault("id", row_id(r["input"]))
+    if all(r.get("split") for r in rows):
+        return
+    legacy_holdout = out_dir / "holdout.jsonl"
+    gate_ids = (
+        {row_id(r["input"]) for r in read_jsonl(legacy_holdout)}
+        if legacy_holdout.exists()
+        else set()
     )
+    for r in rows:
+        if not r.get("split"):
+            r["split"] = "gate" if r["id"] in gate_ids else "train"
 
-    rows = real + variant_rows
+
+def write_dataset(spec: FunctionSpec, rows: list[Row], out_dir: Path) -> dict[str, Any]:
+    """Write labeled/train/dev/gate JSONL + meta for already-split rows."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    by_split = {s: [r for r in rows if r["split"] == s] for s in ("train", "dev", "gate")}
+    _write_jsonl(out_dir / "labeled.jsonl", rows)
+    for split_name, split_rows in by_split.items():
+        _write_jsonl(out_dir / f"{split_name}.jsonl", split_rows)
+
+    hist = {str(v): sum(1 for r in rows if r["score"] == v) for v in _score_values(spec)}
+    meta = {
+        "function": spec.name,
+        "spec_hash": spec.spec_hash(),
+        "real": sum(1 for r in rows if r["origin"] == "real"),
+        "variants": sum(1 for r in rows if r["origin"] == "variant"),
+        "train": len(by_split["train"]),
+        "dev": len(by_split["dev"]),
+        "gate": len(by_split["gate"]),
+        "label_histogram": hist,
+        "teacher_model": spec.teacher.model,
+        "teacher_backend": spec.teacher.backend,
+        "prompt_version": prompts.PROMPT_VERSION,
+        "labeled_at": datetime.date.today().isoformat(),
+    }
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    return meta
+
+
+def build_dataset(
+    teacher: Teacher,
+    spec: FunctionSpec,
+    items: list[dict],
+    out_dir: Path,
+    append: bool = False,
+    max_variants: Optional[int] = None,
+) -> dict[str, Any]:
+    """The full labeling pipeline. Writes labeled/train/dev/gate JSONL + meta.
+
+    With `append`, existing rows (and their split assignments — the gate is
+    sticky) are kept; `items` already present are skipped. Splits are assigned
+    BEFORE variants are generated, and variants are generated from train-split
+    reals only, so gate/dev never contain or influence synthetic data.
+    `max_variants` caps this call's newly generated variants (balance-driven).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    existing: list[Row] = []
+    if append and (out_dir / "labeled.jsonl").exists():
+        existing = read_jsonl(out_dir / "labeled.jsonl")
+        _migrate_legacy_splits(existing, out_dir)
+
+    known = {r["id"] for r in existing}
+    new_items = []
+    for it in items:
+        proj = {k: it.get(k) for k in spec.input_schema}
+        rid = row_id(proj)
+        if rid not in known:
+            known.add(rid)  # also dedupes within `items` itself
+            new_items.append(it)
+
     stamp = {
         "teacher_model": spec.teacher.model,
         "teacher_backend": spec.teacher.backend,
         "prompt_version": prompts.PROMPT_VERSION,
         "labeled_at": datetime.date.today().isoformat(),
     }
-    for r in rows:
+    real_new = label_items(teacher, spec, new_items, origin="real") if new_items else []
+    for r in real_new:
+        r.update(stamp)
+    rows = existing + real_new
+    if not any(r["origin"] == "real" for r in rows):
+        raise RuntimeError("labeling produced no usable rows")
+
+    n_real = sum(1 for r in rows if r["origin"] == "real")
+    assign_splits(
+        rows,
+        gate_target=resolve_count(spec.teacher.holdout, n_real),
+        dev_target=resolve_count(spec.teacher.dev, n_real),
+        seed=spec.train.seed,
+    )
+
+    train_reals = [r for r in rows if r["origin"] == "real" and r["split"] == "train"]
+    train_rows = [r for r in rows if r["split"] == "train"]
+    variants_raw, sources = generate_variants(
+        teacher, spec, train_reals, spec.teacher.examples,
+        n_new=max_variants, seed=spec.train.seed, hist_rows=train_rows,
+    )
+    variant_rows = (
+        label_items(teacher, spec, variants_raw, origin="variant") if variants_raw else []
+    )
+    src_by_id = {
+        row_id({k: it.get(k) for k in spec.input_schema}): src
+        for it, src in zip(variants_raw, sources)
+    }
+    for r in variant_rows:
+        r["split"] = "train"
+        r["source_ids"] = src_by_id.get(r["id"], [])
         r.update(stamp)
 
-    train, holdout = split_holdout(rows, spec.teacher.holdout, seed=spec.train.seed)
-    _write_jsonl(out_dir / "labeled.jsonl", rows)
-    _write_jsonl(out_dir / "train.jsonl", train)
-    _write_jsonl(out_dir / "holdout.jsonl", holdout)
-
-    hist = {str(v): sum(1 for r in rows if r["score"] == v) for v in _score_values(spec)}
-    meta = {
-        "function": spec.name,
-        "spec_hash": spec.spec_hash(),
-        "real": len(real),
-        "variants": len(variant_rows),
-        "train": len(train),
-        "holdout": len(holdout),
-        "label_histogram": hist,
-        **stamp,
-    }
-    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
-    return meta
+    return write_dataset(spec, rows + variant_rows, out_dir)
 
 
 def _write_jsonl(path: Path, rows: list[Row]) -> None:

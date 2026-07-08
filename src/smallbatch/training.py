@@ -52,8 +52,88 @@ def load_base_model(base: str, precision: str):
     return tokenizer, model
 
 
-def train(spec: FunctionSpec, train_rows: list[Row], out_dir: Path) -> dict:
-    """Fine-tune a LoRA adapter; saves it to out_dir/adapter. Returns run info."""
+def _last_logged_loss(log_history: list[dict]) -> float | None:
+    for entry in reversed(log_history):
+        if "loss" in entry:
+            return round(entry["loss"], 4)
+    return None
+
+
+def _make_dev_callback(spec: FunctionSpec, tokenizer, dev_rows: list[Row], adapter_dir: Path):
+    """TrainerCallback: score the dev split each epoch (constrained decode,
+    task agreement), snapshot the adapter whenever it improves, and stop after
+    `patience` epochs without improvement. The saved adapter is always the
+    best-so-far, so early stopping never ships a worse-than-seen checkpoint."""
+    import torch
+    from transformers import TrainerCallback
+
+    from . import prompts
+    from .evaluate import compute_metrics, generate_batch
+
+    dev_texts = [prompts.student_prompt(spec, r["input"]) for r in dev_rows]
+    golds = [r["score"] for r in dev_rows]
+    allowed = prompts.allowed_completions(spec)
+    max_new = 80 if spec.train.rationale_distillation else 8
+
+    class DevEval(TrainerCallback):
+        def __init__(self):
+            self.curve: list[dict] = []
+            self.best: float | None = None
+            self.best_epoch: int | None = None
+            self.stale = 0
+            self.stopped_reason = "max_epochs"
+
+        def on_epoch_end(self, args, state, control, model=None, **kwargs):
+            epoch = int(round(state.epoch))
+            was_training = model.training
+            # generate_batch flips padding_side to left; the training collator
+            # needs it back or every later epoch trains on left-padded batches
+            pad_side = tokenizer.padding_side
+            model.eval()
+            with torch.no_grad():
+                raw = generate_batch(
+                    model, tokenizer, dev_texts, max_new,
+                    batch_size=spec.train.eval_batch_size,
+                    allowed_completions=allowed,
+                )
+            tokenizer.padding_side = pad_side
+            if was_training:
+                model.train()
+            preds = [prompts.parse_output(spec, t) for t in raw]
+            agreement = compute_metrics(spec, preds, golds)["agreement"]
+            self.curve.append({
+                "epoch": epoch,
+                "train_loss": _last_logged_loss(state.log_history),
+                "dev_agreement": agreement,
+            })
+            print(f"epoch {epoch}: dev_agreement={agreement:.4f}", flush=True)
+
+            if self.best is None or agreement > self.best + spec.train.min_delta:
+                self.best = agreement
+                self.best_epoch = epoch
+                self.stale = 0
+                model.save_pretrained(str(adapter_dir))
+            else:
+                self.stale += 1
+                if spec.train.patience is not None and self.stale >= spec.train.patience:
+                    self.stopped_reason = f"early_stop(patience={spec.train.patience})"
+                    control.should_training_stop = True
+            return control
+
+    return DevEval()
+
+
+def train(
+    spec: FunctionSpec,
+    train_rows: list[Row],
+    out_dir: Path,
+    dev_rows: list[Row] | None = None,
+) -> dict:
+    """Fine-tune a LoRA adapter; saves it to out_dir/adapter. Returns run info.
+
+    With `dev_rows`, the adapter written is the best-dev-agreement epoch (with
+    early stopping per spec.train.patience), not necessarily the final one.
+    """
     from datasets import Dataset
     from peft import LoraConfig, prepare_model_for_kbit_training
     from trl import SFTConfig, SFTTrainer
@@ -94,7 +174,7 @@ def train(spec: FunctionSpec, train_rows: list[Row], out_dir: Path) -> dict:
     )
     cfg = SFTConfig(
         output_dir=str(out_dir / "trainer"),
-        num_train_epochs=spec.train.epochs,
+        num_train_epochs=spec.train.max_epochs,
         learning_rate=spec.train.learning_rate,
         per_device_train_batch_size=spec.train.batch_size,
         max_length=spec.train.max_seq_len,
@@ -110,17 +190,28 @@ def train(spec: FunctionSpec, train_rows: list[Row], out_dir: Path) -> dict:
         router_aux_loss_coef=0.0,
         **({"loss_type": spec.train.loss_type} if spec.train.loss_type else {}),
     )
+    adapter_dir = out_dir / "adapter"
+    dev_cb = _make_dev_callback(spec, tokenizer, dev_rows, adapter_dir) if dev_rows else None
     trainer = SFTTrainer(
-        model=model, args=cfg, train_dataset=ds, processing_class=tokenizer, peft_config=lora
+        model=model, args=cfg, train_dataset=ds, processing_class=tokenizer,
+        peft_config=lora, callbacks=[dev_cb] if dev_cb else None,
     )
     result = trainer.train()
 
-    adapter_dir = out_dir / "adapter"
-    trainer.model.save_pretrained(str(adapter_dir))
+    if dev_cb is None or dev_cb.best_epoch is None:
+        # no dev split (or it never scored): fall back to the final adapter
+        trainer.model.save_pretrained(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
+    epochs_run = int(round(trainer.state.epoch or spec.train.max_epochs))
     return {
         "precision": precision,
         "train_rows": len(train_rows),
         "train_loss": round(result.training_loss, 4),
         "adapter_dir": str(adapter_dir),
+        "curve": dev_cb.curve if dev_cb else [],
+        "best_epoch": dev_cb.best_epoch if dev_cb else None,
+        "best_dev_agreement": dev_cb.best if dev_cb else None,
+        "epochs_run": epochs_run,
+        "stopped_reason": dev_cb.stopped_reason if dev_cb else "max_epochs",
+        "dev_rows": len(dev_rows or []),
     }

@@ -68,7 +68,7 @@ labels. It does exactly one job — given the input fields below, it emits
 - **Input fields:** {", ".join(f"`{k}`" for k in spec.input_schema)}
 - **Teacher:** {data.get("teacher_model", "n/a")} ({data.get("teacher_backend", "n/a")})
 - **Data:** {provenance}
-- **Gate:** {"PASS" if gate["passed"] else "FAIL"} — agreement is {agreement_kind}, bar {spec.gate.agreement_pm1:.0%}{"" if gate["passed"] else "; reasons: " + "; ".join(gate["reasons"])}
+- **Gate:** {"PASS" if gate["passed"] else "FAIL"} — agreement is {agreement_kind}, bar {spec.gate.threshold:.0%}{"" if gate["passed"] else "; reasons: " + "; ".join(gate["reasons"])}
 
 | model | agreement | invalid rate |
 |---|---|---|

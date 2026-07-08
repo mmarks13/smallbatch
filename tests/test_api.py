@@ -44,9 +44,10 @@ def test_label_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr("smallbatch.teacher.make_teacher", lambda cfg: FakeTeacher())
     items = [{"title": f"t{i}"} for i in range(10)]
     result = api.label(SPEC, items, out_dir=tmp_path / "data")
-    assert (tmp_path / "data" / "train.jsonl").exists()
-    assert (tmp_path / "data" / "holdout.jsonl").exists()
+    for split in ("train", "dev", "gate"):
+        assert (tmp_path / "data" / f"{split}.jsonl").exists()
     assert result.meta["real"] == 10
+    assert result.meta["gate"] == 2  # holdout: 0.2 of 10 reals
     assert result.compressed  # all labels in one bin by construction
 
 

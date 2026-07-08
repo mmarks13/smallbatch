@@ -164,7 +164,11 @@ def _cell(r: dict) -> str:
     status = r["status"]
     if status in ("pass", "fail"):
         agr = r.get("agreement")
-        return f"{agr:.2f} {status.upper()}" if agr is not None else status.upper()
+        if agr is None:
+            return status.upper()
+        ci = r.get("agreement_ci")
+        half = f"±{(ci[1] - ci[0]) / 2:.2f}" if ci else ""
+        return f"{agr:.2f}{half} {status.upper()}"
     return status.upper()
 
 
@@ -245,7 +249,11 @@ def run_sweep(
                 run_dir = artifacts_root / function / sweep.name / plan.tag
                 manifest = artifacts.read_manifest(run_dir)
                 rec["status"] = "pass" if proc.returncode == 0 else "fail"
-                rec["agreement"] = manifest["metrics"]["adapter"]["agreement"]
+                adapter = manifest["metrics"]["adapter"]
+                rec["agreement"] = adapter["agreement"]
+                rec["agreement_ci"] = adapter.get("agreement_ci")
+                rec["best_epoch"] = manifest.get("best_epoch")
+                rec["epochs_run"] = manifest.get("epochs_run")
                 rec["zeroshot"] = (manifest["metrics"].get("zeroshot") or {}).get(
                     "agreement"
                 )

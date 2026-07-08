@@ -30,7 +30,10 @@ def cmd_label(args) -> int:
 
     spec = load_spec(args.spec)
     items = _load_items(Path(args.items))
-    result = label(spec, items, out_dir=args.out)
+    result = label(
+        spec, items, out_dir=args.out,
+        append=args.append, max_variants=args.max_variants,
+    )
     print(json.dumps(result.meta, indent=2))
     if result.compressed:
         hist = result.meta["label_histogram"]
@@ -60,6 +63,19 @@ def cmd_compile(args) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
+    # report first: the metrics are the result; the verdict is one line
+    h = (result.report or {}).get("headline", {})
+    ci = h.get("agreement_ci")
+    ci_txt = f" (95% CI {ci[0]:.0%}-{ci[1]:.0%})" if ci else ""
+    print(f"agreement {h.get('agreement', 0):.1%}{ci_txt} on {h.get('n', 0)} gate items")
+    tr = (result.report or {}).get("training", {})
+    if tr.get("best_epoch") is not None:
+        print(
+            f"best epoch {tr['best_epoch']}/{tr.get('epochs_run')} "
+            f"({tr.get('stopped_reason')})"
+        )
+    if result.report_path:
+        print(f"report: {result.report_path}")
     print(json.dumps({"metrics": result.metrics, "gate": result.gate}, indent=2))
     print(f"{'PASS' if result.passed else 'FAIL'}: {result.version_dir}")
     return 0 if result.passed else 2
@@ -163,6 +179,14 @@ def main(argv: list[str] | None = None) -> int:
     lp.add_argument("spec")
     lp.add_argument("--items", required=True, help="JSON/JSONL file of real input items")
     lp.add_argument("--out", help="output dir (default data/<name>)")
+    lp.add_argument(
+        "--append", action="store_true",
+        help="keep existing rows + split assignments (sticky gate); only label unseen items",
+    )
+    lp.add_argument(
+        "--max-variants", type=int,
+        help="cap newly generated synthetic variants (balance-driven top-up)",
+    )
     lp.set_defaults(fn=cmd_label)
 
     cp = sub.add_parser("compile", help="train + evaluate + gate an adapter")

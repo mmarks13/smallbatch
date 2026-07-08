@@ -62,3 +62,40 @@ def test_hash_tracks_spec_files(tmp_path):
 def test_extra_keys_rejected(tmp_path):
     with pytest.raises(ValueError):
         load_spec(write_spec(tmp_path, MINIMAL + "surprise: true\n"))
+
+
+def test_early_stopping_defaults(tmp_path):
+    spec = load_spec(write_spec(tmp_path))
+    assert spec.train.max_epochs == 12
+    assert spec.train.patience == 2
+    assert spec.teacher.dev == 0.1
+
+
+def test_epochs_is_alias_for_max_epochs(tmp_path):
+    spec = load_spec(write_spec(tmp_path, MINIMAL + "train: {epochs: 4}\n"))
+    assert spec.train.max_epochs == 4
+
+
+def test_split_counts_accept_ints(tmp_path):
+    body = MINIMAL.replace(
+        "teacher: {backend: claude-cli, model: sonnet}",
+        "teacher: {backend: claude-cli, model: sonnet, holdout: 60, dev: 40}",
+    )
+    spec = load_spec(write_spec(tmp_path, body))
+    assert spec.teacher.holdout == 60 and spec.teacher.dev == 40
+
+
+def test_split_fraction_validated(tmp_path):
+    body = MINIMAL.replace(
+        "teacher: {backend: claude-cli, model: sonnet}",
+        "teacher: {backend: claude-cli, model: sonnet, dev: 1.5}",
+    )
+    with pytest.raises(ValueError):
+        load_spec(write_spec(tmp_path, body))
+
+
+def test_gate_agreement_alias(tmp_path):
+    spec = load_spec(write_spec(tmp_path))
+    assert spec.gate.threshold == 0.85  # legacy agreement_pm1 default
+    spec = load_spec(write_spec(tmp_path, MINIMAL + "gate: {agreement: 0.7}\n"))
+    assert spec.gate.threshold == 0.7  # preferred name wins

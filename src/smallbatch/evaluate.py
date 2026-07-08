@@ -110,6 +110,18 @@ def score_holdout(
     return metrics
 
 
+def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
+    """Wilson score interval for a proportion k/n — honest about small n,
+    where the gate verdict is otherwise statistical theater."""
+    if n == 0:
+        return None
+    p = k / n
+    denom = 1 + z**2 / n
+    center = (p + z**2 / (2 * n)) / denom
+    half = (z / denom) * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5)
+    return (round(max(0.0, center - half), 4), round(min(1.0, center + half), 4))
+
+
 def pearson_r(xs: list[float], ys: list[float]) -> float | None:
     n = len(xs)
     if n < 2:
@@ -130,12 +142,16 @@ def compute_metrics(spec: FunctionSpec, preds: list, golds: list) -> dict[str, A
     metrics: dict[str, Any] = {"n": n}
     if spec.output.type == "int":
         within1 = sum(1 for p, g in zip(preds, golds) if p is not None and abs(p - g) <= 1)
+        agree_k = within1
         metrics["agreement"] = round(within1 / n, 4) if n else 0.0  # gate metric: ±1
         valid = [(p, g) for p, g in zip(preds, golds) if p is not None]
         r = pearson_r([p for p, _ in valid], [g for _, g in valid])
         metrics["pearson_r"] = round(r, 4) if r is not None else None
     else:
+        agree_k = exact
         metrics["agreement"] = round(exact / n, 4) if n else 0.0  # gate metric: exact
+    ci = wilson_ci(agree_k, n)
+    metrics["agreement_ci"] = list(ci) if ci else None
     metrics["exact"] = round(exact / n, 4) if n else 0.0
     metrics["invalid_rate"] = round(invalid / n, 4) if n else 0.0
     return metrics
@@ -143,9 +159,9 @@ def compute_metrics(spec: FunctionSpec, preds: list, golds: list) -> dict[str, A
 
 def run_gate(spec: FunctionSpec, adapter: dict, zeroshot: dict | None) -> dict[str, Any]:
     reasons = []
-    if adapter["agreement"] < spec.gate.agreement_pm1:
+    if adapter["agreement"] < spec.gate.threshold:
         reasons.append(
-            f"agreement {adapter['agreement']:.2%} < required {spec.gate.agreement_pm1:.0%}"
+            f"agreement {adapter['agreement']:.2%} < required {spec.gate.threshold:.0%}"
         )
     if spec.gate.must_beat_zeroshot and zeroshot is not None:
         if adapter["agreement"] <= zeroshot["agreement"]:

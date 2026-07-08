@@ -31,18 +31,37 @@ class TeacherSpec(BaseModel):
     backend: Literal["claude-cli", "openai-compatible"]
     model: str
     examples: int = 600
-    holdout: float = 0.15
+    # gate/dev split sizes: a float < 1 is a fraction of the real rows, an
+    # int is an absolute row count
+    holdout: float | int = 0.15
+    dev: float | int = 0.1
     batch_size: int = 40
     # openai-compatible only:
     base_url: Optional[str] = None
     api_key_env: str = "OPENAI_API_KEY"
 
+    @model_validator(mode="after")
+    def _check_splits(self) -> "TeacherSpec":
+        for name in ("holdout", "dev"):
+            v = getattr(self, name)
+            if isinstance(v, float) and not 0 <= v < 1:
+                raise ValueError(f"teacher.{name} fraction must be in [0, 1)")
+            if isinstance(v, int) and v < 0:
+                raise ValueError(f"teacher.{name} count must be >= 0")
+        return self
+
 
 class GateSpec(BaseModel):
-    # for int outputs: fraction of holdout within +/-1 of teacher label;
-    # for enum outputs: exact-match fraction
+    # for int outputs: fraction of the gate split within +/-1 of the teacher
+    # label; for enum outputs: exact-match fraction. `agreement` is the
+    # preferred name; `agreement_pm1` is kept as the legacy alias.
+    agreement: Optional[float] = None
     agreement_pm1: float = 0.85
     must_beat_zeroshot: bool = True
+
+    @property
+    def threshold(self) -> float:
+        return self.agreement if self.agreement is not None else self.agreement_pm1
 
 
 class TrainSpec(BaseModel):
@@ -56,7 +75,13 @@ class TrainSpec(BaseModel):
     lora_dropout: float = 0.05
     use_dora: bool = False
     rationale_distillation: bool = False
-    epochs: int = 4
+    # training runs to max_epochs unless dev agreement stops improving for
+    # `patience` epochs (patience: null disables early stopping). `epochs` is
+    # the legacy alias for max_epochs.
+    max_epochs: int = 12
+    epochs: Optional[int] = None
+    patience: Optional[int] = 2
+    min_delta: float = 0.0
     learning_rate: float = 2e-4
     batch_size: int = 8
     eval_batch_size: int = 16
@@ -70,6 +95,12 @@ class TrainSpec(BaseModel):
     # reject unknown keys so a typo'd sweep override (e.g. bathc_size) fails
     # loudly at spec-load time instead of being silently ignored
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def _epochs_alias(self) -> "TrainSpec":
+        if self.epochs is not None and "max_epochs" not in self.model_fields_set:
+            self.max_epochs = self.epochs
+        return self
 
     @property
     def alpha(self) -> int:

@@ -147,6 +147,15 @@ def test_render_table():
     assert "0.90 PASS" in t and "0.70 FAIL" in t and "| Big-4B |" in t
 
 
+def test_render_table_shows_ci_half_width():
+    results = [
+        {"model": "org/Big-4B", "arm": "plain", "status": "pass",
+         "agreement": 0.86, "agreement_ci": [0.76, 0.94]},
+    ]
+    t = render_table(results, ["org/Big-4B"], ["plain"])
+    assert "0.86±0.09 PASS" in t
+
+
 # --- orchestration ----------------------------------------------------------
 
 def test_happy_path(tmp_path, capsys):

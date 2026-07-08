@@ -47,6 +47,8 @@ class CompileResult:
     metrics: dict  # {"adapter": {...}, "zeroshot": {...} | None}
     version_dir: Path
     manifest: dict
+    report: dict | None = None  # full eval report (also report.json on disk)
+    report_path: Path | None = None
 
 
 def _as_spec(spec: FunctionSpec | str | Path) -> FunctionSpec:
@@ -57,15 +59,22 @@ def label(
     spec: FunctionSpec | str | Path,
     items: list[dict],
     out_dir: str | Path | None = None,
+    append: bool = False,
+    max_variants: int | None = None,
 ) -> LabelResult:
-    """Teacher-label `items` into a train/holdout dataset for `spec`."""
+    """Teacher-label `items` into a train/dev/gate dataset for `spec`.
+
+    `append` keeps an existing dataset's rows and split assignments (the gate
+    is sticky) and only labels unseen items; `max_variants` caps how many new
+    balance-driven synthetic variants this call generates.
+    """
     from .labeling import build_dataset
     from .teacher import make_teacher
 
     spec = _as_spec(spec)
     out = Path(out_dir or f"data/{spec.name}")
     teacher = make_teacher(spec.teacher)
-    meta = build_dataset(teacher, spec, items, out)
+    meta = build_dataset(teacher, spec, items, out, append=append, max_variants=max_variants)
     return LabelResult(out_dir=out, meta=meta)
 
 
@@ -96,9 +105,30 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
 
     data = Path(data_dir or f"data/{spec.name}")
     train_rows = read_jsonl(data / "train.jsonl")
-    holdout = read_jsonl(data / "holdout.jsonl")
-    if not holdout:
-        raise ValueError(f"empty holdout in {data} — run `smallbatch label` first")
+    gate_path = data / "gate.jsonl"
+    if not gate_path.exists():  # pre-v0.2 dataset layout
+        gate_path = data / "holdout.jsonl"
+    gate_rows = read_jsonl(gate_path) if gate_path.exists() else []
+    if not gate_rows:
+        raise ValueError(f"empty gate split in {data} — run `smallbatch label` first")
+
+    dev_path = data / "dev.jsonl"
+    if dev_path.exists():
+        dev_rows = read_jsonl(dev_path)
+    else:
+        # legacy dataset without a dev split: carve one from the train reals
+        # deterministically so checkpoint selection still works. Relabeling
+        # with `smallbatch label --append` gives a proper, persistent split.
+        from .labeling import resolve_count, split_holdout
+
+        n_real = sum(1 for r in train_rows if r.get("origin") == "real")
+        frac = resolve_count(spec.teacher.dev, n_real) / n_real if n_real else 0
+        train_rows, dev_rows = split_holdout(train_rows, frac, seed=spec.train.seed)
+        print(
+            f"warning: no dev.jsonl in {data} — carved {len(dev_rows)} dev rows "
+            "out of train for checkpoint selection (re-run `smallbatch label "
+            "--append` to persist a proper split)"
+        )
 
     root = Path(artifacts_root)
     if sweep_name and tag:
@@ -107,7 +137,7 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         version_dir = artifacts.new_version_dir(root, spec.name)
     print(f"compiling {spec.name} -> {version_dir}")
 
-    info = train(spec, train_rows, version_dir)
+    info = train(spec, train_rows, version_dir, dev_rows=dev_rows)
     shutil.rmtree(version_dir / "trainer", ignore_errors=True)
 
     # HF Trainer holds the training model in reference cycles; collect them
@@ -136,13 +166,13 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
     zeroshot = None
     if spec.gate.must_beat_zeroshot:
         zeroshot = score_holdout(
-            spec, base_model, tokenizer, holdout,
+            spec, base_model, tokenizer, gate_rows,
             lambda it: prompts.zeroshot_prompt(spec, it, spec_text), max_new_tokens=16,
         )
     student = PeftModel.from_pretrained(base_model, info["adapter_dir"])
     student.eval()
     adapter_metrics = score_holdout(
-        spec, student, tokenizer, holdout,
+        spec, student, tokenizer, gate_rows,
         lambda it: prompts.student_prompt(spec, it), max_new_tokens=max_new,
     )
 
@@ -172,9 +202,17 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         "metrics": {"adapter": adapter_metrics, "zeroshot": zeroshot},
         "gate": gate,
         "train_loss": info["train_loss"],
+        "epochs_run": info.get("epochs_run"),
+        "best_epoch": info.get("best_epoch"),
+        "stopped_reason": info.get("stopped_reason"),
         "smallbatch_version": __version__,
     }
     artifacts.write_manifest(version_dir, manifest)
+
+    from .report import build_report, write_report
+
+    report = build_report(spec, gate_rows, adapter_metrics, zeroshot, gate, info)
+    report_path = write_report(version_dir, report)
 
     return CompileResult(
         passed=gate["passed"],
@@ -182,4 +220,6 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         metrics=manifest["metrics"],
         version_dir=version_dir,
         manifest=manifest,
+        report=report,
+        report_path=report_path,
     )

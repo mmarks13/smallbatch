@@ -73,8 +73,55 @@ def test_build_dataset_end_to_end(tmp_path):
     meta = build_dataset(teacher, SPEC, items, tmp_path)
     assert meta["real"] == 10
     assert meta["variants"] > 0
-    assert (tmp_path / "train.jsonl").exists() and (tmp_path / "holdout.jsonl").exists()
+    for split in ("train", "dev", "gate"):
+        assert (tmp_path / f"{split}.jsonl").exists()
     labeled = (tmp_path / "labeled.jsonl").read_text().splitlines()
     assert len(labeled) == meta["real"] + meta["variants"]
     first = json.loads(labeled[0])
     assert first["teacher_model"] and first["origin"] == "real"
+    assert first["id"] and first["split"] in ("train", "dev", "gate")
+    # variants are train-only and carry the ids of the reals that seeded them
+    rows = [json.loads(l) for l in labeled]
+    real_ids = {r["id"] for r in rows if r["origin"] == "real"}
+    train_real_ids = {r["id"] for r in rows if r["origin"] == "real" and r["split"] == "train"}
+    for v in (r for r in rows if r["origin"] == "variant"):
+        assert v["split"] == "train"
+        assert v["source_ids"] and set(v["source_ids"]) <= train_real_ids, (
+            "variant seeded from a non-train real"
+        )
+    assert real_ids  # sanity
+
+
+def test_append_keeps_gate_sticky_and_dedupes(tmp_path):
+    teacher = FakeTeacher()
+    items = [{"title": f"real{i}"} for i in range(10)]
+    build_dataset(teacher, SPEC, items, tmp_path)
+    gate_before = {
+        json.loads(l)["id"] for l in (tmp_path / "gate.jsonl").read_text().splitlines()
+    }
+
+    more = items[:5] + [{"title": f"new{i}"} for i in range(20)]  # 5 dupes + 20 new
+    meta = build_dataset(teacher, SPEC, more, tmp_path, append=True, max_variants=0)
+    assert meta["real"] == 30  # dupes skipped, not relabeled
+    gate_after = {
+        json.loads(l)["id"] for l in (tmp_path / "gate.jsonl").read_text().splitlines()
+    }
+    assert gate_before <= gate_after  # sticky: nothing ever leaves the gate
+    assert len(gate_after) == 6  # 0.2 of 30 reals
+
+
+def test_legacy_dataset_migrates_holdout_to_gate(tmp_path):
+    # simulate a pre-v0.2 layout: labeled/train/holdout, no ids or splits
+    real = rows([0, 1, 2, 3, 4] * 4)
+    holdout = real[:4]
+    for path, rs in (("labeled.jsonl", real), ("holdout.jsonl", holdout)):
+        (tmp_path / path).write_text("\n".join(json.dumps(r) for r in rs))
+
+    meta = build_dataset(
+        FakeTeacher(), SPEC, [{"title": "brand-new"}], tmp_path,
+        append=True, max_variants=0,
+    )
+    gate = [json.loads(l) for l in (tmp_path / "gate.jsonl").read_text().splitlines()]
+    old_titles = {r["input"]["title"] for r in holdout}
+    assert old_titles <= {r["input"]["title"] for r in gate}
+    assert meta["real"] == 21

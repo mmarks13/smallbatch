@@ -1,4 +1,4 @@
-from smallbatch.evaluate import compute_metrics, pearson_r
+from smallbatch.evaluate import compute_metrics, pearson_r, wilson_ci
 from smallbatch.spec import FunctionSpec
 
 SPEC = FunctionSpec(
@@ -41,3 +41,18 @@ def test_enum_metrics_have_no_pearson():
     )
     m = compute_metrics(enum_spec, ["a", "b"], ["a", "a"])
     assert m["agreement"] == 0.5 and "pearson_r" not in m
+
+
+def test_wilson_ci_bounds_and_width():
+    assert wilson_ci(0, 0) is None
+    lo, hi = wilson_ci(19, 22)  # sweep-3 scale: 86% on 22 items
+    assert 0 <= lo < 0.86 < hi <= 1
+    assert hi - lo > 0.2  # n=22 really is that noisy
+    lo60, hi60 = wilson_ci(52, 60)
+    assert hi60 - lo60 < hi - lo  # bigger gate, tighter interval
+
+
+def test_metrics_carry_agreement_ci():
+    m = compute_metrics(SPEC, [5, 5, 5, 5], [5, 5, 5, 0])
+    lo, hi = m["agreement_ci"]
+    assert lo < m["agreement"] < hi
