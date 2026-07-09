@@ -166,6 +166,17 @@ def cmd_doctor(args) -> int:
     )
 
 
+def cmd_review(args) -> int:
+    from .review import run_review
+
+    spec = load_spec(args.spec)
+    data = Path(args.data or f"data/{spec.name}")
+    if not (data / "labeled.jsonl").exists():
+        print(f"error: no labeled dataset under {data}", file=sys.stderr)
+        return 1
+    return run_review(spec, data, args)
+
+
 def cmd_status(args) -> int:
     root = Path(args.artifacts)
     if not root.is_dir():
@@ -272,6 +283,21 @@ def main(argv: list[str] | None = None) -> int:
         help="skip the single live teacher call (reachability/parse check)",
     )
     dp.set_defaults(fn=cmd_doctor)
+
+    vp = sub.add_parser(
+        "review", help="step through teacher labels: accept/reject/edit before training"
+    )
+    vp.add_argument("spec")
+    vp.add_argument("--data", help="labeled data dir (default data/<name>)")
+    vp.add_argument("--split", choices=["train", "dev", "gate"])
+    vp.add_argument("--origin", choices=["real", "variant"])
+    vp.add_argument("--label", help="filter by (primary) label/score value")
+    vp.add_argument("--field", help="structured outputs: filter by field, e.g. reason or reason=outage")
+    vp.add_argument(
+        "--status", default="unreviewed",
+        choices=["unreviewed", "accepted", "rejected", "edited", "all"],
+    )
+    vp.set_defaults(fn=cmd_review)
 
     sp = sub.add_parser("status", help="list compiled functions and staleness")
     sp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
