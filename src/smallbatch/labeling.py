@@ -20,15 +20,51 @@ from .teacher import Teacher
 Row = dict[str, Any]
 
 
+def _primary_field(spec: FunctionSpec):
+    """The first declared output field: what histograms, stratified splits,
+    and variant band-targeting key on for multi-field contracts."""
+    return next(iter(spec.output.fields.values()))
+
+
 def _score_values(spec: FunctionSpec) -> list[Any]:
-    if spec.output.type == "int":
-        lo, hi = spec.output.range
-        return list(range(lo, hi + 1))
-    return list(spec.output.labels)
+    return _primary_field(spec).values()
 
 
-def _valid(spec: FunctionSpec, score: Any) -> bool:
-    return score in _score_values(spec)
+def row_output(spec: FunctionSpec, row: Row) -> Any:
+    """A row's labeled output: bare value (scalar) or {field: value} dict."""
+    return row["score"] if spec.output.is_scalar else row["output"]
+
+
+def primary_value(spec: FunctionSpec, row: Row) -> Any:
+    out = row_output(spec, row)
+    return out[next(iter(spec.output.fields))] if isinstance(out, dict) else out
+
+
+def _coerce_valid(spec: FunctionSpec, raw: Any) -> Any:
+    """Coerce + validate a teacher label against the contract.
+    Returns the normalized output, or None if invalid/incomplete."""
+    if spec.output.is_scalar:
+        field = spec.output.scalar
+        if field.type == "int":
+            try:
+                raw = int(raw)
+            except (TypeError, ValueError):
+                return None
+        return raw if raw in field.values() else None
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for name, field in spec.output.fields.items():
+        v = raw.get(name)
+        if field.type == "int":
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                return None
+        if v not in field.values():
+            return None
+        out[name] = v
+    return out
 
 
 def row_id(input_obj: dict) -> str:
@@ -63,18 +99,17 @@ def label_items(
             for entry in labels:
                 try:
                     local_id = int(entry["id"])
-                    score = entry["score"]
-                    if spec.output.type == "int":
-                        score = int(score)
                 except (KeyError, TypeError, ValueError):
                     continue
-                if 0 <= local_id < len(batch_ids) and _valid(spec, score):
+                raw = entry.get("score") if spec.output.is_scalar else entry.get("output")
+                out = _coerce_valid(spec, raw)
+                if 0 <= local_id < len(batch_ids) and out is not None:
                     gid = batch_ids[local_id]
                     inp = {k: items[gid].get(k) for k in spec.input_schema}
                     rows[gid] = {
                         "id": row_id(inp),
                         "input": inp,
-                        "score": score,
+                        "score" if spec.output.is_scalar else "output": out,
                         "reason": str(entry.get("reason", "")).strip(),
                         "origin": origin,
                     }
@@ -99,7 +134,7 @@ def plan_variant_bands(
     needed = n_new if n_new is not None else max(0, target_total - len(real))
     if needed <= 0:
         return {}
-    counts = {v: sum(1 for r in real if r["score"] == v) for v in values}
+    counts = {v: sum(1 for r in real if primary_value(spec, r) == v) for v in values}
     per_bin = (len(real) + needed) / len(values)
     deficits = {v: max(0.0, per_bin - counts[v]) for v in values}
     total_deficit = sum(deficits.values()) or 1.0
@@ -155,6 +190,13 @@ def generate_variants(
     return variants, sources
 
 
+def _score_key(r: Row) -> Any:
+    # stratification key: the bare score, or the first field of a multi-field
+    # output (callers with a spec in hand pass key=primary_value instead)
+    out = r.get("score", r.get("output"))
+    return next(iter(out.values())) if isinstance(out, dict) else out
+
+
 def split_holdout(rows: list[Row], frac: float, seed: int = 17) -> tuple[list[Row], list[Row]]:
     """Stratified holdout drawn from REAL rows only, so the gate is judged on
     the true input distribution, never on synthetic variants."""
@@ -162,7 +204,7 @@ def split_holdout(rows: list[Row], frac: float, seed: int = 17) -> tuple[list[Ro
     real = [r for r in rows if r["origin"] == "real"]
     by_score: dict[Any, list[Row]] = {}
     for r in real:
-        by_score.setdefault(r["score"], []).append(r)
+        by_score.setdefault(_score_key(r), []).append(r)
     holdout: list[Row] = []
     for group in by_score.values():
         rng.shuffle(group)
@@ -180,7 +222,7 @@ def _stratified_take(pool: list[Row], k: int, rng: random.Random) -> list[Row]:
     k = min(k, len(pool))
     by_score: dict[Any, list[Row]] = {}
     for r in pool:
-        by_score.setdefault(r["score"], []).append(r)
+        by_score.setdefault(_score_key(r), []).append(r)
     taken: list[Row] = []
     for group in by_score.values():
         rng.shuffle(group)
@@ -245,7 +287,10 @@ def write_dataset(spec: FunctionSpec, rows: list[Row], out_dir: Path) -> dict[st
     for split_name, split_rows in by_split.items():
         _write_jsonl(out_dir / f"{split_name}.jsonl", split_rows)
 
-    hist = {str(v): sum(1 for r in rows if r["score"] == v) for v in _score_values(spec)}
+    hist = {
+        str(v): sum(1 for r in rows if primary_value(spec, r) == v)
+        for v in _score_values(spec)
+    }
     meta = {
         "function": spec.name,
         "spec_hash": spec.spec_hash(),

@@ -16,7 +16,7 @@ class CompiledFunction:
         self.model = model
         self.tokenizer = tokenizer
         self.manifest = manifest
-        self._max_new = 80 if spec.train.rationale_distillation else 8
+        self._max_new = prompts.completion_budget(spec)
 
     def __call__(self, item: dict[str, Any]) -> Any:
         return self.batch([item])[0]

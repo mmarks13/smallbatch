@@ -40,30 +40,51 @@ def _gbnf_str(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def gbnf_grammar(spec: FunctionSpec) -> str:
-    """A GBNF grammar accepting exactly the completions the student was
-    trained to emit (see prompts.student_completion): a leading space, then
-    either the bare value or `reason: <one line>\\nscore: <value>`."""
-    if spec.output.type == "int":
-        lo, hi = spec.output.range
+def _gbnf_values(field) -> str:
+    """Alternation of a field's exact legal values."""
+    if field.type == "int":
+        lo, hi = field.range
         if hi - lo + 1 > _MAX_INT_RANGE:
             raise ValueError(
                 f"output range {lo}..{hi} too large to enumerate in a grammar"
             )
-        value = " | ".join(_gbnf_str(str(v)) for v in range(lo, hi + 1))
-    else:
-        value = " | ".join(_gbnf_str(lb) for lb in spec.output.labels)
+    return " | ".join(_gbnf_str(str(v)) for v in field.values())
+
+
+def gbnf_grammar(spec: FunctionSpec) -> str:
+    """A GBNF grammar accepting exactly the completions the student was
+    trained to emit (see prompts.student_completion): a leading space, then
+    the bare value (scalar), fixed-order `name: value` lines (multi-field),
+    with the free-text rationale line prefixed in rationale mode."""
+    if spec.output.is_scalar:
+        value = _gbnf_values(spec.output.scalar)
+        if spec.train.rationale_distillation:
+            return (
+                f'root ::= " "? "reason: " reason "\\nscore: " value\n'
+                f"reason ::= [^\\n]+\n"
+                f"value ::= {value}\n"
+            )
+        return f'root ::= " "? value\nvalue ::= {value}\n'
+
+    names = list(spec.output.fields)
+    seq = ' "\\n" '.join(f'"{name}: " f{i}' for i, name in enumerate(names))
+    rules = "".join(
+        f"f{i} ::= {_gbnf_values(field)}\n"
+        for i, field in enumerate(spec.output.fields.values())
+    )
     if spec.train.rationale_distillation:
         return (
-            f'root ::= " "? "reason: " reason "\\nscore: " value\n'
-            f"reason ::= [^\\n]+\n"
-            f"value ::= {value}\n"
+            f'root ::= " "? "rationale: " rationale "\\n" {seq}\n'
+            f"rationale ::= [^\\n]+\n{rules}"
         )
-    return f'root ::= " "? value\nvalue ::= {value}\n'
+    return f'root ::= " "? {seq}\n{rules}'
 
 
 def modelfile(spec: FunctionSpec, gguf_name: str) -> str:
-    max_new = 96 if spec.train.rationale_distillation else 16
+    from .prompts import completion_budget
+
+    # headroom over the trained format (more in rationale mode: free text)
+    max_new = completion_budget(spec) + (16 if spec.train.rationale_distillation else 8)
     return (
         f"# Ollama Modelfile for the compiled function '{spec.name}'\n"
         f"#   ollama create {spec.name} -f Modelfile\n"

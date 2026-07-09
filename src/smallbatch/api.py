@@ -160,14 +160,15 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
     # 4-bit base, and reloading in fp32 needs 4x the VRAM (36GB for a 9B)
     inference_precision = info["precision"]
     tokenizer, base_model = load_base_model(spec.train.base, inference_precision)
-    max_new = 80 if spec.train.rationale_distillation else 8
+    max_new = prompts.completion_budget(spec)
 
     spec_text = spec.spec_files_text()
     zeroshot = None
     if spec.gate.must_beat_zeroshot:
         zeroshot = score_holdout(
             spec, base_model, tokenizer, gate_rows,
-            lambda it: prompts.zeroshot_prompt(spec, it, spec_text), max_new_tokens=16,
+            lambda it: prompts.zeroshot_prompt(spec, it, spec_text),
+            max_new_tokens=max(16, max_new),
         )
     student = PeftModel.from_pretrained(base_model, info["adapter_dir"])
     student.eval()

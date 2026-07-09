@@ -11,18 +11,112 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 
-class OutputSpec(BaseModel):
-    type: Literal["int", "enum"]
+class FieldSpec(BaseModel):
+    """One constrained output field: an int range or an enum label set
+    (a controlled reason code is just an enum). Type is inferred from which
+    constraint is present — no free-text fields."""
+
     range: Optional[tuple[int, int]] = None
     labels: Optional[list[str]] = None
 
+    model_config = {"extra": "forbid"}
+
     @model_validator(mode="after")
-    def _check(self) -> "OutputSpec":
-        if self.type == "int" and self.range is None:
-            raise ValueError("output.type=int requires output.range")
-        if self.type == "enum" and not self.labels:
-            raise ValueError("output.type=enum requires output.labels")
+    def _check(self) -> "FieldSpec":
+        if (self.range is None) == (self.labels is None):
+            raise ValueError("an output field needs exactly one of `range` or `labels`")
+        if self.labels is not None and not self.labels:
+            raise ValueError("`labels` must be non-empty")
         return self
+
+    @property
+    def type(self) -> str:
+        return "int" if self.range is not None else "enum"
+
+    def values(self) -> list:
+        if self.range is not None:
+            lo, hi = self.range
+            return list(range(lo, hi + 1))
+        return list(self.labels)
+
+
+# key names that mean "legacy scalar form", and are therefore unusable as
+# output field names
+_RESERVED_OUTPUT_KEYS = {"type", "range", "labels"}
+
+# the implicit field name a legacy scalar output contract maps to
+SCALAR_FIELD = "score"
+
+
+class OutputSpec(BaseModel):
+    """The output contract: an ordered map of field name -> FieldSpec.
+
+    Two YAML spellings normalize here:
+
+        output:                       output:
+          priority:                     type: int      # legacy scalar form ==
+            labels: [high, low]         range: [0, 10] # single field "score"
+          confidence:
+            range: [1, 5]
+    """
+
+    fields: dict[str, FieldSpec]
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data):
+        if not isinstance(data, dict) or "fields" in data:
+            return data
+        if "type" in data:  # legacy scalar form
+            t = data.get("type")
+            if t == "int" and data.get("range") is None:
+                raise ValueError("output.type=int requires output.range")
+            if t == "enum" and not data.get("labels"):
+                raise ValueError("output.type=enum requires output.labels")
+            if t not in ("int", "enum"):
+                raise ValueError(f"output.type must be int or enum, got {t!r}")
+            field = {k: v for k, v in data.items() if k in ("range", "labels") and v}
+            return {"fields": {SCALAR_FIELD: field}}
+        bad = _RESERVED_OUTPUT_KEYS & set(data)
+        if bad:
+            raise ValueError(
+                f"output field name(s) {sorted(bad)} are reserved; "
+                "rename the field or use the scalar form with `type:`"
+            )
+        if not data:
+            raise ValueError("output needs at least one field")
+        import re
+
+        for name in data:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", str(name)):
+                raise ValueError(f"output field name {name!r} must be a simple identifier")
+        return {"fields": data}
+
+    @property
+    def is_scalar(self) -> bool:
+        """Single-field contract emitting/storing a bare value (legacy form)."""
+        return list(self.fields) == [SCALAR_FIELD]
+
+    @property
+    def scalar(self) -> FieldSpec:
+        (field,) = self.fields.values()
+        return field
+
+    # -- legacy accessors: much of the single-output path (and old tests/specs)
+    # speaks spec.output.type/range/labels; keep them meaningful there.
+    @property
+    def type(self) -> str:
+        return self.scalar.type if self.is_scalar else "object"
+
+    @property
+    def range(self) -> Optional[tuple[int, int]]:
+        return self.scalar.range if self.is_scalar else None
+
+    @property
+    def labels(self) -> Optional[list[str]]:
+        return self.scalar.labels if self.is_scalar else None
 
 
 class TeacherSpec(BaseModel):
@@ -58,10 +152,15 @@ class GateSpec(BaseModel):
     agreement: Optional[float] = None
     agreement_pm1: float = 0.85
     must_beat_zeroshot: bool = True
+    # structured outputs: per-field threshold overrides, e.g. {reason: 0.7}
+    fields: dict[str, float] = Field(default_factory=dict)
 
     @property
     def threshold(self) -> float:
         return self.agreement if self.agreement is not None else self.agreement_pm1
+
+    def field_threshold(self, name: str) -> float:
+        return self.fields.get(name, self.threshold)
 
 
 class TrainSpec(BaseModel):
@@ -124,6 +223,20 @@ class FunctionSpec(BaseModel):
     _source_path: Optional[Path] = None
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def _check_rationale_name(self) -> "FunctionSpec":
+        # multi-field completions prefix the teacher rationale as `rationale:`
+        if (
+            self.train.rationale_distillation
+            and not self.output.is_scalar
+            and "rationale" in self.output.fields
+        ):
+            raise ValueError(
+                "an output field named 'rationale' clashes with "
+                "train.rationale_distillation — rename the field"
+            )
+        return self
 
     def resolved_spec_files(self) -> list[Path]:
         out = []

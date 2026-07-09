@@ -32,30 +32,63 @@ def student_prompt(spec: FunctionSpec, item: dict[str, Any]) -> str:
     return f"[{spec.name}]\n{render_input(item, spec.input_schema)}\noutput:"
 
 
-def student_completion(spec: FunctionSpec, score: Any, reason: str = "") -> str:
+def student_completion(spec: FunctionSpec, output: Any, reason: str = "") -> str:
+    """The training target. Scalar contracts emit the bare value (legacy
+    format — existing datasets/adapters keep working); multi-field contracts
+    emit one `name: value` line per field in spec order."""
+    if spec.output.is_scalar:
+        if spec.train.rationale_distillation and reason:
+            return f" reason: {reason}\nscore: {output}"
+        return f" {output}"
+    lines = "\n".join(f"{name}: {output[name]}" for name in spec.output.fields)
     if spec.train.rationale_distillation and reason:
-        return f" reason: {reason}\nscore: {score}"
-    return f" {score}"
+        return f" rationale: {reason}\n{lines}"
+    return f" {lines}"
+
+
+# beyond this many enumerated completions, skip the decoding-time constraint
+# (parse_output still validates, and the exported GBNF stays exact)
+_MAX_COMPLETIONS = 5000
 
 
 def allowed_completions(spec: FunctionSpec) -> Optional[list[str]]:
     """Every completion the student may legally emit (see student_completion),
-    for constrained decoding. None in rationale mode: the free-text reason
-    can't be enumerated, so that path decodes unconstrained and relies on
-    parse_output."""
+    for constrained decoding. None in rationale mode (free text can't be
+    enumerated) or when the multi-field cross product is too large — those
+    paths decode unconstrained and rely on parse_output."""
     if spec.train.rationale_distillation:
         return None
-    if spec.output.type == "int":
-        lo, hi = spec.output.range
-        return [f" {v}" for v in range(lo, hi + 1)]
-    return [f" {lb}" for lb in spec.output.labels]
+    if spec.output.is_scalar:
+        return [f" {v}" for v in spec.output.scalar.values()]
+    fields = spec.output.fields
+    total = 1
+    for f in fields.values():
+        total *= len(f.values())
+        if total > _MAX_COMPLETIONS:
+            return None
+    import itertools
+
+    combos = itertools.product(*(f.values() for f in fields.values()))
+    names = list(fields)
+    return [
+        " " + "\n".join(f"{n}: {v}" for n, v in zip(names, combo)) for combo in combos
+    ]
+
+
+def _field_instruction(field) -> str:
+    if field.type == "int":
+        lo, hi = field.range
+        return f"an integer from {lo} to {hi}"
+    return "exactly one of: " + ", ".join(field.labels)
 
 
 def output_instruction(spec: FunctionSpec) -> str:
-    if spec.output.type == "int":
-        lo, hi = spec.output.range
-        return f"an integer from {lo} to {hi}"
-    return "exactly one of: " + ", ".join(spec.output.labels)
+    if spec.output.is_scalar:
+        return _field_instruction(spec.output.scalar)
+    lines = "; ".join(
+        f"{name}: <{_field_instruction(f)}>" for name, f in spec.output.fields.items()
+    )
+    return f"one `name: value` line per field, in this order — {lines}"
 
 
 def zeroshot_prompt(spec: FunctionSpec, item: dict[str, Any], spec_files_text: str) -> str:
@@ -79,13 +112,21 @@ def teacher_label_prompt(
         indent=1,
         ensure_ascii=False,
     )
+    if spec.output.is_scalar:
+        form = f'{{"id": 0, "score": <{output_instruction(spec)}>, "reason": "<one short sentence>"}}'
+    else:
+        inner = ", ".join(
+            f'"{name}": <{_field_instruction(f)}>'
+            for name, f in spec.output.fields.items()
+        )
+        form = f'{{"id": 0, "output": {{{inner}}}, "reason": "<one short sentence>"}}'
     return (
         "You are a careful data labeler. Label every item below.\n"
         f"Task: {spec.description.strip()}\n"
         f"Scoring rubric:\n{spec.rubric.strip()}\n{ref}"
         f"\nItems:\n{numbered}\n\n"
-        f'Reply with ONLY a JSON array, one entry per item, in the form:\n'
-        f'[{{"id": 0, "score": <{output_instruction(spec)}>, "reason": "<one short sentence>"}}, ...]\n'
+        f"Reply with ONLY a JSON array, one entry per item, in the form:\n"
+        f"[{form}, ...]\n"
         "Every id above must appear exactly once. No other text."
     )
 
@@ -122,27 +163,51 @@ _SCORE_RE = re.compile(r"score:\s*(-?\d+)", re.IGNORECASE)
 _INT_RE = re.compile(r"-?\d+")
 
 
-def parse_output(spec: FunctionSpec, text: str) -> Optional[Any]:
-    """Parse a student/zero-shot generation into a validated output value."""
-    if spec.output.type == "int":
-        m = _SCORE_RE.search(text)
-        if m:
-            val = int(m.group(1))
-        else:
-            m = _INT_RE.search(text)
-            if not m:
-                return None
-            val = int(m.group(0))
-        lo, hi = spec.output.range
+def _parse_field(field, text: str) -> Optional[Any]:
+    """Parse and validate one field's value out of `text`."""
+    if field.type == "int":
+        m = _INT_RE.search(text)
+        if not m:
+            return None
+        val = int(m.group(0))
+        lo, hi = field.range
         return val if lo <= val <= hi else None
     # enum: first label that appears, longest-first to avoid prefix collisions
     low = text.lower()
     hits = [
         (low.find(lb.lower()), lb)
-        for lb in sorted(spec.output.labels, key=len, reverse=True)
+        for lb in sorted(field.labels, key=len, reverse=True)
         if lb.lower() in low
     ]
     return min(hits)[1] if hits else None
+
+
+def parse_output(spec: FunctionSpec, text: str) -> Optional[Any]:
+    """Parse a student/zero-shot generation into a validated output value:
+    a scalar for legacy contracts, a {field: value} dict (missing/invalid
+    fields are None) for multi-field contracts — or None if nothing parsed."""
+    if spec.output.is_scalar:
+        field = spec.output.scalar
+        if field.type == "int":
+            m = _SCORE_RE.search(text)
+            if m:
+                lo, hi = field.range
+                val = int(m.group(1))
+                return val if lo <= val <= hi else None
+        return _parse_field(field, text)
+    out: dict[str, Any] = {}
+    for name, field in spec.output.fields.items():
+        m = re.search(
+            rf"^\s*{re.escape(name)}\s*:\s*(.+)$", text, re.MULTILINE | re.IGNORECASE
+        )
+        out[name] = _parse_field(field, m.group(1)) if m else None
+    return None if all(v is None for v in out.values()) else out
+
+
+def completion_budget(spec: FunctionSpec) -> int:
+    """max_new_tokens for a student generation under this contract."""
+    base = 8 if spec.output.is_scalar else 8 + 8 * len(spec.output.fields)
+    return base + (72 if spec.train.rationale_distillation else 0)
 
 
 def extract_json(text: str) -> Any:

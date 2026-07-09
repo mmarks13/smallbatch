@@ -70,10 +70,12 @@ def _make_dev_callback(spec: FunctionSpec, tokenizer, dev_rows: list[Row], adapt
     from . import prompts
     from .evaluate import compute_metrics, generate_batch
 
+    from .labeling import row_output
+
     dev_texts = [prompts.student_prompt(spec, r["input"]) for r in dev_rows]
-    golds = [r["score"] for r in dev_rows]
+    golds = [row_output(spec, r) for r in dev_rows]
     allowed = prompts.allowed_completions(spec)
-    max_new = 80 if spec.train.rationale_distillation else 8
+    max_new = prompts.completion_budget(spec)
 
     class DevEval(TrainerCallback):
         def __init__(self):
@@ -153,11 +155,15 @@ def train(
         else:
             model = prepare_model_for_kbit_training(model)
 
+    from .labeling import row_output
+
     ds = Dataset.from_list(
         [
             {
                 "prompt": prompts.student_prompt(spec, r["input"]),
-                "completion": prompts.student_completion(spec, r["score"], r.get("reason", ""))
+                "completion": prompts.student_completion(
+                    spec, row_output(spec, r), r.get("reason", "")
+                )
                 + tokenizer.eos_token,
             }
             for r in train_rows

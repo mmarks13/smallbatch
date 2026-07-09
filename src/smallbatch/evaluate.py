@@ -104,8 +104,10 @@ def score_holdout(
         batch_size=spec.train.eval_batch_size,
         allowed_completions=prompts.allowed_completions(spec),
     )
+    from .labeling import row_output
+
     preds = [prompts.parse_output(spec, t) for t in raw]
-    metrics = compute_metrics(spec, preds, [r["score"] for r in holdout])
+    metrics = compute_metrics(spec, preds, [row_output(spec, r) for r in holdout])
     metrics["preds"] = preds  # per-item, aligned with the holdout file order
     return metrics
 
@@ -135,21 +137,24 @@ def pearson_r(xs: list[float], ys: list[float]) -> float | None:
     return cov / (vx**0.5 * vy**0.5)
 
 
-def compute_metrics(spec: FunctionSpec, preds: list, golds: list) -> dict[str, Any]:
+def _agrees(field, p, g) -> bool:
+    """Field-level agreement: ±1 for int fields, exact for enum fields."""
+    if p is None:
+        return False
+    return abs(p - g) <= 1 if field.type == "int" else p == g
+
+
+def _scalar_metrics(field, preds: list, golds: list) -> dict[str, Any]:
     n = len(golds)
     invalid = sum(1 for p in preds if p is None)
     exact = sum(1 for p, g in zip(preds, golds) if p == g)
+    agree_k = sum(1 for p, g in zip(preds, golds) if _agrees(field, p, g))
     metrics: dict[str, Any] = {"n": n}
-    if spec.output.type == "int":
-        within1 = sum(1 for p, g in zip(preds, golds) if p is not None and abs(p - g) <= 1)
-        agree_k = within1
-        metrics["agreement"] = round(within1 / n, 4) if n else 0.0  # gate metric: ±1
+    metrics["agreement"] = round(agree_k / n, 4) if n else 0.0
+    if field.type == "int":
         valid = [(p, g) for p, g in zip(preds, golds) if p is not None]
         r = pearson_r([p for p, _ in valid], [g for _, g in valid])
         metrics["pearson_r"] = round(r, 4) if r is not None else None
-    else:
-        agree_k = exact
-        metrics["agreement"] = round(exact / n, 4) if n else 0.0  # gate metric: exact
     ci = wilson_ci(agree_k, n)
     metrics["agreement_ci"] = list(ci) if ci else None
     metrics["exact"] = round(exact / n, 4) if n else 0.0
@@ -157,16 +162,71 @@ def compute_metrics(spec: FunctionSpec, preds: list, golds: list) -> dict[str, A
     return metrics
 
 
-def run_gate(spec: FunctionSpec, adapter: dict, zeroshot: dict | None) -> dict[str, Any]:
-    reasons = []
-    if adapter["agreement"] < spec.gate.threshold:
-        reasons.append(
-            f"agreement {adapter['agreement']:.2%} < required {spec.gate.threshold:.0%}"
+def compute_metrics(spec: FunctionSpec, preds: list, golds: list) -> dict[str, Any]:
+    """Scalar contracts: agreement/CI/exact/invalid (+pearson for int).
+    Multi-field contracts: the same per field under `fields`, with the
+    headline `agreement` being the JOINT rate (every field agreeing)."""
+    if spec.output.is_scalar:
+        return _scalar_metrics(spec.output.scalar, preds, golds)
+
+    n = len(golds)
+    fields = spec.output.fields
+    dicts = [p if isinstance(p, dict) else {} for p in preds]
+    per_field = {
+        name: _scalar_metrics(
+            field, [d.get(name) for d in dicts], [g[name] for g in golds]
         )
-    if spec.gate.must_beat_zeroshot and zeroshot is not None:
-        if adapter["agreement"] <= zeroshot["agreement"]:
+        for name, field in fields.items()
+    }
+    joint_k = sum(
+        1
+        for d, g in zip(dicts, golds)
+        if all(_agrees(f, d.get(name), g[name]) for name, f in fields.items())
+    )
+    exact_k = sum(
+        1
+        for d, g in zip(dicts, golds)
+        if all(d.get(name) == g[name] for name in fields)
+    )
+    invalid = sum(1 for d in dicts if any(d.get(name) is None for name in fields))
+    ci = wilson_ci(joint_k, n)
+    return {
+        "n": n,
+        "agreement": round(joint_k / n, 4) if n else 0.0,  # joint: all fields
+        "agreement_ci": list(ci) if ci else None,
+        "exact": round(exact_k / n, 4) if n else 0.0,
+        "invalid_rate": round(invalid / n, 4) if n else 0.0,
+        "fields": per_field,
+    }
+
+
+def run_gate(spec: FunctionSpec, adapter: dict, zeroshot: dict | None) -> dict[str, Any]:
+    """Scalar: agreement vs threshold (+ must beat zero-shot). Multi-field:
+    every field must clear its own threshold (gate.fields overrides
+    gate.agreement) and beat zero-shot per field; joint is reported, not gated."""
+    reasons = []
+    if spec.output.is_scalar:
+        if adapter["agreement"] < spec.gate.threshold:
             reasons.append(
-                f"adapter agreement {adapter['agreement']:.2%} does not beat "
-                f"zero-shot base {zeroshot['agreement']:.2%}"
+                f"agreement {adapter['agreement']:.2%} < required {spec.gate.threshold:.0%}"
             )
+        if spec.gate.must_beat_zeroshot and zeroshot is not None:
+            if adapter["agreement"] <= zeroshot["agreement"]:
+                reasons.append(
+                    f"adapter agreement {adapter['agreement']:.2%} does not beat "
+                    f"zero-shot base {zeroshot['agreement']:.2%}"
+                )
+        return {"passed": not reasons, "reasons": reasons}
+
+    for name in spec.output.fields:
+        a = adapter["fields"][name]["agreement"]
+        threshold = spec.gate.field_threshold(name)
+        if a < threshold:
+            reasons.append(f"{name}: agreement {a:.2%} < required {threshold:.0%}")
+        if spec.gate.must_beat_zeroshot and zeroshot is not None:
+            z = zeroshot["fields"][name]["agreement"]
+            if a <= z:
+                reasons.append(
+                    f"{name}: adapter agreement {a:.2%} does not beat zero-shot {z:.2%}"
+                )
     return {"passed": not reasons, "reasons": reasons}
