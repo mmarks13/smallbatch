@@ -26,11 +26,12 @@ student — any open-weights model — and train it on whatever GPU you have,
 your own or a rented spot instance. No platform, no account, no production
 traffic required: just a spec and some example items.
 
-Outputs are deliberately constrained — an integer in a range or one label
-from a fixed list. That narrowness is the point: it's the regime where a
-small student genuinely matches its teacher, it makes quality measurable, and
-it keeps compiled functions squarely in "specialized classifier" territory
-(see [Responsible use](#responsible-use)).
+Outputs are deliberately constrained — an integer in a range, one label from
+a fixed list, or several such fields at once (a label plus a controlled
+reason code plus a confidence). That narrowness is the point: it's the regime
+where a small student genuinely matches its teacher, it makes quality
+measurable per field, and it keeps compiled functions squarely in
+"specialized classifier" territory (see [Responsible use](#responsible-use)).
 
 ## Install
 
@@ -51,17 +52,26 @@ priority classifier with 71 bundled synthetic tickets and a zero-API-key
 teacher config (local Ollama):
 
 ```bash
-# 1. the teacher labels the items into a train/holdout dataset
+# 0. (optional) preflight: teacher reachable? GPU/precision sane? disk? splits?
+smallbatch doctor examples/ticket-priority/spec.yaml \
+    --items examples/ticket-priority/items.json
+
+# 1. the teacher labels the items into a train/dev/gate dataset
 smallbatch label examples/ticket-priority/spec.yaml \
     --items examples/ticket-priority/items.json
 
-# 2. train + quality-check -> artifacts/ticket-priority/<date>/
+# 2. train (best checkpoint by dev agreement) + eval report + acceptance gate
 smallbatch compile examples/ticket-priority/spec.yaml
+#    -> artifacts/ticket-priority/<date>/  (adapter + report.md + manifest)
 
 # 3. call it
 smallbatch run ticket-priority --json '{"subject": "Site down", "body": "...", "product_area": "auth", "customer_tier": "pro"}'
 smallbatch status        # list compiled functions, quality verdicts, staleness
 ```
+
+(Starting from scratch instead? `smallbatch init classifier my-fn` writes a
+working spec skeleton. Want to inspect the teacher's labels before training?
+`smallbatch review <spec>`.)
 
 Or from Python:
 
@@ -82,21 +92,31 @@ fn({"subject": "Site down", "body": "...", "product_area": "auth", "customer_tie
   input fields, output contract, and the rubric the teacher labels by. The
   spec (plus any files it references) is content-hashed, so a deployed
   function knows when its definition has drifted.
-- **Honest quality verdicts.** Every compile is scored against held-out
-  teacher labels and against the untrained base model, and the artifact
-  records a pass/fail verdict; `load_fn` refuses failing adapters by default.
-  Decoding is constrained to the output contract, so the function can't
-  return garbage — only a right or wrong answer.
-  Exit codes are automation-friendly: **0** pass, **2** honest fail, **1**
-  error.
+- **A real eval report, not just a verdict.** Every compile writes
+  `report.md`/`report.json`: agreement with the teacher **with a 95%
+  confidence interval**, per-label breakdown, a confusion matrix, severe-miss
+  rate, the training curve, and the largest disagreements alongside the
+  teacher's own rationale. The acceptance gate (vs held-out teacher labels
+  and vs the untrained base) is recorded in the manifest; `load_fn` refuses
+  failing adapters by default, and exit codes stay automation-friendly:
+  **0** pass, **2** honest fail, **1** error.
+- **Training that picks its best artifact.** A dev split is scored after
+  every epoch with the same constrained decoding as the final eval; the
+  compile keeps the best checkpoint, stops early when dev agreement
+  plateaus, and records which epoch won and why training stopped — the gate
+  is a final trust check, not the way you discover whether training worked.
+  Decoding is constrained to the output contract end to end, so the function
+  can't return garbage — only a right or wrong answer.
 - **Small artifacts, shared base.** Training uses LoRA adapters — each
   compiled function is tens of MB layered on one frozen base model, so ten
   functions don't cost ten models of disk or RAM.
 - **Runs anywhere once compiled.** `smallbatch export <fn>` merges and
   quantizes the function into a single GGUF file (~230MB for the default
-  base) with an Ollama Modelfile and a llama.cpp grammar generated from the
-  output contract — CPU-only inference where invalid outputs are impossible
-  by construction, no Python required
+  base) with an Ollama Modelfile, a llama.cpp grammar generated from the
+  output contract, and a README with the exact commands for this function —
+  CPU-only inference where invalid outputs are impossible by construction, no
+  Python required. `smallbatch serve <fn>` turns that bundle into a local
+  HTTP endpoint with input/output validation
   ([details](docs/how-it-works.md#exporting-to-a-zero-pytorch-runtime)).
 - **A model picker built in.** `smallbatch sweep` runs a `(base model) ×
   (technique)` grid, each cell in an isolated subprocess so one OOM can't

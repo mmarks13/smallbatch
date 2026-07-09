@@ -22,12 +22,17 @@ overrides the general guidance here.
 
 ```bash
 pytest -q                                   # unit tests: CPU-only, no network, <1s
+smallbatch init <template> <name>           # starter spec.yaml + items.json (instant)
+smallbatch doctor <spec> [--items X]        # preflight; 1 live teacher probe unless --no-probe
 smallbatch label <spec> --items items.json  # teacher-label a dataset (network, no GPU)
-smallbatch compile <spec>                   # train + eval + gate (GPU, minutes)
+                                            #   --append keeps rows + sticky gate; --max-variants N
+smallbatch review <spec>                    # step through labels: accept/reject/edit (interactive)
+smallbatch compile <spec>                   # train + eval + gate (GPU, minutes); writes report.md
 smallbatch sweep <sweep.yaml>               # grid of model x arm compiles (GPU, long)
 smallbatch run <fn> --json '{...}'          # call a compiled function (GPU/CPU)
-smallbatch export <fn>                      # merged+quantized GGUF + grammar + Modelfile
+smallbatch export <fn>                      # GGUF + grammar + Modelfile + bundle README
                                             #   (needs LLAMA_CPP_DIR + `pip install gguf`)
+smallbatch serve <fn> [--port 8080]         # llama-server + validating HTTP endpoint
 smallbatch push <fn> --repo you/name        # upload artifact to HF Hub (private default;
                                             #   NEVER run without the user asking)
 smallbatch status                           # list artifacts, gates, staleness (instant)
@@ -47,11 +52,15 @@ continuing. Never "fix" a 2 by weakening the gate.
 
 Torch-free (import-cheap, unit-tested on CPU): `spec.py` (pydantic
 `FunctionSpec`/`TrainSpec`, `extra="forbid"` so typos fail loudly; the
-`teacher` block is required, no defaults), `artifacts.py` (versioned dirs +
-manifests), `sweep.py` (grid math + orchestration), `hardware.py` (precision
-auto-select), `prompts.py`, `labeling.py`, `cli.py`, `api.py` (public
-`label`/`compile`; heavy imports live *inside* the functions — keep them
-lazy so `label`/`status`/`sweep` never import torch).
+`teacher` block is required, no defaults; `output` is scalar or a flat
+multi-field map normalized into `OutputSpec.fields`), `artifacts.py`
+(versioned dirs + manifests), `sweep.py` (grid math + orchestration),
+`hardware.py` (precision auto-select), `prompts.py`, `labeling.py`
+(three-way sticky splits, append, variant source links), `report.py` (eval
+report build/render), `doctor.py` (preflight findings), `review.py` (label
+stepper), `init_cmd.py` (templates), `serve.py`'s `handle_call`, `cli.py`,
+`api.py` (public `label`/`compile`; heavy imports live *inside* the
+functions — keep them lazy so `label`/`status`/`sweep` never import torch).
 
 Torch-heavy (imported only when a compile actually runs): `training.py`
 (LoRA/qlora fine-tune), `evaluate.py` (holdout scoring + gate), `runtime.py`
@@ -66,10 +75,11 @@ released between runs and isolates crashes/OOMs. Do not in-process the loop.
 ## Artifact layout
 
 ```
-artifacts/<fn>/<date>[-rN]/          # a normal `compile` version
+artifacts/<fn>/<date>[-rN]/          # a normal `compile` version (+ report.md/json)
 artifacts/<fn>/<sweep>/<tag>/        # a sweep run (never the deployed version)
 artifacts/<fn>/<sweep>/results.json  # + summary.md, written by the sweep
-data/<fn>/                           # labeled train/holdout JSONL (gitignored)
+data/<fn>/                           # labeled train/dev/gate JSONL (gitignored;
+                                     #   pre-v0.2 dirs had holdout.jsonl = gate)
 ```
 
 `versions()`/`latest()` only look one level under `<fn>`, so sweep runs never

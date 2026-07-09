@@ -14,15 +14,16 @@ spec.yaml
    │
    ▼
 [1] teacher labels your real items (+ generated variants)
-   │        -> data/<fn>/{train,holdout}.jsonl        (stratified holdout)
+   │        -> data/<fn>/{train,dev,gate}.jsonl      (stratified; gate is sticky)
    ▼
 [2] LoRA fine-tune of a small base model (HF PEFT/TRL)
-   │
+   │        dev split scored each epoch -> keep the best checkpoint,
+   │        stop early when it plateaus
    ▼
-[3] eval gate: adapter vs teacher holdout, adapter vs zero-shot base
-   │
+[3] eval report + acceptance gate: best adapter vs the untouched gate split,
+   │        and vs the zero-shot base                (report.md / report.json)
    ▼
-artifacts/<fn>/<version>/    adapter (~tens of MB) + manifest
+artifacts/<fn>/<version>/    adapter (~tens of MB) + manifest + report
 ```
 
 The sweet spot is a student small enough to run on almost any hardware
@@ -43,12 +44,12 @@ for a complete working spec.
 |---|---|
 | `name`, `description` | Identity; `description` is shown to the teacher. |
 | `input_schema` | Ordered `field: type-hint` map. Fields are serialized into prompts in this order. Hints are informational (not validated). |
-| `output` | `{type: int, range: [lo, hi]}` or `{type: enum, labels: [...]}`. That's the whole output contract — parsed, validated, out-of-range → `None`. |
+| `output` | The output contract. Scalar form: `{type: int, range: [lo, hi]}` or `{type: enum, labels: [...]}`. Structured form: a flat map of field name → `{labels: [...]}` (enum) or `{range: [lo, hi]}` (int) — see [Structured outputs](#structured-outputs). Parsed, validated, out-of-contract → `None`. |
 | `rubric` | The instructions the teacher labels by; also embedded in the student's training prompt. Anchor it with concrete examples per band — calibration lives here. |
 | `spec_files` | External files whose *content* is part of the spec (embedded into teacher prompts, hashed for staleness). Paths resolve relative to the spec file. |
-| `teacher` | **Required, no defaults**: `backend` (`openai-compatible` \| `claude-cli`), `model`, plus `examples` (target dataset size), `holdout` fraction, `batch_size`, and for openai-compatible `base_url`/`api_key_env`. |
-| `gate` | `agreement_pm1` (default 0.85) and `must_beat_zeroshot` (default true). |
-| `train` | `base` model id (default `LiquidAI/LFM2.5-350M-Base`; note an adapter inherits its base model's license — LFM's conditions commercial use above $10M revenue), `precision` (`auto|fp32|bf16|qlora`), LoRA knobs (`lora_r`, `lora_alpha`, `use_dora`), `rationale_distillation`, epochs/lr/batch sizes, `loss_type`. Defaults are sensible; a spec can omit the whole block. |
+| `teacher` | **Required, no defaults**: `backend` (`openai-compatible` \| `claude-cli`), `model`, plus `examples` (target dataset size), `holdout` (gate split) and `dev` (checkpoint-selection split) — each a fraction of the real rows or an absolute int count — `batch_size`, and for openai-compatible `base_url`/`api_key_env`. |
+| `gate` | `agreement` (default 0.85; `agreement_pm1` is the legacy alias), `must_beat_zeroshot` (default true), and for structured outputs optional per-field overrides under `gate.fields`. |
+| `train` | `base` model id (default `LiquidAI/LFM2.5-350M-Base`; note an adapter inherits its base model's license — LFM's conditions commercial use above $10M revenue), `precision` (`auto|fp32|bf16|qlora`), LoRA knobs (`lora_r`, `lora_alpha`, `use_dora`), `rationale_distillation`, `max_epochs` (default 12; `epochs` is the legacy alias) with `patience` (default 2, `null` disables early stopping), lr/batch sizes, `loss_type`. Defaults are sensible; a spec can omit the whole block. |
 
 Both the spec and `train` overrides reject unknown keys (`extra="forbid"`), so
 a typo fails at load time, not silently.
@@ -57,6 +58,43 @@ a typo fails at load time, not silently.
 spec plus the contents of every `spec_files` entry. `smallbatch status` and
 `load_fn` warn when a deployed adapter was compiled from a stale spec.
 Recompilation is explicit, never automatic.
+
+**Starting out:** `smallbatch init classifier|scorer|structured <name>` writes
+a working spec skeleton + starter `items.json`, and `smallbatch doctor
+<spec>` preflights everything — contract complexity, teacher reachability
+(one live probe call), data splits and label coverage, CUDA/precision/qlora
+readiness, free disk, export prerequisites — before you spend teacher calls
+or GPU time.
+
+## Structured outputs
+
+A function can emit several constrained fields at once — a label plus a
+controlled reason code plus a confidence — while keeping every smallbatch
+property (narrow contract, constrained decoding, per-field measurability):
+
+```yaml
+output:
+  priority:
+    labels: [urgent, normal, low]
+  reason:
+    labels: [outage, billing, question, bug]
+  confidence:
+    range: [1, 5]
+```
+
+Type is inferred: `labels` → enum, `range` → int (a reason code is just an
+enum). No free-text fields — the useful boundary is structured, checkable
+outputs. Field names `type`/`range`/`labels` are reserved (they signal the
+scalar form, which keeps working unchanged).
+
+The student emits one `name: value` line per field in declaration order;
+decoding is constrained to the enumerated legal completions (when the cross
+product is small enough — otherwise outputs are parse-validated), and the
+exported GBNF grammar enforces the exact line format. Metrics and the gate
+are per-field — int fields ±1, enum fields exact, each against
+`gate.agreement` or its `gate.fields.<name>` override — with the joint
+all-fields-correct rate reported alongside. The first declared field is the
+"primary" one used for stratified splits and variant band-targeting.
 
 ## Teacher backends
 
@@ -87,13 +125,29 @@ is the classic silent failure of this kind of training.
 1. Your real items are labeled in batches (rubric-guided, temperature 0). The
    teacher also emits a one-line rationale per label, stored in provenance for
    auditing (not trained on unless `rationale_distillation` is set).
-2. Augmentation to reach `teacher.examples`: the teacher generates *realistic
-   variants* of real items, targeted at underrepresented label bands, then the
-   variants are relabeled through the same path as real items.
-3. A stratified holdout (default 15%) is drawn **from real rows only**, so the
-   gate is judged on the true input distribution, never on synthetic variants.
-4. Every row records provenance: `real | variant`, teacher model/backend,
-   prompt version, label date.
+2. The real rows are split **three ways, stratified by label**: `train`,
+   `dev` (checkpoint selection during training), and `gate` (the untouched
+   acceptance set). Dev and gate are real rows only.
+3. Augmentation toward `teacher.examples`: the teacher generates *realistic
+   variants* targeted at underrepresented label bands, then the variants are
+   relabeled through the same path as real items. Variants are generated
+   **only from train-split reals** (the style examples shown to the teacher
+   leak into the variants) and always land in train; each records the
+   `source_ids` of the reals that seeded it.
+4. Every row records provenance: a stable `id`, `real | variant`, its split,
+   teacher model/backend, prompt version, label date.
+
+**The gate is sticky.** `smallbatch label --items new.json --append` labels
+only unseen items and re-splits without ever moving a row out of the gate —
+once anything has trained against the rest of the data, reshuffling the gate
+would quietly leak. Top-ups to gate/dev come only from newly labeled reals.
+`--max-variants N` caps a balance-driven synthetic top-up.
+
+**Reviewing labels:** `smallbatch review <spec>` steps through the labeled
+rows (filter by split/origin/label/field/review-status) to accept, reject,
+edit, or annotate teacher labels before training. Rejected rows stay in
+`labeled.jsonl` for audit but are excluded from the split files; edits are
+contract-validated and keep the original value in the audit trail.
 
 ## Training
 
@@ -112,22 +166,38 @@ is the classic silent failure of this kind of training.
   - `qlora`: 4-bit NF4 frozen base + fp16 LoRA — fits 3–8B bases on an 11GB
     card. Needs the `qlora` extra (`pip install smallbatch[qlora]`).
   See [local-gpu.md](local-gpu.md) for the hardware details.
+- **Checkpoint selection, not a fixed run:** after each epoch the dev split is
+  scored with the same constrained decoding as the final eval, the adapter is
+  snapshotted whenever dev agreement improves, and training stops after
+  `patience` epochs without improvement (ceiling `max_epochs`). The artifact
+  is the *best* checkpoint, not the last one; the manifest and report record
+  the full curve, the chosen epoch, and why training stopped. Discovering
+  whether training worked is this loop's job — the gate is a final trust
+  check, not the discovery mechanism.
 - **Optional arms** (A/B-testable via [sweeps](#sweeps)): `use_dora: true`
   (DoRA, one PEFT boolean) and `rationale_distillation: true` (student learns
   to emit reason-then-score using the stored teacher rationales; the runtime
   still returns only the parsed score). In the experiments run so far, neither
   beat plain LoRA on constrained scoring — plain stays the default.
 
-## Evaluation and the gate
+## Evaluation, the report, and the gate
 
-Per compile, recorded in the manifest:
+Every compile writes `report.md` + `report.json` next to the manifest — the
+report is the headline output, the verdict one line inside it:
 
-- **agreement** with teacher holdout labels ≥ `gate.agreement_pm1` — within ±1
-  for `int` outputs, exact match for `enum`;
-- **must beat the zero-shot base model** on the same holdout (otherwise the
-  fine-tune added nothing);
-- plus diagnostics: exact-match rate, invalid-output rate, Pearson r (int
-  outputs).
+- **agreement** with the gate split's teacher labels, always with a **Wilson
+  95% confidence interval** (small gates get a loud noise warning below 50
+  items) — within ±1 for `int` outputs, exact for `enum`, per-field for
+  structured outputs (joint rate reported alongside);
+- **must beat the zero-shot base model** on the same gate split (otherwise
+  the fine-tune added nothing);
+- diagnostics that make failures actionable: per-label agreement table,
+  gold×pred confusion matrix, severe-miss rate (|Δ|≥3), the training curve
+  with the chosen epoch, and the largest disagreements with the teacher's own
+  rationale for each.
+
+The acceptance check: agreement ≥ `gate.agreement` (per field for structured
+outputs, with `gate.fields` overrides).
 
 Generation is **constrained to the output contract**: decoding masks the
 vocabulary token-by-token so the model can only emit one of the legal values
@@ -143,9 +213,10 @@ Failing adapters are kept but marked `failed`; `load_fn` refuses them unless
 returns **0** = gate PASS, **2** = honest FAIL (trained fine, didn't clear the
 bar), **1** = real error.
 
-Mind your holdout size: with n=22, one item is ~4.5 points of agreement, and a
-pass/fail verdict near the bar is noise. Accumulate real items and re-gate on
-a bigger holdout before trusting a marginal result.
+Mind your gate size: with n=22, one item is ~4.5 points of agreement, and a
+pass/fail verdict near the bar is noise — that's why the CI is always shown.
+Accumulate real items (`label --append` grows the gate without reshuffling
+it) before trusting a marginal verdict either way.
 
 ## Sweeps
 
@@ -178,10 +249,12 @@ survive in the log even if a rented instance dies before artifacts sync.
 
 ```
 artifacts/<fn>/<date>[-rN]/     # normal compile versions
-  adapter/                      # PEFT adapter weights (~10–50MB)
+  adapter/                      # PEFT adapter weights (~10–50MB), best epoch
   spec.yaml                     # copy of the spec that produced it
   manifest.json                 # spec_hash, base model, data provenance,
-                                # metrics, gate verdict, library version
+                                # metrics (+CI), gate verdict, best epoch,
+                                # stopping reason, library version
+  report.md / report.json       # the full eval report
 artifacts/<fn>/<sweep>/<tag>/   # sweep runs (never auto-deployed)
 ```
 
@@ -204,6 +277,17 @@ without Python or a GPU, written to `<version>/export/`:
 - **`Modelfile`** — `ollama create <fn> -f Modelfile` and the function is
   servable over Ollama's API. (Ollama doesn't support grammar files, so
   callers on this path should still validate outputs.)
+- **`README.md`** + copies of `spec.yaml`, `manifest.json`, `report.md` — the
+  bundle is self-describing, with exact llama-cli / llama-server / Ollama /
+  curl invocations for this specific function.
+
+`smallbatch serve <fn>` turns the bundle into a local HTTP endpoint: it
+launches llama.cpp's `llama-server` on the exported GGUF and fronts it with a
+tiny validator — `POST /call` with a JSON object of the input fields builds
+the student prompt, enforces the grammar per request, parses the completion
+against the contract, and returns `{"output": ..., "raw": ...}` (HTTP 422 if
+the output failed validation, which the grammar makes practically
+impossible).
 
 Requirements: a llama.cpp checkout (`--llama-cpp` or `LLAMA_CPP_DIR`), its
 `llama-quantize` binary for quantized outputs (`--quant f16` works without
