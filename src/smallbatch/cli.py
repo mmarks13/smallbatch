@@ -148,6 +148,24 @@ def cmd_sweep(args) -> int:
     )
 
 
+def cmd_doctor(args) -> int:
+    from .doctor import run_doctor
+
+    try:
+        spec = load_spec(args.spec)
+    except ValueError as e:
+        print(f"FAIL  spec did not validate:\n{e}", file=sys.stderr)
+        return 1
+    items = _load_items(Path(args.items)) if args.items else None
+    data = Path(args.data) if args.data else Path(f"data/{spec.name}")
+    return run_doctor(
+        spec,
+        items=items,
+        data_dir=data if data.is_dir() else None,
+        probe=not args.no_probe,
+    )
+
+
 def cmd_status(args) -> int:
     root = Path(args.artifacts)
     if not root.is_dir():
@@ -242,6 +260,18 @@ def main(argv: list[str] | None = None) -> int:
     wp.add_argument("--data", help="labeled data dir (default data/<name>)")
     wp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
     wp.set_defaults(fn=cmd_sweep)
+
+    dp = sub.add_parser(
+        "doctor", help="preflight a spec: contract, teacher, data, hardware, disk, export"
+    )
+    dp.add_argument("spec")
+    dp.add_argument("--items", help="JSON/JSONL items file to check against the spec")
+    dp.add_argument("--data", help="labeled data dir (default data/<name>)")
+    dp.add_argument(
+        "--no-probe", action="store_true",
+        help="skip the single live teacher call (reachability/parse check)",
+    )
+    dp.set_defaults(fn=cmd_doctor)
 
     sp = sub.add_parser("status", help="list compiled functions and staleness")
     sp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
