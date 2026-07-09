@@ -20,31 +20,62 @@ from .spec import FunctionSpec, load_spec
 
 
 def model_card(spec: FunctionSpec, manifest: dict, repo_id: str) -> str:
-    """Render manifest facts into a Hub model card (torch-free, unit-tested)."""
+    """Render manifest facts into a Hub model card (torch-free, unit-tested).
+
+    The card must make sense to someone who did not run the compile: what the
+    function does, exactly what it emits, how it was trained and measured,
+    and how to run it — with the license/provider caveats stated."""
+    from .prompts import output_instruction
+
     m = manifest["metrics"]
     adapter = m["adapter"]
     zeroshot = m.get("zeroshot")
-    if spec.output.type == "int":
-        lo, hi = spec.output.range
-        contract = f"an integer from {lo} to {hi}"
-        agreement_kind = "within ±1 of the teacher label"
-    else:
-        contract = "one of: " + ", ".join(spec.output.labels)
-        agreement_kind = "exact match with the teacher label"
     gate = manifest["gate"]
-    rows = [f"| adapter | {adapter['agreement']:.1%} | {adapter.get('invalid_rate', 0):.1%} |"]
+    data = manifest.get("data", {})
+    contract = output_instruction(spec)
+    agreement_kind = (
+        "per-field (int fields within ±1, enum fields exact); the headline "
+        "number is the joint all-fields rate"
+        if not spec.output.is_scalar
+        else ("within ±1 of the teacher label" if spec.output.type == "int"
+              else "exact match with the teacher label")
+    )
+    ci = adapter.get("agreement_ci")
+    ci_txt = f" (95% CI {ci[0]:.0%}–{ci[1]:.0%})" if ci else ""
+
+    rows = [f"| adapter | {adapter['agreement']:.1%}{ci_txt} | {adapter.get('invalid_rate', 0):.1%} |"]
     if zeroshot:
         rows.append(
             f"| zero-shot base | {zeroshot['agreement']:.1%} | "
             f"{zeroshot.get('invalid_rate', 0):.1%} |"
         )
-    data = manifest.get("data", {})
-    provenance = (
-        f"{data.get('real', '?')} real items + {data.get('variants', '?')} "
-        f"teacher-generated variants; holdout n={adapter.get('n', '?')} (real items only)"
-        if data
-        else f"holdout n={adapter.get('n', '?')}"
-    )
+    field_rows = ""
+    if not spec.output.is_scalar and adapter.get("fields"):
+        field_rows = "\n### Per-field agreement\n\n| field | agreement | invalid |\n|---|---|---|\n" + "\n".join(
+            f"| {name} | {fm['agreement']:.1%} | {fm.get('invalid_rate', 0):.1%} |"
+            for name, fm in adapter["fields"].items()
+        ) + "\n"
+
+    if data.get("gate") is not None:
+        split_summary = (
+            f"{data.get('train', '?')} train / {data.get('dev', '?')} dev / "
+            f"{data.get('gate', '?')} gate rows "
+            f"({data.get('real', '?')} real items + {data.get('variants', '?')} "
+            "teacher-generated variants; gate and dev are real items only)"
+        )
+    else:  # pre-v0.2 manifest
+        split_summary = (
+            f"{data.get('real', '?')} real items + {data.get('variants', '?')} "
+            f"teacher-generated variants; holdout n={adapter.get('n', '?')}"
+        )
+    training_line = ""
+    if manifest.get("best_epoch") is not None:
+        training_line = (
+            f"- **Training:** best of {manifest.get('epochs_run', '?')} epochs by dev "
+            f"agreement (epoch {manifest['best_epoch']}; {manifest.get('stopped_reason', '')})\n"
+        )
+    example_input = json.dumps({k: f"<{t}>" for k, t in spec.input_schema.items()})
+
     return f"""---
 base_model: {manifest["base_model"]}
 library_name: peft
@@ -62,17 +93,35 @@ A narrow "fuzzy function" compiled with
 [smallbatch](https://github.com/mmarks13/smallbatch): a teacher model labeled
 real examples against a rubric, and this LoRA adapter was fine-tuned on those
 labels. It does exactly one job — given the input fields below, it emits
-{contract} — and nothing else.
+{contract} — and nothing else. **It is not a chat model.**
 
-- **Base model:** `{manifest["base_model"]}` (the adapter inherits its license)
+- **Base model:** `{manifest["base_model"]}` — the adapter inherits its license
 - **Input fields:** {", ".join(f"`{k}`" for k in spec.input_schema)}
-- **Teacher:** {data.get("teacher_model", "n/a")} ({data.get("teacher_backend", "n/a")})
-- **Data:** {provenance}
-- **Gate:** {"PASS" if gate["passed"] else "FAIL"} — agreement is {agreement_kind}, bar {spec.gate.threshold:.0%}{"" if gate["passed"] else "; reasons: " + "; ".join(gate["reasons"])}
+- **Output contract:** {contract}
+- **Teacher:** {data.get("teacher_model", "n/a")} ({data.get("teacher_backend", "n/a")}) — check the
+  provider's terms before redistributing artifacts trained on its outputs
+- **Data:** {split_summary}
+{training_line}- **Gate:** {"PASS" if gate["passed"] else "FAIL"} — agreement is {agreement_kind}, bar {spec.gate.threshold:.0%}{"" if gate["passed"] else "; reasons: " + "; ".join(gate["reasons"])}
 
 | model | agreement | invalid rate |
 |---|---|---|
 {chr(10).join(rows)}
+{field_rows}
+Full metrics (per-band tables, confusion, training curve) are in `report.md`
+and `report.json`; complete provenance in `manifest.json`; the exact function
+definition in `spec.yaml`.
+
+## Example
+
+Input: `{example_input}`
+Prompt format (raw text, no chat template):
+
+```
+[{spec.name}]
+<field>: <value>
+...
+output:
+```
 
 ## Usage
 
@@ -83,16 +132,24 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 base = AutoModelForCausalLM.from_pretrained("{manifest["base_model"]}")
 model = PeftModel.from_pretrained(base, "{repo_id}")
 tok = AutoTokenizer.from_pretrained("{repo_id}")
-# prompt format (raw text, no chat template):
-# [{spec.name}]\\n<field>: <value>...\\noutput:
 ```
 
-Or with smallbatch itself, place this repo's contents under
-`artifacts/{spec.name}/<version>/` and call `smallbatch.load_fn("{spec.name}")`.
+With smallbatch: place this repo's contents under
+`artifacts/{spec.name}/<version>/` and call `smallbatch.load_fn("{spec.name}")`,
+or `smallbatch run {spec.name} --json '...'`.
 
-Compiled with smallbatch {manifest.get("smallbatch_version", "")}; full
-metrics and provenance in `manifest.json`, the exact function definition in
-`spec.yaml`.
+If an `export/` directory is included, it holds a quantized GGUF plus a GBNF
+grammar enforcing the output contract exactly — see `export/README.md` for
+llama.cpp, llama-server, and Ollama invocations.
+
+## Limitations
+
+Trained to imitate one teacher on one rubric over one input distribution;
+scores reflect agreement with that teacher on held-out real items, not ground
+truth. Inputs far from the training distribution degrade silently — re-run
+the eval (`smallbatch compile`) after any rubric or distribution change.
+
+Compiled with smallbatch {manifest.get("smallbatch_version", "")}.
 """
 
 

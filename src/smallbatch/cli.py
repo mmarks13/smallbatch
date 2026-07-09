@@ -148,6 +148,36 @@ def cmd_sweep(args) -> int:
     )
 
 
+def cmd_init(args) -> int:
+    from .init_cmd import init
+
+    try:
+        out = init(args.template, args.name, directory=args.dir)
+    except (ValueError, FileExistsError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"created {out}/spec.yaml and {out}/items.json")
+    print(f"next: fill in the TODOs, then `smallbatch doctor {out}/spec.yaml --items {out}/items.json`")
+    return 0
+
+
+def cmd_serve(args) -> int:
+    from .serve import serve
+
+    try:
+        return serve(
+            args.name,
+            artifacts_root=args.artifacts,
+            version=args.version,
+            port=args.port,
+            llama_server=args.llama_server,
+            allow_failed=args.allow_failed,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
 def cmd_doctor(args) -> int:
     from .doctor import run_doctor
 
@@ -271,6 +301,23 @@ def main(argv: list[str] | None = None) -> int:
     wp.add_argument("--data", help="labeled data dir (default data/<name>)")
     wp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
     wp.set_defaults(fn=cmd_sweep)
+
+    ip = sub.add_parser("init", help="create a starter spec.yaml + items.json from a template")
+    ip.add_argument("template", choices=["classifier", "scorer", "structured"])
+    ip.add_argument("name", help="function name (also the output directory)")
+    ip.add_argument("--dir", help="output directory (default: ./<name>)")
+    ip.set_defaults(fn=cmd_init)
+
+    vs = sub.add_parser(
+        "serve", help="serve a compiled function over HTTP (llama-server + validation)"
+    )
+    vs.add_argument("name")
+    vs.add_argument("--port", type=int, default=8080)
+    vs.add_argument("--version", help="artifact version dir name (default: latest passing)")
+    vs.add_argument("--llama-server", help="path to the llama-server binary")
+    vs.add_argument("--allow-failed", action="store_true")
+    vs.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    vs.set_defaults(fn=cmd_serve)
 
     dp = sub.add_parser(
         "doctor", help="preflight a spec: contract, teacher, data, hardware, disk, export"

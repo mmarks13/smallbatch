@@ -18,6 +18,7 @@ plus `parse_output`-style validation by the caller.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -78,6 +79,76 @@ def gbnf_grammar(spec: FunctionSpec) -> str:
             f"rationale ::= [^\\n]+\n{rules}"
         )
     return f'root ::= " "? {seq}\n{rules}'
+
+
+def bundle_readme(spec: FunctionSpec, manifest: dict, gguf_name: str) -> str:
+    """README.md for the export bundle: what this artifact is and exactly how
+    to call it outside Python."""
+    from .prompts import completion_budget, output_instruction
+
+    input_lines = "\\n".join(f"{k}: <{t}>" for k, t in spec.input_schema.items())
+    example_prompt = f"[{spec.name}]\\n{input_lines}\\noutput:"
+    gate = manifest.get("gate", {})
+    adapter = (manifest.get("metrics") or {}).get("adapter") or {}
+    ci = adapter.get("agreement_ci")
+    ci_txt = f" (95% CI {ci[0]:.0%}-{ci[1]:.0%})" if ci else ""
+    max_new = completion_budget(spec) + 8
+    return f"""# {spec.name} — compiled function (GGUF bundle)
+
+{spec.description.strip()}
+
+This is a **narrow compiled function**, not a chat model: it answers exactly
+one prompt shape with a constrained output — {output_instruction(spec)}.
+
+- base model: `{manifest.get("base_model")}` (the adapter inherits its license)
+- teacher: `{manifest.get("data", {}).get("teacher_model")}` via {manifest.get("data", {}).get("teacher_backend")}
+- gate: **{"PASS" if gate.get("passed") else "FAIL"}** — agreement {adapter.get("agreement", 0):.1%}{ci_txt} on {adapter.get("n", "?")} held-out items
+- files: `{gguf_name}` (weights), `{spec.name}.gbnf` (grammar), `Modelfile` (Ollama), `spec.yaml`, `manifest.json`, `report.md`
+
+## Prompt format
+
+```
+{example_prompt}
+```
+
+(One `field: value` line per input field, then the literal line `output:`.)
+
+## llama.cpp
+
+```bash
+llama-cli -m {gguf_name} --grammar-file {spec.name}.gbnf -n {max_new} --temp 0 \\
+  -p "{example_prompt}"
+```
+
+Or serve it:
+
+```bash
+llama-server -m {gguf_name} --port 8080
+curl -s http://localhost:8080/completion -d '{{
+  "prompt": "{example_prompt}",
+  "n_predict": {max_new}, "temperature": 0,
+  "grammar": {json.dumps(gbnf_grammar(spec))}
+}}'
+```
+
+## Ollama
+
+```bash
+ollama create {spec.name} -f Modelfile
+ollama run {spec.name} "{example_prompt}"
+```
+
+Note: Ollama does not apply GBNF grammars; outputs are usually well-formed
+(temperature 0, short `num_predict`) but validate them against the contract
+in `spec.yaml`. `smallbatch serve` and llama.cpp enforce the grammar exactly.
+
+## smallbatch
+
+```bash
+smallbatch run {spec.name} --json '{{...input fields...}}'
+smallbatch serve {spec.name}   # local HTTP endpoint with output validation
+```
+"""
 
 
 def modelfile(spec: FunctionSpec, gguf_name: str) -> str:
@@ -252,6 +323,13 @@ def export(
 
     modelfile_path = out / "Modelfile"
     modelfile_path.write_text(modelfile(spec, gguf_path.name))
+
+    # make the bundle self-describing: spec + manifest + report + usage README
+    (out / "README.md").write_text(bundle_readme(spec, manifest, gguf_path.name))
+    for extra in ("spec.yaml", "manifest.json", "report.md"):
+        src = version_dir / extra
+        if src.exists():
+            shutil.copy(src, out / extra)
 
     size_mb = gguf_path.stat().st_size / 1e6
     print(
