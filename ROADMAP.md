@@ -7,16 +7,25 @@ are non-goals — see the bottom of this page.
 
 ## Near-term: table stakes
 
-- **Richer eval reports.** The stratified holdout already exists; the report
-  should use it: confusion matrix and per-label precision/recall for enums,
-  per-band agreement for int scores, in both the manifest and `summary.md`.
-  A gate FAIL should show *where* it failed — which also feeds the existing
-  band-targeted variant generation.
+- **Richer eval reports.** ✅ Shipped: every compile writes
+  `report.md`/`report.json` — agreement with a Wilson 95% CI, per-label
+  agreement, confusion matrix, severe-miss rate, training curve + chosen
+  epoch, and the largest disagreements with the teacher's rationale.
+- **Checkpoint selection + early stopping.** ✅ Shipped: a dev split is
+  scored each epoch (same constrained decoding as the final eval), the best
+  checkpoint is kept, and training stops on `patience` stale epochs. The
+  gate is a final acceptance check, not the discovery mechanism.
 - **Constrained decoding.** ✅ Shipped: the PyTorch runtime and eval mask the
   vocabulary token-by-token to the output contract (adapter, zero-shot
   baseline, and `run` alike; rationale mode stays unconstrained), and the
   GGUF export ships a GBNF grammar. Invalid outputs are structurally
   impossible.
+- **Structured outputs.** ✅ Shipped: a flat multi-field output map (enum /
+  int-range fields, e.g. label + reason code + confidence) with per-field
+  metrics and gates, fixed-order line emission, and per-field grammar.
+- **Preflight.** ✅ Shipped as `smallbatch doctor`: contract complexity,
+  teacher reachability probe, split/coverage checks, CUDA/precision/qlora
+  readiness, disk, export prerequisites.
 - **Checkpoint resume + training telemetry.** `resume_from_checkpoint` and
   `report_to=[tensorboard]` pass-throughs from TRL. Long runs on consumer
   GPUs fail for boring reasons; resuming beats restarting.
@@ -29,11 +38,9 @@ merged + quantized GGUF with quant presets ✅, GBNF grammar generated from
 the output contract ✅, Ollama Modelfile ✅, `--adapter-only` GGUF for
 `llama-server --lora` over a shared base ✅.
 
-Still to come from this line:
-
-- A thin **`smallbatch serve`**: one command that stands up an
-  OpenAI-compatible endpoint for a compiled function (wrapping llama-server
-  or the PyTorch runtime) so non-Python callers get the function too.
+- **`smallbatch serve`** ✅ Shipped: wraps llama-server on the exported GGUF
+  behind a validating `POST /call` endpoint. The export bundle is now
+  self-describing (README with exact commands, spec/manifest/report copies).
 
 ## After that
 
@@ -45,16 +52,17 @@ Still to come from this line:
 - **HF Hub push (opt-in).** ✅ Shipped as `smallbatch push` — uploads a
   passing artifact with the manifest rendered as the model card, private by
   default.
-- **Label review loop.** A CLI pass over teacher labels and generated
-  variants — accept/reject/annotate, regenerate from the notes. Trusting
-  unseen synthetic rows is the reasonable objection to teacher labeling;
-  make inspection cheap.
+- **Label review loop.** ✅ Shipped as `smallbatch review`:
+  accept/reject/edit/annotate with split/origin/label/field filters, audit
+  trail kept, splits rebuilt. Still to come from this line: regenerating
+  variants from review notes.
 - **Variant diversity axes.** Band-targeting balances labels but not input
   space. Let the spec declare variation dimensions (e.g. length, formality,
   domain) and steer variant generation across them.
-- **Extraction task type.** Multiple typed fields per item — keeps the
-  "narrow contract, checkable gate" property, unlike open QA. The `output`
-  schema was designed to grow; this is the first real test of that.
+- **Extraction task type.** Largely covered by structured outputs (multiple
+  typed fields per item, per-field gates). What remains from this line:
+  free-position span extraction — deliberately parked until it can be done
+  without open-ended text output.
 
 ## Non-goals
 

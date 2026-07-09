@@ -23,14 +23,15 @@ allowed by its terms — see [docs/responsible-use.md](../../docs/responsible-us
 
 The teacher scores the 71 real tickets against the rubric, generates
 band-targeted variants up to `teacher.examples` (150), and writes a
-train/holdout split:
+stratified train/dev/gate split (dev picks the best training checkpoint;
+gate is the untouched acceptance set):
 
 ```bash
 smallbatch label examples/ticket-priority/spec.yaml \
     --items examples/ticket-priority/items.json
 ```
 
-Output lands in `data/ticket-priority/` (train.jsonl, holdout.jsonl, meta.json).
+Output lands in `data/ticket-priority/` (train/dev/gate.jsonl, meta.json).
 Expect a JSON summary with a `label_histogram`; if >50% of labels fall in one
 bin you'll get a warning to sharpen the rubric.
 
