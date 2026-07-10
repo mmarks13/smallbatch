@@ -104,11 +104,15 @@ def zeroshot_prompt(spec: FunctionSpec, item: dict[str, Any], spec_files_text: s
 
 
 def teacher_label_prompt(
-    spec: FunctionSpec, items: list[dict[str, Any]], spec_files_text: str
+    spec: FunctionSpec,
+    items: list[dict[str, Any]],
+    spec_files_text: str,
+    field_order: Optional[list[str]] = None,
 ) -> str:
     ref = f"\nReference files:\n{spec_files_text}\n" if spec_files_text else ""
+    order = field_order if field_order is not None else list(spec.input_schema)
     numbered = json.dumps(
-        [{"id": i, **{k: it.get(k) for k in spec.input_schema}} for i, it in enumerate(items)],
+        [{"id": i, **{k: it.get(k) for k in order}} for i, it in enumerate(items)],
         indent=1,
         ensure_ascii=False,
     )

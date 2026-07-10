@@ -14,7 +14,15 @@ import json
 from pathlib import Path
 from typing import Callable, Optional
 
-from .labeling import Row, _coerce_valid, _write_jsonl, primary_value, read_jsonl, row_output
+from .labeling import (
+    Row,
+    _coerce_valid,
+    _out_agrees,
+    _write_jsonl,
+    primary_value,
+    read_jsonl,
+    row_output,
+)
 from .spec import FunctionSpec
 
 
@@ -33,6 +41,10 @@ def matches(spec: FunctionSpec, row: Row, args) -> bool:
         if name not in out:
             return False
         if want and str(out[name]) != want:
+            return False
+    if getattr(args, "unstable", False):
+        probe = row.get("probe_output")
+        if probe is None or _out_agrees(spec, probe, row_output(spec, row)):
             return False
     status = (row.get("review") or {}).get("status")
     if args.status == "unreviewed":
@@ -62,6 +74,12 @@ def format_row(spec: FunctionSpec, row: Row, pos: int, total: int) -> str:
         lines.append(f"  -> score: {out}")
     if row.get("reason"):
         lines.append(f"  teacher: {row['reason']}")
+    if row.get("probe_output") is not None:
+        probe = row["probe_output"]
+        stable = _out_agrees(spec, probe, row_output(spec, row))
+        lines.append(
+            f"  probe relabel: {probe}" + ("" if stable else "  (UNSTABLE)")
+        )
     return "\n".join(lines)
 
 

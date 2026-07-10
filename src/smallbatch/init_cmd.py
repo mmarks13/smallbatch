@@ -18,6 +18,8 @@ teacher:
   examples: 150                     # target dataset size (variants fill the gap)
   holdout: 0.15                     # gate split (fraction of reals, or an int count)
   dev: 0.1                          # checkpoint-selection split
+  consistency: 30                   # self-consistency probe: re-label this many
+                                    # rows to measure the teacher's own ceiling
 """
 
 _TAIL = """\

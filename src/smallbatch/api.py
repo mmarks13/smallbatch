@@ -212,7 +212,15 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
 
     from .report import build_report, write_report
 
-    report = build_report(spec, gate_rows, adapter_metrics, zeroshot, gate, info)
+    report = build_report(
+        spec, gate_rows, adapter_metrics, zeroshot, gate, info,
+        teacher_probe=(
+            {"self_agreement": data_meta["teacher_self_agreement"],
+             "n": data_meta.get("probe_n")}
+            if data_meta.get("teacher_self_agreement") is not None
+            else None
+        ),
+    )
     report_path = write_report(version_dir, report)
 
     return CompileResult(

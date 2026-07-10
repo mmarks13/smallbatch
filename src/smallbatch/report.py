@@ -257,6 +257,7 @@ def build_report(
     zeroshot: Optional[dict],
     gate: dict,
     training: dict,
+    teacher_probe: Optional[dict] = None,
 ) -> dict:
     """Assemble the full eval report from compile outputs."""
     preds = adapter.get("preds", [])
@@ -322,6 +323,9 @@ def build_report(
     }
     if zeroshot:
         headline["zeroshot_agreement"] = zeroshot.get("agreement")
+    if teacher_probe:
+        headline["teacher_self_agreement"] = teacher_probe.get("self_agreement")
+        headline["teacher_probe_n"] = teacher_probe.get("n")
 
     audit = shortcut_audit(spec, gate_rows, preds, golds)
 
@@ -386,6 +390,13 @@ def render_markdown(report: dict) -> str:
         lines.append(
             f"best constant baseline: predicting \"{const['value']}\" scores "
             f"{_pct(const['agreement'])} agreement"
+        )
+    tsa = h.get("teacher_self_agreement")
+    if tsa:
+        ratio = h.get("agreement", 0) / tsa if tsa else 0
+        lines.append(
+            f"teacher self-agreement: {_pct(tsa)} (n={h.get('teacher_probe_n')}) — "
+            f"the student is at {ratio:.0%} of the teacher's own ceiling"
         )
     verdict = "PASS" if gate["passed"] else "FAIL"
     lines.append(f"gate: **{verdict}**" + (f" — {'; '.join(gate['reasons'])}" if gate["reasons"] else ""))

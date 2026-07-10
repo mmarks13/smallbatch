@@ -190,6 +190,83 @@ def generate_variants(
     return variants, sources
 
 
+def _out_agrees(spec: FunctionSpec, a: Any, b: Any) -> bool:
+    """Two outputs agree under the gate rule (±1 int / exact enum; all
+    fields for multi-field contracts). Local twin of evaluate._agrees —
+    evaluate.py is a torch-heavy import this module must not pull in."""
+    if spec.output.is_scalar:
+        f = spec.output.scalar
+        return abs(a - b) <= 1 if f.type == "int" else a == b
+    return all(
+        (abs(a[name] - b[name]) <= 1 if f.type == "int" else a[name] == b[name])
+        for name, f in spec.output.fields.items()
+    )
+
+
+def consistency_probe(
+    teacher: Teacher, spec: FunctionSpec, rows: list[Row], n: int, seed: int = 17
+) -> Optional[dict[str, Any]]:
+    """Double-label a stratified sample of real rows with the input fields in
+    shuffled order, and measure how often the teacher agrees with itself.
+    That self-agreement is the ceiling on any student's gate agreement.
+
+    Each probed row gains `probe_output`; the original label stays
+    authoritative (review --unstable steps through the disagreements)."""
+    reals = [r for r in rows if r["origin"] == "real"]
+    if n <= 0 or not reals:
+        return None
+    rng = random.Random(seed)
+    sample = _stratified_take(reals, min(n, len(reals)), rng)
+    order = list(spec.input_schema)
+    if len(order) > 1:
+        rng.shuffle(order)
+        if order == list(spec.input_schema):
+            order.reverse()
+
+    spec_text = spec.spec_files_text()
+    outputs: dict[int, Any] = {}
+    for start in range(0, len(sample), spec.teacher.batch_size):
+        batch = sample[start : start + spec.teacher.batch_size]
+        reply = teacher.complete(
+            prompts.teacher_label_prompt(
+                spec, [r["input"] for r in batch], spec_text, field_order=order
+            )
+        )
+        try:
+            labels = prompts.extract_json(reply)
+        except ValueError:
+            continue
+        for entry in labels:
+            try:
+                local_id = int(entry["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            raw = entry.get("score") if spec.output.is_scalar else entry.get("output")
+            out = _coerce_valid(spec, raw)
+            if 0 <= local_id < len(batch) and out is not None:
+                outputs[id(batch[local_id])] = out
+
+    probed = agree = unstable_in_gate = 0
+    for r in sample:
+        out = outputs.get(id(r))
+        if out is None:
+            continue
+        probed += 1
+        r["probe_output"] = out
+        if _out_agrees(spec, out, row_output(spec, r)):
+            agree += 1
+        elif r.get("split") == "gate":
+            unstable_in_gate += 1
+    if not probed:
+        return None
+    return {
+        "n": probed,
+        "self_agreement": round(agree / probed, 4),
+        "unstable": probed - agree,
+        "unstable_in_gate": unstable_in_gate,
+    }
+
+
 def _score_key(r: Row) -> Any:
     # stratification key: the bare score, or the first field of a multi-field
     # output (callers with a spec in hand pass key=primary_value instead)
@@ -279,7 +356,12 @@ def _migrate_legacy_splits(rows: list[Row], out_dir: Path) -> None:
             r["split"] = "gate" if r["id"] in gate_ids else "train"
 
 
-def write_dataset(spec: FunctionSpec, rows: list[Row], out_dir: Path) -> dict[str, Any]:
+def write_dataset(
+    spec: FunctionSpec,
+    rows: list[Row],
+    out_dir: Path,
+    probe: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """Write labeled/train/dev/gate JSONL + meta for already-split rows."""
     out_dir.mkdir(parents=True, exist_ok=True)
     by_split = {s: [r for r in rows if r["split"] == s] for s in ("train", "dev", "gate")}
@@ -305,6 +387,9 @@ def write_dataset(spec: FunctionSpec, rows: list[Row], out_dir: Path) -> dict[st
         "prompt_version": prompts.PROMPT_VERSION,
         "labeled_at": datetime.date.today().isoformat(),
     }
+    if probe:
+        meta["teacher_self_agreement"] = probe["self_agreement"]
+        meta["probe_n"] = probe["n"]
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     return meta
 
@@ -379,7 +464,22 @@ def build_dataset(
         r["source_ids"] = src_by_id.get(r["id"], [])
         r.update(stamp)
 
-    return write_dataset(spec, rows + variant_rows, out_dir)
+    probe = consistency_probe(
+        teacher, spec, rows, spec.teacher.consistency, seed=spec.train.seed
+    )
+    if probe:
+        print(
+            f"teacher self-agreement: {probe['self_agreement']:.0%} on "
+            f"{probe['n']} re-labeled rows ({probe['unstable']} unstable)"
+        )
+        if probe["unstable_in_gate"]:
+            print(
+                f"warning: {probe['unstable_in_gate']} unstable row(s) sit in the "
+                "gate split — the teacher itself wavers on them; "
+                "`smallbatch review --unstable` to inspect"
+            )
+
+    return write_dataset(spec, rows + variant_rows, out_dir, probe=probe)
 
 
 def _write_jsonl(path: Path, rows: list[Row]) -> None:

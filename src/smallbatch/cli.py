@@ -343,6 +343,10 @@ def main(argv: list[str] | None = None) -> int:
     vp.add_argument("--label", help="filter by (primary) label/score value")
     vp.add_argument("--field", help="structured outputs: filter by field, e.g. reason or reason=outage")
     vp.add_argument(
+        "--unstable", action="store_true",
+        help="only rows where the teacher's self-consistency probe disagreed",
+    )
+    vp.add_argument(
         "--status", default="unreviewed",
         choices=["unreviewed", "accepted", "rejected", "edited", "all"],
     )

@@ -157,6 +157,18 @@ def test_report_carries_audit_and_headline_baselines():
     assert "best constant baseline" in md and "MAE" in md
 
 
+def test_report_teacher_ceiling_line():
+    adapter = compute_metrics(SPEC, PREDS, [r["score"] for r in GATE_ROWS])
+    adapter["preds"] = PREDS
+    r = build_report(
+        SPEC, GATE_ROWS, adapter, None, {"passed": True, "reasons": []}, TRAINING,
+        teacher_probe={"self_agreement": 0.9, "n": 30},
+    )
+    assert r["headline"]["teacher_self_agreement"] == 0.9
+    md = render_markdown(r)
+    assert "teacher self-agreement: 90%" in md and "of the teacher's own ceiling" in md
+
+
 def test_audit_markdown_section():
     rows, preds, golds = _audit_rows()
     golds = [5 if i % 4 else 4 for i in range(len(golds))]

@@ -36,6 +36,15 @@ def write_dataset(tmp_path, rs):
     (tmp_path / "meta.json").write_text("{}")
 
 
+def test_matches_unstable_filter():
+    rs = rows()
+    rs[0]["probe_output"] = rs[0]["score"]  # stable: probe agrees
+    rs[1]["probe_output"] = (rs[1]["score"] + 3) % 5  # unstable
+    args = make_args(status="all", unstable=True)
+    picked = [r for r in rs if matches(SPEC, r, args)]
+    assert picked == [rs[1]]  # unprobed and stable rows excluded
+
+
 def test_matches_filters():
     row = rows()[2]  # score 2
     assert matches(SPEC, row, make_args())

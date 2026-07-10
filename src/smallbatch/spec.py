@@ -130,6 +130,10 @@ class TeacherSpec(BaseModel):
     holdout: float | int = 0.15
     dev: float | int = 0.1
     batch_size: int = 40
+    # self-consistency probe: after labeling, re-send this many real rows
+    # (stratified, input fields shuffled) and report how often the teacher
+    # agrees with itself — the ceiling on any student's agreement. 0 = off.
+    consistency: int = 0
     # openai-compatible only:
     base_url: Optional[str] = None
     api_key_env: str = "OPENAI_API_KEY"
@@ -142,6 +146,8 @@ class TeacherSpec(BaseModel):
                 raise ValueError(f"teacher.{name} fraction must be in [0, 1)")
             if isinstance(v, int) and v < 0:
                 raise ValueError(f"teacher.{name} count must be >= 0")
+        if self.consistency < 0:
+            raise ValueError("teacher.consistency must be >= 0")
         return self
 
 

@@ -1,6 +1,11 @@
 import json
 
-from smallbatch.labeling import build_dataset, plan_variant_bands, split_holdout
+from smallbatch.labeling import (
+    build_dataset,
+    consistency_probe,
+    plan_variant_bands,
+    split_holdout,
+)
 from smallbatch.spec import FunctionSpec
 
 SPEC = FunctionSpec(
@@ -90,6 +95,54 @@ def test_build_dataset_end_to_end(tmp_path):
             "variant seeded from a non-train real"
         )
     assert real_ids  # sanity
+
+
+class SplitBrainTeacher:
+    """Probe fake: relabels t0-t4 as 1 (stable) and t5+ as 4 (unstable)."""
+
+    def complete(self, prompt: str) -> str:
+        items = json.loads(prompt[prompt.index("[") :][: FakeTeacher._arr_len(prompt)])
+        return json.dumps(
+            [
+                {"id": it["id"], "score": 1 if int(it["title"][1:]) < 5 else 4,
+                 "reason": ""}
+                for it in items
+            ]
+        )
+
+
+def test_consistency_probe_measures_self_agreement():
+    data = rows([1] * 10)
+    for r in data:
+        r["split"] = "train"
+    data[9]["split"] = "gate"
+    probe = consistency_probe(SplitBrainTeacher(), SPEC, data, n=10)
+    assert probe["n"] == 10
+    assert probe["self_agreement"] == 0.5  # t5-t9 flip 1 -> 4 (beyond ±1)
+    assert probe["unstable"] == 5 and probe["unstable_in_gate"] == 1
+    assert all("probe_output" in r for r in data)  # n covered every row
+    assert data[9]["probe_output"] == 4
+
+
+def test_consistency_probe_off_and_empty():
+    assert consistency_probe(SplitBrainTeacher(), SPEC, rows([1] * 4), n=0) is None
+    assert consistency_probe(SplitBrainTeacher(), SPEC, [], n=5) is None
+
+
+def test_build_dataset_runs_probe_into_meta(tmp_path):
+    spec = SPEC.model_copy(
+        update={"teacher": SPEC.teacher.model_copy(update={"consistency": 5})}
+    )
+    meta = build_dataset(FakeTeacher(), spec, [{"title": f"real{i}"} for i in range(10)],
+                         tmp_path, max_variants=0)
+    assert meta["teacher_self_agreement"] == 1.0  # FakeTeacher always says 1
+    assert meta["probe_n"] == 5
+    probed = [
+        json.loads(l)
+        for l in (tmp_path / "labeled.jsonl").read_text().splitlines()
+        if "probe_output" in l
+    ]
+    assert len(probed) == 5
 
 
 def test_append_keeps_gate_sticky_and_dedupes(tmp_path):

@@ -28,35 +28,43 @@ end-to-end CI test, no published package, and no external user validation.
 
 The most important product correction is this:
 
-> smallbatch should be a classifier compiler, not a LoRA compiler.
+> smallbatch should be a decision compiler, not a LoRA compiler.
 
-Given a rubric and representative examples, it should try cheap conventional
-classifiers, small encoder models, and a small generative adapter, then package
-the smallest candidate that meets an independently defined quality and runtime
-budget. A 350M autoregressive language model may win on some tasks, but it is
-an implausible universal default for a product whose stated priorities are
-cost and energy. The tool should prove when weights are useful, not assume the
-answer in advance.
+The compiler has two distinct loops. First, it should help a user turn a fuzzy
+goal and representative cases into an explicit, testable rubric: propose and
+revise labels, surface ambiguous boundaries, capture human adjudications, and
+freeze a semantic version. Second, once that decision version is stable enough
+to operate, it should try cheap conventional classifiers, small encoder
+models, and a small generative adapter, then package the smallest candidate
+that meets independently defined quality and runtime requirements.
+
+A 350M autoregressive language model may win on some tasks, but it is an
+implausible universal default for a product whose stated priorities are cost
+and energy. The tool should prove both that the decision is coherent and that
+weights are the right implementation, not assume either answer in advance.
 
 The recommended value proposition is:
 
-> **Turn a rubric and real examples into a tested local classifier.**
+> **Turn an evolving judgment into a tested local decision function.**
 >
-> smallbatch labels with the teacher you choose, compares small candidate
-> models, and packages the smallest one that meets your quality bar. Runtime
-> calls stay local and incur no hosted-model API fee.
+> Start with a goal and representative cases. smallbatch helps you refine the
+> labels and rubric with teacher and human feedback, validate a frozen decision
+> version, then package the smallest local implementation that meets your
+> quality bar. Runtime calls stay local and incur no hosted-model API fee.
 
 For the software that exists today, use the narrower, fully accurate version:
 
-> **Build a constrained local classifier from a rubric and representative
-> examples, and measure how closely it matches your chosen teacher.**
+> **Define a bounded decision, inspect and revise teacher-labeled examples,
+> then train a local classifier and measure how closely it matches the frozen
+> rubric's labels.**
 
 Do not lead with "Program-as-Weights," "fuzzy functions," energy reduction,
 "runs anywhere," or "a model you own" until the project has evidence and
 license semantics to support those phrases. ProgramAsWeights now occupies the
 spec-only fuzzy-function compiler position directly. smallbatch can be
-meaningfully different: slower to build, but grounded in private real-world
-data, independently evaluated, auditable, and controlled by the user.
+meaningfully different: it develops a decision through representative cases
+before compiling it, then preserves rubric versions, review evidence, and
+implementation quality in a user-controlled workflow.
 
 ### Release recommendation
 
@@ -65,13 +73,14 @@ smaller "truthful alpha" release that:
 
 1. fixes data/spec integrity, artifact privacy, artifact reproducibility, and
    the install path;
-2. makes independent gold labels an explicit concept;
-3. adds at least one non-generative baseline;
-4. publishes a reproducible benchmark and removes the current empirical
+2. makes draft/frozen rubric versions and executable decision tests explicit;
+3. makes independent adjudicated labels an explicit concept;
+4. adds at least one non-generative baseline;
+5. publishes a reproducible benchmark and removes the current empirical
    claims until that benchmark exists;
-5. narrows the public workflow to the few commands needed to build, inspect,
-   and call one classifier; and
-6. clearly labels every unexercised integration as experimental.
+6. narrows the public workflow to the steps needed to develop, freeze, compile,
+   inspect, and call one decision function; and
+7. clearly labels every unexercised integration as experimental.
 
 ## Goals used for this evaluation
 
@@ -79,26 +88,28 @@ The intended outcomes are:
 
 - a widely adopted open-source tool;
 - a tool the maintainer personally relies on;
-- a first audience of data scientists familiar with Hugging Face, followed by
-  application developers replacing recurring hosted-LLM calls;
+- a first audience of data scientists developing repeatable fuzzy decisions,
+  followed by application developers consuming their local artifacts;
 - lower inference cost and, when measured, a lower energy footprint;
 - approachable fine-tuning;
 - shareable local classifier functions; and
 - eventually, a company-managed library of such functions.
 
 These goals imply a stronger standard than "training completed." A successful
-build must answer four questions:
+workflow must answer five questions:
 
-1. Is the task suitable for compilation at all?
-2. Is the resulting function correct enough against evidence independent of
+1. Is the intended judgment specified clearly enough that a domain owner can
+   resolve representative and boundary cases consistently?
+2. Is this frozen decision version suitable for compilation at all?
+3. Is the resulting function correct enough against evidence independent of
    the teacher response used for training?
-3. Is it materially cheaper, faster, smaller, or more private than the
+4. Is it materially cheaper, faster, smaller, or more private than the
    alternative?
-4. Can another person install and call the artifact without reconstructing
+5. Can another person install and call the artifact without reconstructing
    the training environment?
 
-The current product answers parts of question 2 and question 4, but not yet
-strongly enough to rely on.
+The current product offers pieces of questions 1, 3, and 5, but it does not yet
+connect them into a reliable decision-development lifecycle.
 
 ## Current-state scorecard
 
@@ -145,25 +156,33 @@ Sticky gate assignment is also directionally correct. The terminology should
 be "user-provided" rather than "real," because the bundled example inputs are
 themselves synthetic, but the leakage concern is valid.
 
-### 4. Development selection separate from final acceptance
+### 4. Reviewable labels as feedback on the decision
+
+`smallbatch review`, teacher rationales, disagreement examples, and label
+histograms are early pieces of a rubric-development loop. Their most important
+purpose is not merely cleaning a training set. They should tell the user where
+the definition is underspecified, which boundaries need tie-breakers, and
+which cases should become permanent decision tests.
+
+### 5. Development selection separate from final acceptance
 
 Scoring each epoch on a dev split and preserving the best adapter is much
 better than evaluating only the final epoch. The distinction between training
 selection and final acceptance should remain.
 
-### 5. Contract-constrained inference
+### 6. Contract-constrained inference
 
 Applying the same constrained output space to the adapter and zero-shot base is
 a useful invariant. It eliminates format noise from the comparison. It does
 not make the semantic answer correct, but it makes failure easier to measure.
 
-### 6. Inspectable reports and failure-preserving artifacts
+### 7. Inspectable reports and failure-preserving artifacts
 
 Keeping a failed build, returning exit code 2 for a quality failure, and
 producing confusion and disagreement details are good operational choices.
 The report needs privacy controls and stronger metrics, not removal.
 
-### 7. Local-first ownership of the workflow
+### 8. Local-first ownership of the workflow
 
 Plain files, no required control plane, and an opt-in hosted teacher are
 valuable. This is more defensible than claiming all data is local: a hosted
@@ -175,36 +194,54 @@ fully local.
 
 ### The job to be done
 
-The primary job is not "fine-tune a model." It is:
+The primary job is not "fine-tune a model," and it does not require an existing
+LLM call. It has two stages:
 
-> I have a stable, repeated decision currently implemented by a costly LLM
-> call. Help me determine whether it can become a reliable local classifier,
+> **Decision development:** I have a fuzzy judgment I want to operationalize.
+> Help me turn representative cases, domain intent, and teacher/human feedback
+> into explicit labels, a rubric, boundary rules, and an executable test set.
+
+> **Decision compilation:** Once a version of that judgment is coherent enough
+> to deploy, help me determine whether it can become a reliable local function,
 > build the cheapest acceptable implementation, and give me an artifact I can
 > share and operate.
 
+Rubric stability is therefore a compilation boundary, not an entry
+prerequisite. Iteration is expected before a semantic version is frozen. If
+the decision changes later, that is a new semantic version with a new evidence
+set and artifact lineage.
+
 This framing changes product priorities:
 
-- Quality must be evaluated against an independent target, not only imitation.
+- The rubric itself must be tested for coverage, ambiguity, and consistency.
+- Quality must be evaluated against adjudicated targets, not only imitation.
 - Cost, latency, memory, and energy are outputs of the compile, not marketing
   assumptions.
 - Conventional classifiers are candidates, not competitors to exclude.
 - Packaging and repeatable loading matter as much as training.
-- A failed compile that explains why the API should not be replaced is a
-  valuable product result.
+- A failed calibration that exposes an incoherent rubric is valuable.
+- A failed compile that explains why no local implementation should be shipped
+  is also a valuable product result.
 
 ### Recommended category
 
-Use **local classifier compiler** or **decision compiler**. "Small-batch
-distillation" accurately names one technique, but it does not clearly describe
-the user outcome. "Fuzzy function compiler" now invites a direct comparison
-with ProgramAsWeights, whose compilation is much faster and requires no
-dataset or GPU from the user.
+Use **decision compiler** as the primary category and **local classifier
+compiler** to describe the main artifact type. "Small-batch distillation"
+accurately names one implementation technique, but not the user outcome.
+"Fuzzy function compiler" invites a direct comparison with ProgramAsWeights,
+whose spec-to-weights compilation is much faster and requires no dataset or GPU
+from the user. smallbatch's additional value is the prior intent-to-rubric
+development loop and the evidence that connects that rubric to an artifact.
 
 ### The differentiated promise
 
 smallbatch should own these words:
 
-- **grounded:** built and evaluated on the user's representative inputs;
+- **developed:** tacit judgment becomes explicit labels, boundaries, and tests;
+- **grounded:** the rubric and implementation are exercised on the user's
+  representative inputs;
+- **versioned:** rubric changes create reviewable semantic versions rather than
+  silently changing model behavior;
 - **measured:** quality, cost, latency, size, and energy are reported;
 - **smallest acceptable:** the compiler selects a method under explicit
   constraints;
@@ -216,18 +253,25 @@ smallbatch should own these words:
 
 ### When to use smallbatch
 
-- The output is a stable enum, boolean, bounded ordinal score, or a small set of
-  such fields.
-- The same decision runs often enough for compilation cost to amortize.
-- Representative historical inputs exist or can be collected.
-- The team can define a meaningful gold set or review labels.
-- Privacy, latency, offline use, or platform independence matters.
-- An occasional retraining cycle is operationally acceptable.
+- A team has a recurring fuzzy judgment, even if its label schema and rubric
+  are not yet settled.
+- The intended output can become an enum, boolean, bounded ordinal score, or a
+  small set of controlled fields.
+- Representative historical or prospective cases exist or can be collected.
+- A domain owner can review ambiguous cases and own the final definition.
+- A frozen version will run often enough for compilation cost to amortize, or
+  the rubric/test artifact is itself valuable for consistent hosted decisions.
+- Privacy, latency, offline use, auditability, or platform independence matters.
+- Periodic semantic revisions and recompilation are operationally acceptable.
 
 ### When not to use it
 
-- Call volume is low enough that a hosted API is simpler and cheaper.
-- The rubric or label set changes frequently.
+- No accountable domain owner can resolve ambiguity or define what success
+  means.
+- The judgment remains situational and cannot stabilize even for one deployment
+  interval.
+- Call volume is too low to justify local compilation, unless the rubric and
+  decision-test work is independently useful.
 - The task requires current world knowledge, long reasoning, citations,
   explanations, or open-ended generation.
 - Inputs differ radically from anything available during development.
@@ -236,8 +280,11 @@ smallbatch should own these words:
 - A regex, rules engine, SQL expression, embedding similarity threshold, or
   conventional classifier already meets the requirement.
 
-The last point is important. A tool earns trust by declining needless model
-training.
+Frequent rubric changes do not make the design workflow useless, but they do
+make a long-lived compiled artifact unsuitable. The tool earns trust by
+distinguishing "keep refining the decision," "keep using the hosted model," and
+"compile this frozen version" rather than treating every path as a training
+job.
 
 ## Market landscape
 
@@ -247,11 +294,11 @@ opportunity is orchestration plus evidence, not novel LoRA mechanics.
 
 | Tool/category | What it already does well | Implication for smallbatch |
 |---|---|---|
-| [ProgramAsWeights](https://programasweights.com/docs) | Compiles a natural-language spec in seconds into a small local program; offers shared base runtimes, Python/browser SDKs, versioned community programs, and a public hub. | This is the direct competitor for "describe a fuzzy function and run it locally." Do not compete on zero-data speed. Differentiate on private representative data, independent evaluation, user-controlled training, constrained business classifiers, and artifact ownership. |
+| [ProgramAsWeights](https://programasweights.com/docs) | Compiles a natural-language spec in seconds into a small local program; offers shared base runtimes, Python/browser SDKs, versioned community programs, and a public hub. | This is the direct competitor for "describe a fuzzy function and run it locally." Do not compete on zero-data speed. Differentiate on developing the specification from private representative cases, boundary tests, human adjudication, independent evaluation, and user-controlled artifacts. |
 | [Prompt2Model](https://arxiv.org/abs/2308.12261) | The 2023 research system retrieved data/models, generated data, fine-tuned a deployable model, and reported reliability from a natural-language task description. | The overall concept predates this repository. Cite it and explain that smallbatch is narrower, local-first, contract-constrained, and operational rather than presenting prompt-to-model as new. |
-| [DSPy optimizers](https://github.com/stanfordnlp/dspy/blob/main/docs/docs/learn/optimization/optimizers.md) | Optimize prompts and examples, bootstrap traces, and use `BootstrapFinetune` to distill a prompted program into weights against a user metric. | DSPy is broader and code-centric. smallbatch can win on a packaged single-function lifecycle and local artifact, but must have a stronger evaluation contract and simpler first run. |
-| [Kiln](https://github.com/Kiln-AI/Kiln) | A local-first workbench spanning tasks, datasets, human ratings, synthetic data, evals, prompt optimization, fine-tuning, and deployment, with a desktop UI and Python library. | Kiln is a serious integrated-workflow alternative with far more collaboration UX. smallbatch must stay much narrower and be substantially easier to reason about. "No GUI" is viable only if files/notebooks and CLI review are excellent. |
-| [OpenPipe](https://docs.openpipe.ai/overview) | Captures production requests, curates datasets, fine-tunes, evaluates, and hosts cheaper model replacements behind an OpenAI-compatible API. | This validates the replacement-model job. smallbatch's counter-position is open-source, local, provider-independent runtime and no hosted control plane. OpenPipe is ahead on data capture and production iteration. |
+| [DSPy optimizers](https://github.com/stanfordnlp/dspy/blob/main/docs/docs/learn/optimization/optimizers.md) | Optimize prompts and examples, bootstrap traces, and use `BootstrapFinetune` to distill a prompted program into weights against a user metric. | DSPy is broader and code-centric. smallbatch can win by treating one bounded decision's rubric, adjudicated cases, compiled implementation, and artifact as a versioned product rather than optimizing a general LM program. |
+| [Kiln](https://github.com/Kiln-AI/Kiln) | A local-first workbench spanning tasks, datasets, human ratings, synthetic data, evals, prompt optimization, fine-tuning, and deployment, with a desktop UI and Python library. | Kiln is the closest broad alternative for the decision-development loop and has far more collaboration UX. smallbatch must stay focused on bounded decisions and make calibration substantially easier to reason about. "No GUI" is viable only if files/notebooks and review workflows are excellent. |
+| [OpenPipe](https://docs.openpipe.ai/overview) | Captures production requests, curates datasets, fine-tunes, evaluates, and hosts cheaper model replacements behind an OpenAI-compatible API. | This validates one of the two jobs: replacing an existing model call. smallbatch's broader opportunity starts before production, when the decision itself is still being defined, then ends in an open, local artifact. OpenPipe remains ahead on capture and production iteration. |
 | [SetFit](https://huggingface.co/docs/setfit/index) | Trains prompt-free, low-latency few-shot text classifiers using sentence transformers; supports knowledge distillation and ONNX deployment. | This should be a baseline and likely a candidate backend. Excluding it undermines the cost and energy proposition. |
 | [Distilabel](https://distilabel.argilla.io/) | Provides scalable, fault-tolerant synthetic-data and AI-feedback pipelines across providers, with structured-generation integrations. | Do not try to become a general data-generation framework. Keep one opinionated labeling path or integrate/export to mature dataset tools. |
 | [Hugging Face AutoTrain](https://huggingface.co/docs/autotrain/en/quickstart), [Axolotl](https://docs.axolotl.ai/docs/getting-started.html), and [LLaMA-Factory](https://llamafactory.readthedocs.io/en/latest/getting_started/webui.html) | Mature configurable local/cloud training, LoRA/QLoRA, evaluation, checkpointing, and export across many architectures. | smallbatch should not compete on training knobs or model coverage. Hide the engine behind task-level decisions and a tested compatibility set. |
@@ -263,13 +310,15 @@ The strongest position is between SetFit and OpenPipe:
 
 - more end-to-end and decision-oriented than SetFit;
 - more local, open, portable, and constrained than OpenPipe;
-- more evidence-driven and distribution-specific than ProgramAsWeights;
+- more evidence-driven, specification-oriented, and distribution-specific than
+  ProgramAsWeights;
 - far narrower and quieter than Kiln; and
 - far easier than assembling Distilabel, TRL/PEFT, evaluation code, and
   llama.cpp manually.
 
-The product is not "fine-tuning for everyone." It is "an evidence-driven exit
-ramp from recurring LLM classification calls."
+The product is not "fine-tuning for everyone." It is "a development
+environment and compiler for bounded fuzzy decisions." Replacing recurring LLM
+classification calls is one important entry point, not the whole category.
 
 ### A time-sensitive opportunity
 
@@ -294,22 +343,26 @@ training research, dataset curation, serving, cloud operation, and publishing.
 The README should teach only this conceptual flow:
 
 ```text
-init -> build -> inspect -> run
+draft -> calibrate -> freeze -> compile -> run
 ```
 
-`build` can remain named `compile` if the compiler metaphor is important. The
-key simplification is behavioral: a normal compile should accept the source
-items, automatically run preflight checks, checkpoint labeling, train the
-default candidate set, evaluate, and produce one report. Expert users can
-still invoke data and model stages separately.
+`init`, `label`, and `review` are current pieces of `draft` and `calibrate`;
+they do not yet close the loop back into rubric revisions and permanent tests.
+`freeze` should create a semantic decision version. `compile` should operate on
+that frozen version, automatically run preflight checks, train the default
+candidate set, evaluate, and produce one implementation report. Expert users
+can still invoke data and model stages separately.
 
-The public mental model should contain five nouns:
+The public mental model should contain seven nouns:
 
-1. **function spec:** what decision is being implemented;
-2. **examples:** representative inputs, some optionally gold-labeled;
-3. **build:** the attempt to find a suitable local implementation;
-4. **report:** evidence and resource tradeoffs; and
-5. **artifact:** the installable function selected by the build.
+1. **decision draft:** the current labels, rubric, and boundary rules;
+2. **cases:** representative inputs plus teacher or human judgments;
+3. **decision tests:** adjudicated examples that make the rubric executable;
+4. **decision version:** a frozen semantic definition suitable for evaluation;
+5. **compile:** the attempt to find a suitable local implementation;
+6. **report:** separate evidence about decision quality, implementation
+   fidelity, and resource tradeoffs; and
+7. **artifact:** the installable implementation selected by the compile.
 
 Teacher, model, LoRA, split, grammar, and quantization details belong in the
 advanced path unless they require a user decision.
@@ -318,18 +371,18 @@ advanced path unless they require a user decision.
 
 | Current capability | Decision | Reason |
 |---|---|---|
-| `init` | Keep and improve | A guided starting point is core. Generate enough explicit examples to explain the schema, warn that a meaningful build needs many more, and validate names and YAML label traps. |
+| `init` | Keep and improve | A guided starting point is core. It should accept a goal plus seed cases, help draft label definitions and tie-breakers, warn that suggestions require domain review, and validate names and YAML label traps. |
 | `doctor` | Keep as an expert command, run automatically | Preflight is valuable but users should not have to remember it. Hard failures such as a zero-sized gate must stop before paid labeling. |
-| `label` | Keep under an advanced data workflow | Label generation, append, provenance, and resumability are core internals. It need not be a top-level concept for an application developer. |
-| `review` | Keep the concept, redesign the interface | Human correction is more important than technique sweeps. A terminal row stepper will not scale. Add CSV/JSONL round-trip and notebook/DataFrame workflows before considering a custom GUI. |
-| `compile` | Keep as the product center | It should select among task-appropriate candidates, enforce data integrity, evaluate against gold data, benchmark runtime, and emit a portable artifact. |
+| `label` | Keep in the primary builder workflow | Teacher labeling is evidence used to discover unclear boundaries as well as training data. Preserve provenance and resumability, and distinguish exploratory labels from adjudicated decision tests. It can remain advanced for artifact consumers. |
+| `review` | Make core and redesign the interface | Review is where a domain owner turns disagreement into label definitions, tie-breakers, and permanent cases. A terminal row stepper will not scale. Add CSV/JSONL round-trip and notebook/DataFrame workflows before considering a custom GUI. |
+| `compile` | Keep as the implementation center | It should require a frozen decision version, select among task-appropriate candidates, enforce data integrity, evaluate against adjudicated data, benchmark runtime, and emit a portable artifact. |
 | `run` | Keep, but separate runtime from training | A recipient should not install Torch, TRL, PEFT, and Datasets to call an exported function. Support explicit version selection and machine-readable batch output. |
 | `status` | Keep, refocus on a function catalog | Show one promoted version per function, available versions, runtime/backend, license, quality basis, freshness, and last use. Do not dump every sweep cell as if it were deployable. |
 | `export` | Strategically core, operationally experimental | A shareable CPU artifact is central to the promise. The current llama.cpp checkout workflow has not been validated end to end and only covers the causal-LM backend. Stabilize the artifact contract before promoting it. |
 | `sweep` | Remove from the primary surface | It is a maintainer research tool today and reuses the final gate for selection. Candidate comparison should eventually happen inside `compile` using dev data, with one final untouched test. |
 | `push` | Remove from the release surface for now | It can upload reports containing excerpts of proprietary gate inputs and teacher rationales. Generic Hub upload adds little before a safe portable artifact exists. |
 | `serve` | Defer | A single-threaded stdlib proxy around a separately exported GGUF is not yet a production serving story. First make the artifact easy to call; document standard serving engines later. |
-| Structured multi-field output | Freeze, do not lead with it | It is useful eventually, but it multiplies cross-products, metrics, grammar, and partial-validation cases before scalar classification is proven. It is not free-text extraction. |
+| Structured multi-field output | Keep secondary, not frozen | A controlled reason code can expose how a rubric is being applied and improve review. Multiple fields still multiply metrics, grammar, and partial-validation cases, and this is not free-text extraction. Start calibration UX with one primary label plus at most one controlled reason code. |
 | Integer scoring | Keep after enum classification | Ordinal scoring is a plausible second task, but it needs ordinal baselines and metrics such as MAE and weighted kappa, not only +/-1 agreement. |
 | DoRA | Remove from user-facing configuration | The repository's only experiment found no benefit. It is training-engine detail without demonstrated product value. |
 | Rationale distillation | Remove or quarantine as experimental | It disables constrained decoding, expands output and parsing complexity, and did not improve the pilot. It conflicts with the strongest product boundary. |
@@ -341,27 +394,42 @@ advanced path unless they require a user decision.
 
 The most important missing features are not more training techniques.
 
-1. **Independent gold evaluation.** A user-reviewed or ground-truth final set
+1. **A draft/frozen decision lifecycle.** A rubric should move through explicit
+   draft, calibrated, and frozen semantic versions. Compilation must target one
+   frozen version.
+2. **Executable decision tests.** Human-adjudicated boundary and anchor cases
+   should live beside the rubric, run after every edit, and explain failures in
+   domain language.
+3. **Ambiguity and disagreement discovery.** Repeated teacher labels, multiple
+   perspectives, human corrections, and nearby counterexamples should surface
+   underspecified rules rather than being reduced to one training label.
+4. **Rubric version comparison.** Show which cases change under a proposed
+   rubric, which stored labels become stale, and whether consistency improves.
+5. **Separate probe generation from augmentation.** Synthetic boundary cases
+   used to challenge the rubric are evaluation/design material; synthetic rows
+   used to train an implementation are a different dataset role and must never
+   silently cross between them.
+6. **Independent gold evaluation.** A user-reviewed or ground-truth final set
    must be a first-class input and must never be generated by the teacher being
    evaluated.
-2. **Cheap candidate baselines.** At minimum: majority/class-frequency,
+7. **Cheap candidate baselines.** At minimum: majority/class-frequency,
    TF-IDF plus logistic regression, and a small embedding or SetFit classifier.
-3. **Build economics.** Record teacher tokens and cost, training time and
+8. **Build economics.** Record teacher tokens and cost, training time and
    energy, artifact size, cold start, memory, throughput, latency, and the
    call-volume break-even point.
-4. **Resumable labeling.** Persist each successful batch atomically, cache by
+9. **Resumable labeling.** Persist each successful batch atomically, cache by
    prompt/model/input hash, and resume after transport or process failure.
-5. **A portable runtime package.** Installing and calling a finished function
+10. **A portable runtime package.** Installing and calling a finished function
    should be a small dependency path independent of the training stack.
-6. **Safe artifact sharing.** Reports and manifests must default to no raw or
+11. **Safe artifact sharing.** Reports and manifests must default to no raw or
    excerpted user data. Sharing should run a privacy preflight.
-7. **Function version promotion.** Build versions, select one, give it a stable
+12. **Function version promotion.** Build versions, select one, give it a stable
    alias such as `production`, and support rollback and explicit loading.
-8. **A shared-base library runtime.** Multiple compatible adapters should share
+13. **A shared-base library runtime.** Multiple compatible adapters should share
    one loaded base model, or the documentation must stop claiming shared RAM.
-9. **Typed input contracts and length policy.** Validate values, extra fields,
+14. **Typed input contracts and length policy.** Validate values, extra fields,
    nesting, encoding, maximum lengths, and truncation behavior consistently.
-10. **Reproducible model identity.** Pin base/tokenizer revisions and capture
+15. **Reproducible model identity.** Pin base/tokenizer revisions and capture
     dependency, hardware, dataset, prompt, and code versions.
 
 ## Technical and robustness audit
@@ -510,6 +578,25 @@ similar scale currently include
 [`ibm-granite/granite-4.0-350m-base`](https://huggingface.co/ibm-granite/granite-4.0-350m-base).
 Keep license metadata and an explicit policy check in every build regardless
 of the default.
+
+#### P0-10: The decision-development lifecycle is not implemented
+
+`FunctionSpec` requires the user to arrive with a description, output labels,
+and rubric already written. `init` supplies TODOs; `label` applies the current
+rubric; and `review` changes row labels. None of them turns corrections and
+disagreements back into proposed rubric edits, boundary rules, permanent
+decision tests, or a semantic version. Editing the YAML manually can instead
+create the dataset/spec mismatch described above.
+
+Impact: the current tool can generate data for and train a supplied decision,
+but it does not yet support the broader core use case of developing that
+decision. Marketing it as a decision compiler without this loop would repeat
+the same evidence gap in a new form.
+
+Direction: model decision drafts and frozen versions explicitly. Let users
+promote reviewed cases into executable tests, analyze disagreement by rubric
+clause, compare a proposed revision on the same case set, and invalidate or
+migrate downstream labels deliberately.
 
 ### P1 findings
 
@@ -671,6 +758,53 @@ optional `--debug`, and structured JSON errors for automation.
 - The 1.3 MB banner is excluded from built distributions while README metadata
   refers to it with a relative path, so package-index rendering is likely to
   lose the primary visual asset even after publishing.
+
+## Three separate evaluation layers
+
+The broader use case requires three reports that must not collapse into one
+"agreement" number.
+
+### 1. Decision-definition quality
+
+This asks whether the rubric is usable before any student model exists:
+
+- Can the domain owner explain every label and important tie-breaker?
+- Do anchor and boundary cases have adjudicated expected outcomes?
+- Do independent reviewers apply the definition consistently?
+- Which cases remain ambiguous, and is abstention/escalation needed?
+- Does a rubric revision resolve disagreements without breaking accepted
+  tests?
+- Are important regions of the real input distribution represented?
+
+Class balance and teacher consistency are diagnostics, not proof that the
+decision is useful. Outcome validity may require later business measurements
+such as escalation precision, review burden, or avoided loss.
+
+### 2. Teacher application quality
+
+This asks whether the selected teacher applies a frozen decision version well
+enough to create more labels. Measure teacher versus adjudicated tests,
+repeatability across draws, failures by rubric clause, invalid output rate,
+and review yield. A weak teacher is a data-generation problem even if the
+rubric itself is coherent.
+
+### 3. Compiled implementation quality
+
+This asks whether a candidate implementation reproduces the frozen decision
+on unseen adjudicated cases and whether its systems economics justify
+deployment. This is where conventional baselines, LoRA, latency, cost, energy,
+artifact size, and break-even belong.
+
+A workflow can therefore return three different honest failures:
+
+```text
+REFINE: the decision is still underspecified
+RELABEL: the teacher does not apply the frozen decision reliably
+DECLINE: no local implementation meets the deployment requirements
+```
+
+Only after all three layers pass should the result be a deployable compiled
+function.
 
 ## Evaluation of the current empirical claims
 
