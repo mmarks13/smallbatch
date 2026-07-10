@@ -152,6 +152,10 @@ class GateSpec(BaseModel):
     agreement: Optional[float] = None
     agreement_pm1: float = 0.85
     must_beat_zeroshot: bool = True
+    # the model must also beat the BEST constant predictor on the gate labels
+    # (±1 rule for int fields, majority class for enums) — on concentrated
+    # labels a model that regressed to the prior can otherwise PASS
+    must_beat_constant: bool = True
     # structured outputs: per-field threshold overrides, e.g. {reason: 0.7}
     fields: dict[str, float] = Field(default_factory=dict)
 

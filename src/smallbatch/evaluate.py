@@ -144,6 +144,21 @@ def _agrees(field, p, g) -> bool:
     return abs(p - g) <= 1 if field.type == "int" else p == g
 
 
+def constant_baseline(field, golds: list) -> dict[str, Any] | None:
+    """The strongest trivial competitor: the single constant prediction that
+    scores best on these labels under the field's agreement rule. A model
+    that can't beat this has learned the label prior, not the task."""
+    if not golds:
+        return None
+    candidates = field.values()
+    best_v, best_k = None, -1
+    for v in candidates:
+        k = sum(1 for g in golds if _agrees(field, v, g))
+        if k > best_k:
+            best_v, best_k = v, k
+    return {"value": best_v, "agreement": round(best_k / len(golds), 4)}
+
+
 def _scalar_metrics(field, preds: list, golds: list) -> dict[str, Any]:
     n = len(golds)
     invalid = sum(1 for p in preds if p is None)
@@ -155,10 +170,16 @@ def _scalar_metrics(field, preds: list, golds: list) -> dict[str, Any]:
         valid = [(p, g) for p, g in zip(preds, golds) if p is not None]
         r = pearson_r([p for p, _ in valid], [g for _, g in valid])
         metrics["pearson_r"] = round(r, 4) if r is not None else None
+        # distance metric: immune to the ±1 tolerance a constant predictor
+        # can game on concentrated labels (invalid preds excluded)
+        metrics["mae"] = (
+            round(sum(abs(p - g) for p, g in valid) / len(valid), 4) if valid else None
+        )
     ci = wilson_ci(agree_k, n)
     metrics["agreement_ci"] = list(ci) if ci else None
     metrics["exact"] = round(exact / n, 4) if n else 0.0
     metrics["invalid_rate"] = round(invalid / n, 4) if n else 0.0
+    metrics["constant_baseline"] = constant_baseline(field, golds)
     return metrics
 
 
@@ -216,6 +237,13 @@ def run_gate(spec: FunctionSpec, adapter: dict, zeroshot: dict | None) -> dict[s
                     f"adapter agreement {adapter['agreement']:.2%} does not beat "
                     f"zero-shot base {zeroshot['agreement']:.2%}"
                 )
+        const = adapter.get("constant_baseline")
+        if spec.gate.must_beat_constant and const is not None:
+            if adapter["agreement"] <= const["agreement"]:
+                reasons.append(
+                    f"adapter agreement {adapter['agreement']:.2%} does not beat "
+                    f"constant \"{const['value']}\" baseline {const['agreement']:.2%}"
+                )
         return {"passed": not reasons, "reasons": reasons}
 
     for name in spec.output.fields:
@@ -228,5 +256,12 @@ def run_gate(spec: FunctionSpec, adapter: dict, zeroshot: dict | None) -> dict[s
             if a <= z:
                 reasons.append(
                     f"{name}: adapter agreement {a:.2%} does not beat zero-shot {z:.2%}"
+                )
+        const = adapter["fields"][name].get("constant_baseline")
+        if spec.gate.must_beat_constant and const is not None:
+            if a <= const["agreement"]:
+                reasons.append(
+                    f"{name}: adapter agreement {a:.2%} does not beat "
+                    f"constant \"{const['value']}\" baseline {const['agreement']:.2%}"
                 )
     return {"passed": not reasons, "reasons": reasons}

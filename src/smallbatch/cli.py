@@ -77,6 +77,8 @@ def cmd_compile(args) -> int:
     if result.report_path:
         print(f"report: {result.report_path}")
     print(json.dumps({"metrics": result.metrics, "gate": result.gate}, indent=2))
+    for w in (result.report or {}).get("warnings") or []:
+        print(f"warning: {w}", file=sys.stderr)
     print(f"{'PASS' if result.passed else 'FAIL'}: {result.version_dir}")
     return 0 if result.passed else 2
 

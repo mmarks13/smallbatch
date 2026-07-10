@@ -3,7 +3,12 @@
 import json
 
 from smallbatch.evaluate import compute_metrics
-from smallbatch.report import build_report, render_markdown, write_report
+from smallbatch.report import (
+    build_report,
+    render_markdown,
+    shortcut_audit,
+    write_report,
+)
 from smallbatch.spec import FunctionSpec
 
 SPEC = FunctionSpec(
@@ -70,3 +75,98 @@ def test_write_report_files(tmp_path):
     assert path.name == "report.md" and path.exists()
     data = json.loads((tmp_path / "report.json").read_text())
     assert data["function"] == "toy"
+
+
+# --- shortcut audit -------------------------------------------------------
+
+
+AUDIT_SPEC = FunctionSpec(
+    name="toy",
+    description="Score.",
+    input_schema={"title": "str", "signals": "str"},
+    output={"type": "int", "range": [0, 10]},
+    rubric="-",
+    teacher={"backend": "claude-cli", "model": "sonnet"},
+)
+
+
+def _audit_rows(n=24):
+    """Half the rows carry `upvotes: <k>`; teacher labels ignore upvotes
+    (flat 5s), student predictions track them hard."""
+    rows, golds, preds = [], [], []
+    for i in range(n):
+        has_signal = i % 2 == 0
+        signals = f"upvotes: {i * 3}" if has_signal else ""
+        rows.append({
+            "input": {"title": f"story {i} " + "x" * (i * 5), "signals": signals},
+            "score": 5,
+            "origin": "real",
+        })
+        golds.append(5)
+        preds.append(min(10, i // 3) if has_signal else 5)
+    return rows, preds, golds
+
+
+def test_audit_presence_slices_and_numeric_token_feature():
+    rows, preds, golds = _audit_rows()
+    # slight teacher variance so spearman is defined on the teacher side
+    golds = [5 if i % 4 else 4 for i in range(len(golds))]
+    for r, g in zip(rows, golds):
+        r["score"] = g
+    audit = shortcut_audit(AUDIT_SPEC, rows, preds, golds)
+    names = [s["slice"] for s in audit["slices"]]
+    assert "signals: present" in names and "signals: empty" in names
+    empty = next(s for s in audit["slices"] if s["slice"] == "signals: empty")
+    assert empty["agreement"] == 1.0  # student is perfect where the shortcut is absent
+    feats = {s["feature"]: s for s in audit["surface"]}
+    assert "signals:upvotes" in feats
+    assert feats["signals:upvotes"]["student_rho"] > 0.8
+
+
+def test_audit_skips_surface_when_teacher_labels_constant():
+    rows, preds, golds = _audit_rows()  # golds all 5 -> teacher rho undefined
+    audit = shortcut_audit(AUDIT_SPEC, rows, preds, golds)
+    assert audit["surface"] == [] and audit["warnings"] == []
+
+
+def test_audit_flags_student_only_correlation():
+    rows, preds, golds = _audit_rows()
+    # give the teacher labels slight variance so rho is defined but ~0
+    golds = [5 if i % 4 else 4 for i in range(len(golds))]
+    for r, g in zip(rows, golds):
+        r["score"] = g
+    audit = shortcut_audit(AUDIT_SPEC, rows, preds, golds)
+    feats = {s["feature"]: s for s in audit["surface"]}
+    assert feats["signals:upvotes"]["flag"]
+    assert any("signals:upvotes" in w for w in audit["warnings"])
+
+
+def test_audit_length_terciles():
+    rows, preds, golds = _audit_rows()
+    audit = shortcut_audit(AUDIT_SPEC, rows, preds, golds)
+    names = [s["slice"] for s in audit["slices"]]
+    assert "title: longest third" in names
+
+
+def test_report_carries_audit_and_headline_baselines():
+    r = make_report()
+    assert "shortcut_audit" in r and "warnings" in r
+    assert r["headline"]["mae"] is not None
+    assert r["headline"]["constant_baseline"]["agreement"] > 0
+    md = render_markdown(r)
+    assert "best constant baseline" in md and "MAE" in md
+
+
+def test_audit_markdown_section():
+    rows, preds, golds = _audit_rows()
+    golds = [5 if i % 4 else 4 for i in range(len(golds))]
+    for r, g in zip(rows, golds):
+        r["score"] = g
+    adapter = compute_metrics(AUDIT_SPEC, preds, golds)
+    adapter["preds"] = preds
+    report = build_report(
+        AUDIT_SPEC, rows, adapter, None, {"passed": True, "reasons": []}, TRAINING
+    )
+    md = render_markdown(report)
+    assert "## Shortcut audit" in md
+    assert "signals:upvotes" in md and "⚠" in md

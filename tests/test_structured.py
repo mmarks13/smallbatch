@@ -181,10 +181,10 @@ def test_compute_metrics_per_field_and_joint():
 
 def test_run_gate_per_field_with_overrides():
     m = compute_metrics(SPEC, PREDS, GOLDS)
-    spec = make_spec(gate={"agreement": 0.7, "fields": {"reason": 0.4}, "must_beat_zeroshot": False})
+    spec = make_spec(gate={"agreement": 0.7, "fields": {"reason": 0.4}, "must_beat_zeroshot": False, "must_beat_constant": False})
     gate = run_gate(spec, m, None)
     assert gate["passed"]  # priority 0.75, confidence 0.75 >= 0.7; reason 0.5 >= 0.4
-    strict = make_spec(gate={"agreement": 0.7, "must_beat_zeroshot": False})
+    strict = make_spec(gate={"agreement": 0.7, "must_beat_zeroshot": False, "must_beat_constant": False})
     gate = run_gate(strict, m, None)
     assert not gate["passed"] and any("reason" in r for r in gate["reasons"])
 
