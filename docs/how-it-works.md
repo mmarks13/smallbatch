@@ -143,6 +143,51 @@ once anything has trained against the rest of the data, reshuffling the gate
 would quietly leak. Top-ups to gate/dev come only from newly labeled reals.
 `--max-variants N` caps a balance-driven synthetic top-up.
 
+### The `augment:` block — making each label teach more
+
+With a few hundred labels, any surface feature that co-occurs with a label
+band a few times becomes a learnable shortcut ("this row had `upvotes: 17`
+and scored 8"). The optional top-level `augment:` block configures targeted
+augmentation against that; when present it *replaces* the legacy
+fill-toward-`teacher.examples` behavior — only the kinds listed run:
+
+```yaml
+augment:
+  paraphrase: {cap: 50}                        # the classic variants, now declarative
+  field_dropout: {fields: [signals], cap: 30}  # per field
+  counterfactual: {cap: 30}
+```
+
+- **paraphrase** — label-*preserving* rewrites (the variant machinery above);
+  teaches the model to ignore wording.
+- **field_dropout** — copies of train reals with one input field blanked,
+  **relabeled by the teacher**. If the field mattered, the label honestly
+  moves; if not, the pair teaches invariance. Either outcome is real data —
+  copying the source label would teach exactly the wrong thing when the
+  field is load-bearing. This is the direct fix for optional-field shortcuts.
+- **counterfactual** — the teacher makes the *smallest realistic edit* to a
+  train real aimed at an underrepresented label band, then the edit is
+  relabeled independently. Minimal label-moving pairs trace the rubric's
+  decision boundary — the highest-information examples per teacher call. An
+  edit whose label doesn't move gets one stronger retry; the miss is kept
+  anyway (it's a paid-for invariance example). `label` prints the hit rate.
+
+All augmented rows are generated from **train-split reals only**, land in
+train, and record `source_ids` (origin: `variant`, `dropout`, or
+`counterfactual` — filterable in `review --origin`).
+
+### Teacher self-consistency (`teacher.consistency: N`)
+
+The student can't agree with the teacher more consistently than the teacher
+agrees with itself. With `consistency: 30`, `label` re-sends a stratified
+sample of 30 real rows (input fields shuffled) after the main pass and
+reports **teacher self-agreement** — the ceiling every gate number should be
+read against. It lands in `meta.json` and the eval report ("student is at
+94% of the teacher's own ceiling"). Rows where the teacher disagreed with
+itself keep their original label but gain `probe_output`; step through them
+with `smallbatch review --unstable` (a warning fires if one sits in the
+gate split).
+
 **Reviewing labels:** `smallbatch review <spec>` steps through the labeled
 rows (filter by split/origin/label/field/review-status) to accept, reject,
 edit, or annotate teacher labels before training. Rejected rows stay in
@@ -188,9 +233,15 @@ report is the headline output, the verdict one line inside it:
 - **agreement** with the gate split's teacher labels, always with a **Wilson
   95% confidence interval** (small gates get a loud noise warning below 50
   items) — within ±1 for `int` outputs, exact for `enum`, per-field for
-  structured outputs (joint rate reported alongside);
+  structured outputs (joint rate reported alongside); int fields also report
+  **MAE**, which the ±1 tolerance can't hide distance errors from;
 - **must beat the zero-shot base model** on the same gate split (otherwise
   the fine-tune added nothing);
+- **must beat the best constant predictor** (`gate.must_beat_constant`,
+  default on): on concentrated labels, always answering the modal band can
+  score deceptively well under ±1 tolerance — a model that can't strictly
+  beat that has learned the label prior, not the task. The report shows the
+  constant and its score (majority class for enums);
 - diagnostics that make failures actionable: per-label agreement table,
   gold×pred confusion matrix, severe-miss rate (|Δ|≥3), the training curve
   with the chosen epoch, and the largest disagreements with the teacher's own
@@ -198,6 +249,25 @@ report is the headline output, the verdict one line inside it:
 
 The acceptance check: agreement ≥ `gate.agreement` (per field for structured
 outputs, with `gate.fields` overrides).
+
+### Shortcut audit
+
+Every report also carries a `## Shortcut audit` section, auto-derived from
+the input schema (no configuration):
+
+- **slices** — agreement/MAE on gate subsets: each field present vs empty,
+  per-value slices for low-cardinality fields, length terciles of the
+  longest text field. A slice where agreement collapses tells you *where*
+  the model is weak.
+- **surface-feature correlations** — for input length, field presence, and
+  numeric tokens found in the inputs (`upvotes: 17`), the spearman ρ of the
+  feature against the **teacher's labels** and against the **student's
+  predictions**, side by side. Some surface correlation is legitimate (big
+  stories have long summaries); the smoking gun is the student tracking a
+  feature notably harder than the teacher does — a gap above 0.25 warns
+  (in `report.json`'s `warnings` and after the compile summary) and usually
+  means the model learned the feature, not the task. `augment.field_dropout`
+  on the implicated field is the standard fix.
 
 Generation is **constrained to the output contract**: decoding masks the
 vocabulary token-by-token so the model can only emit one of the legal values

@@ -26,7 +26,10 @@ smallbatch init <template> <name>           # starter spec.yaml + items.json (in
 smallbatch doctor <spec> [--items X]        # preflight; 1 live teacher probe unless --no-probe
 smallbatch label <spec> --items items.json  # teacher-label a dataset (network, no GPU)
                                             #   --append keeps rows + sticky gate; --max-variants N
+                                            #   spec `augment:` block: paraphrase/field_dropout/
+                                            #   counterfactual; `teacher.consistency: N` self-probe
 smallbatch review <spec>                    # step through labels: accept/reject/edit (interactive)
+                                            #   --unstable: rows the teacher probe disagreed on
 smallbatch compile <spec>                   # train + eval + gate (GPU, minutes); writes report.md
 smallbatch sweep <sweep.yaml>               # grid of model x arm compiles (GPU, long)
 smallbatch run <fn> --json '{...}'          # call a compiled function (GPU/CPU)
@@ -53,7 +56,8 @@ continuing. Never "fix" a 2 by weakening the gate.
 Torch-free (import-cheap, unit-tested on CPU): `spec.py` (pydantic
 `FunctionSpec`/`TrainSpec`, `extra="forbid"` so typos fail loudly; the
 `teacher` block is required, no defaults; `output` is scalar or a flat
-multi-field map normalized into `OutputSpec.fields`), `artifacts.py`
+multi-field map normalized into `OutputSpec.fields`; optional `augment:`
+block for paraphrase/field_dropout/counterfactual data), `artifacts.py`
 (versioned dirs + manifests), `sweep.py` (grid math + orchestration),
 `hardware.py` (precision auto-select), `prompts.py`, `labeling.py`
 (three-way sticky splits, append, variant source links), `report.py` (eval

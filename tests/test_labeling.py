@@ -1,8 +1,11 @@
 import json
+import random
 
 from smallbatch.labeling import (
     build_dataset,
     consistency_probe,
+    counterfactual_rows,
+    generate_field_dropout,
     plan_variant_bands,
     split_holdout,
 )
@@ -95,6 +98,129 @@ def test_build_dataset_end_to_end(tmp_path):
             "variant seeded from a non-train real"
         )
     assert real_ids  # sanity
+
+
+# --- augment ------------------------------------------------------------
+
+
+DROPOUT_SPEC = FunctionSpec(
+    name="toy",
+    description="Score.",
+    input_schema={"title": "str", "signals": "str"},
+    output={"type": "int", "range": [0, 4]},
+    rubric="-",
+    teacher={"backend": "claude-cli", "model": "sonnet", "batch_size": 50},
+    augment={"field_dropout": {"fields": ["signals"], "cap": 3}},
+)
+
+
+def test_generate_field_dropout_blanks_and_links():
+    reals = [
+        {"id": f"r{i}", "input": {"title": f"t{i}", "signals": f"upvotes: {i}"},
+         "score": 2, "origin": "real", "split": "train"}
+        for i in range(5)
+    ]
+    reals.append({"id": "r9", "input": {"title": "t9", "signals": ""},
+                  "score": 2, "origin": "real", "split": "train"})
+    items, sources = generate_field_dropout(
+        DROPOUT_SPEC, reals, ["signals"], cap=3, rng=random.Random(0)
+    )
+    assert len(items) == 3  # cap respected; the empty-signals row was never eligible
+    assert all(it["signals"] == "" and it["title"] for it in items)
+    assert all(len(src) == 1 and src[0].startswith("r") for src in sources)
+
+
+class CFTeacher:
+    """Counterfactual fake. Generation returns titles tagged with the target
+    band; labeling scores tagged titles at their band (moved) or, in
+    `stubborn` mode, always at 2 (miss -> retry)."""
+
+    def __init__(self, stubborn=False):
+        self.stubborn = stubborn
+        self.cf_calls = 0
+        self.retry_seen = False
+
+    def complete(self, prompt: str) -> str:
+        items = json.loads(prompt[prompt.index("[") :][: FakeTeacher._arr_len(prompt)])
+        if "COUNTERFACTUAL" in prompt:
+            self.cf_calls += 1
+            self.retry_seen |= "did not change the label" in prompt
+            import re
+            band = re.search(r"score around (\d+)", prompt).group(1)
+            return json.dumps(
+                [{"id": it["id"], "title": f"cf{band} {it['title']}"} for it in items]
+            )
+        assert "data labeler" in prompt
+        out = []
+        for it in items:
+            if it["title"].startswith("cf") and not self.stubborn:
+                score = int(it["title"][2])
+            else:
+                score = 2
+            out.append({"id": it["id"], "score": score, "reason": ""})
+        return json.dumps(out)
+
+
+CF_SPEC = FunctionSpec(
+    name="toy",
+    description="Score.",
+    input_schema={"title": "str"},
+    output={"type": "int", "range": [0, 4]},
+    rubric="-",
+    teacher={"backend": "claude-cli", "model": "sonnet", "batch_size": 50},
+)
+
+
+def cf_reals():
+    return [
+        {"id": f"r{i}", "input": {"title": f"t{i}"}, "score": 2, "reason": "",
+         "origin": "real", "split": "train"}
+        for i in range(10)
+    ]
+
+
+def test_counterfactuals_move_labels_and_record_intent():
+    teacher = CFTeacher()
+    rows_out, hit_rate = counterfactual_rows(
+        teacher, CF_SPEC, cf_reals(), cap=8, seed=3, hist_rows=cf_reals()
+    )
+    assert rows_out and hit_rate == 1.0
+    assert not teacher.retry_seen  # every edit moved: no retry pass
+    for r in rows_out:
+        assert r["origin"] == "counterfactual"
+        assert r["intended_band"] is not None
+        assert r["source_ids"] and r["source_ids"][0].startswith("r")
+        assert r["score"] != 2  # moved off the source band
+
+
+def test_counterfactual_misses_retry_once_and_are_kept():
+    teacher = CFTeacher(stubborn=True)
+    rows_out, hit_rate = counterfactual_rows(
+        teacher, CF_SPEC, cf_reals(), cap=6, seed=3, hist_rows=cf_reals()
+    )
+    assert teacher.retry_seen  # a second, feedback-carrying pass ran
+    assert hit_rate == 0.0  # stubborn teacher never moves the label
+    assert all(r["score"] == 2 for r in rows_out)  # kept as invariance rows
+
+
+def test_build_dataset_augment_block_replaces_legacy(tmp_path):
+    class DropoutFake(FakeTeacher):
+        def complete(self, prompt):
+            assert "synthetic inputs" not in prompt, "paraphrase ran but block omits it"
+            return super().complete(prompt)
+
+    meta = build_dataset(
+        DropoutFake(), DROPOUT_SPEC,
+        [{"title": f"real{i}", "signals": f"upvotes: {i}"} for i in range(10)],
+        tmp_path,
+    )
+    assert meta["variants"] == 0 and meta["dropout"] == 3
+    rows_all = [json.loads(l) for l in (tmp_path / "labeled.jsonl").read_text().splitlines()]
+    dropped = [r for r in rows_all if r["origin"] == "dropout"]
+    assert len(dropped) == 3
+    for r in dropped:
+        assert r["split"] == "train" and r["source_ids"]
+        assert r["input"]["signals"] == ""
 
 
 class SplitBrainTeacher:

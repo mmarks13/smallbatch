@@ -216,6 +216,40 @@ class TrainSpec(BaseModel):
         return self.lora_alpha if self.lora_alpha is not None else 2 * self.lora_r
 
 
+class ParaphraseSpec(BaseModel):
+    cap: int = 50  # max paraphrase variants generated per label run
+    model_config = {"extra": "forbid"}
+
+
+class FieldDropoutSpec(BaseModel):
+    # ablation probes: copies of train reals with one input field blanked,
+    # RELABELED by the teacher (if the field mattered, the label honestly
+    # moves; if not, the pair teaches invariance — either way it breaks
+    # "field present -> memorized label" shortcuts)
+    fields: list[str]
+    cap: int = 30  # per field
+    model_config = {"extra": "forbid"}
+
+
+class CounterfactualSpec(BaseModel):
+    # minimal label-moving edits of train reals, targeted at thin label
+    # bands and independently relabeled — the highest-information examples
+    # per teacher call (they trace the decision boundary)
+    cap: int = 30
+    model_config = {"extra": "forbid"}
+
+
+class AugmentSpec(BaseModel):
+    """Data-augmentation plan. When this block is present it fully replaces
+    the legacy behavior (variants toward teacher.examples): only the kinds
+    listed here run."""
+
+    paraphrase: Optional[ParaphraseSpec] = None
+    field_dropout: Optional[FieldDropoutSpec] = None
+    counterfactual: Optional[CounterfactualSpec] = None
+    model_config = {"extra": "forbid"}
+
+
 class FunctionSpec(BaseModel):
     name: str
     description: str
@@ -226,6 +260,7 @@ class FunctionSpec(BaseModel):
     teacher: TeacherSpec
     gate: GateSpec = Field(default_factory=GateSpec)
     train: TrainSpec = Field(default_factory=TrainSpec)
+    augment: Optional[AugmentSpec] = None
 
     # set by load_spec so spec_files resolve relative to the YAML's directory
     _base_dir: Path = Path(".")
@@ -233,6 +268,19 @@ class FunctionSpec(BaseModel):
     _source_path: Optional[Path] = None
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def _check_augment_fields(self) -> "FunctionSpec":
+        if self.augment and self.augment.field_dropout:
+            unknown = [
+                f for f in self.augment.field_dropout.fields
+                if f not in self.input_schema
+            ]
+            if unknown:
+                raise ValueError(
+                    f"augment.field_dropout names unknown input fields: {unknown}"
+                )
+        return self
 
     @model_validator(mode="after")
     def _check_rationale_name(self) -> "FunctionSpec":

@@ -163,6 +163,40 @@ def teacher_variant_prompt(
     )
 
 
+def teacher_counterfactual_prompt(
+    spec: FunctionSpec,
+    sources: list[dict[str, Any]],
+    band: str,
+    spec_files_text: str,
+    feedback: Optional[str] = None,
+) -> str:
+    """Ask for a MINIMAL edit of each source item aimed at a target label.
+    Minimal edits trace the rubric's decision boundary — they teach the
+    student which change moves the label, instead of which surface features
+    co-occur with it."""
+    ref = f"\nReference files:\n{spec_files_text}\n" if spec_files_text else ""
+    numbered = json.dumps(
+        [{"id": i, **{k: it.get(k) for k in spec.input_schema}}
+         for i, it in enumerate(sources)],
+        indent=1,
+        ensure_ascii=False,
+    )
+    fields = ", ".join(f'"{k}"' for k in spec.input_schema)
+    fb = f"\nPrevious attempt was judged unchanged: {feedback}\n" if feedback else ""
+    return (
+        "You write COUNTERFACTUAL versions of labeled items: for each item "
+        "below, make the SMALLEST realistic change to its content so that it "
+        f"would now score around {band} under the rubric. Keep everything "
+        "irrelevant to the label identical — same style, same length, same "
+        "formatting.\n"
+        f"Task the labels are for: {spec.description.strip()}\n"
+        f"Scoring rubric:\n{spec.rubric.strip()}\n{ref}{fb}"
+        f"\nItems to edit:\n{numbered}\n\n"
+        "Reply with ONLY a JSON array, one object per item, each with the "
+        f"original \"id\" plus keys {fields}. No other text."
+    )
+
+
 _SCORE_RE = re.compile(r"score:\s*(-?\d+)", re.IGNORECASE)
 _INT_RE = re.compile(r"-?\d+")
 

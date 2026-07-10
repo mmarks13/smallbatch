@@ -99,3 +99,39 @@ def test_gate_agreement_alias(tmp_path):
     assert spec.gate.threshold == 0.85  # legacy agreement_pm1 default
     spec = load_spec(write_spec(tmp_path, MINIMAL + "gate: {agreement: 0.7}\n"))
     assert spec.gate.threshold == 0.7  # preferred name wins
+
+
+def test_augment_block_parses_and_hashes(tmp_path):
+    body = MINIMAL + textwrap.dedent("""\
+        augment:
+          paraphrase: {cap: 40}
+          field_dropout: {fields: [summary], cap: 10}
+          counterfactual: {cap: 20}
+        """)
+    spec = load_spec(write_spec(tmp_path, body))
+    assert spec.augment.paraphrase.cap == 40
+    assert spec.augment.field_dropout.fields == ["summary"]
+    assert spec.augment.counterfactual.cap == 20
+    plain = load_spec(write_spec(tmp_path))
+    assert spec.spec_hash() != plain.spec_hash()  # augment is part of the recipe
+
+
+def test_augment_dropout_unknown_field_rejected(tmp_path):
+    body = MINIMAL + "augment: {field_dropout: {fields: [upvotes]}}\n"
+    with pytest.raises(ValueError, match="unknown input fields"):
+        load_spec(write_spec(tmp_path, body))
+
+
+def test_augment_typo_rejected(tmp_path):
+    body = MINIMAL + "augment: {paraphrse: {cap: 40}}\n"
+    with pytest.raises(ValueError):
+        load_spec(write_spec(tmp_path, body))
+
+
+def test_teacher_consistency_validated(tmp_path):
+    body = MINIMAL.replace(
+        "teacher: {backend: claude-cli, model: sonnet}",
+        "teacher: {backend: claude-cli, model: sonnet, consistency: -1}",
+    )
+    with pytest.raises(ValueError):
+        load_spec(write_spec(tmp_path, body))

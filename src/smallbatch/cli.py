@@ -339,7 +339,9 @@ def main(argv: list[str] | None = None) -> int:
     vp.add_argument("spec")
     vp.add_argument("--data", help="labeled data dir (default data/<name>)")
     vp.add_argument("--split", choices=["train", "dev", "gate"])
-    vp.add_argument("--origin", choices=["real", "variant"])
+    vp.add_argument(
+        "--origin", choices=["real", "variant", "dropout", "counterfactual"]
+    )
     vp.add_argument("--label", help="filter by (primary) label/score value")
     vp.add_argument("--field", help="structured outputs: filter by field, e.g. reason or reason=outage")
     vp.add_argument(

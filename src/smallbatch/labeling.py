@@ -190,6 +190,141 @@ def generate_variants(
     return variants, sources
 
 
+def generate_field_dropout(
+    spec: FunctionSpec,
+    train_reals: list[Row],
+    fields: list[str],
+    cap: int,
+    rng: random.Random,
+) -> tuple[list[dict], list[list[str]]]:
+    """Ablation probes: train reals with one input field blanked. The caller
+    RELABELS them — copying the source label would teach exactly the wrong
+    thing when the field is load-bearing."""
+    items: list[dict] = []
+    sources: list[list[str]] = []
+    for field in fields:
+        pool = [
+            r for r in train_reals
+            if str(r["input"].get(field) or "").strip()
+        ]
+        for r in rng.sample(pool, min(cap, len(pool))):
+            item = dict(r["input"])
+            item[field] = ""
+            items.append(item)
+            sources.append([r["id"]])
+    return items, sources
+
+
+def _cf_request(
+    teacher: Teacher,
+    spec: FunctionSpec,
+    batch: list[Row],
+    band: Any,
+    spec_text: str,
+    feedback: Optional[str] = None,
+) -> list[tuple[dict, Row]]:
+    """One counterfactual-edit call: (edited item, source row) pairs."""
+    reply = teacher.complete(
+        prompts.teacher_counterfactual_prompt(
+            spec, [r["input"] for r in batch], str(band), spec_text,
+            feedback=feedback,
+        )
+    )
+    try:
+        edits = prompts.extract_json(reply)
+    except ValueError:
+        return []
+    out = []
+    for e in edits:
+        if not isinstance(e, dict):
+            continue
+        try:
+            local_id = int(e.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= local_id < len(batch):
+            out.append(({k: e.get(k) for k in spec.input_schema}, batch[local_id]))
+    return out
+
+
+def counterfactual_rows(
+    teacher: Teacher,
+    spec: FunctionSpec,
+    train_reals: list[Row],
+    cap: int,
+    seed: int,
+    hist_rows: list[Row],
+    per_call: int = 5,
+) -> tuple[list[Row], Optional[float]]:
+    """Minimal label-moving edits of train reals, targeted at thin bands
+    (deficits measured over `hist_rows`) and independently relabeled.
+
+    An edit the teacher relabels the SAME as its source is a miss: it gets
+    one stronger retry — but the miss row is kept too (it's a paid-for
+    invariance example). Returns (rows, hit_rate); rows carry
+    `intended_band` + `source_ids`."""
+    rng = random.Random(seed)
+    spec_text = spec.spec_files_text()
+    plan = plan_variant_bands(spec, hist_rows, target_total=0, n_new=cap)
+    pairs: list[tuple[dict, Row, Any]] = []
+    for band, n in plan.items():
+        pool = [r for r in train_reals if primary_value(spec, r) != band]
+        if not pool:
+            continue
+        chosen = [pool[rng.randrange(len(pool))] for _ in range(n)]
+        for start in range(0, len(chosen), per_call):
+            for item, src in _cf_request(
+                teacher, spec, chosen[start : start + per_call], band, spec_text
+            ):
+                pairs.append((item, src, band))
+
+    def label_pairs(ps: list[tuple[dict, Row, Any]]) -> tuple[list[Row], list[tuple[Row, Any]]]:
+        rows = label_items(teacher, spec, [p[0] for p in ps], origin="counterfactual")
+        by_id = {
+            row_id({k: it.get(k) for k in spec.input_schema}): (src, band)
+            for it, src, band in ps
+        }
+        misses: list[tuple[Row, Any]] = []
+        for r in rows:
+            src, band = by_id.get(r["id"], (None, None))
+            r["intended_band"] = band
+            r["source_ids"] = [src["id"]] if src else []
+            if src is not None and primary_value(spec, r) == primary_value(spec, src):
+                misses.append((src, band))
+        return rows, misses
+
+    if not pairs:
+        return [], None
+    rows, misses = label_pairs(pairs)
+
+    retry_pairs: list[tuple[dict, Row, Any]] = []
+    by_band: dict[Any, list[Row]] = {}
+    for src, band in misses:
+        by_band.setdefault(band, []).append(src)
+    for band, srcs in by_band.items():
+        for start in range(0, len(srcs), per_call):
+            for item, src in _cf_request(
+                teacher, spec, srcs[start : start + per_call], band, spec_text,
+                feedback="the edit did not change the label — make a stronger "
+                         "(but still minimal) change to what the rubric scores",
+            ):
+                retry_pairs.append((item, src, band))
+    if retry_pairs:
+        retry_rows, _ = label_pairs(retry_pairs)
+        rows += retry_rows
+
+    # hit rate: fraction of counterfactual rows whose label actually moved
+    src_label = {}
+    for it, src, band in pairs + retry_pairs:
+        src_label[row_id({k: it.get(k) for k in spec.input_schema})] = primary_value(spec, src)
+    hits = sum(
+        1 for r in rows
+        if r["id"] in src_label and primary_value(spec, r) != src_label[r["id"]]
+    )
+    hit_rate = round(hits / len(rows), 4) if rows else None
+    return rows, hit_rate
+
+
 def _out_agrees(spec: FunctionSpec, a: Any, b: Any) -> bool:
     """Two outputs agree under the gate rule (±1 int / exact enum; all
     fields for multi-field contracts). Local twin of evaluate._agrees —
@@ -378,6 +513,11 @@ def write_dataset(
         "spec_hash": spec.spec_hash(),
         "real": sum(1 for r in rows if r["origin"] == "real"),
         "variants": sum(1 for r in rows if r["origin"] == "variant"),
+        **{
+            origin: n
+            for origin in ("dropout", "counterfactual")
+            if (n := sum(1 for r in rows if r["origin"] == origin))
+        },
         "train": len(by_split["train"]),
         "dev": len(by_split["dev"]),
         "gate": len(by_split["gate"]),
@@ -448,21 +588,59 @@ def build_dataset(
 
     train_reals = [r for r in rows if r["origin"] == "real" and r["split"] == "train"]
     train_rows = [r for r in rows if r["split"] == "train"]
-    variants_raw, sources = generate_variants(
-        teacher, spec, train_reals, spec.teacher.examples,
-        n_new=max_variants, seed=spec.train.seed, hist_rows=train_rows,
-    )
-    variant_rows = (
-        label_items(teacher, spec, variants_raw, origin="variant") if variants_raw else []
-    )
-    src_by_id = {
-        row_id({k: it.get(k) for k in spec.input_schema}): src
-        for it, src in zip(variants_raw, sources)
-    }
-    for r in variant_rows:
-        r["split"] = "train"
-        r["source_ids"] = src_by_id.get(r["id"], [])
-        r.update(stamp)
+    aug = spec.augment
+
+    def _finish(new_rows: list[Row], sources: list[list[str]], items: list[dict]) -> list[Row]:
+        src_by_id = {
+            row_id({k: it.get(k) for k in spec.input_schema}): src
+            for it, src in zip(items, sources)
+        }
+        for r in new_rows:
+            r["split"] = "train"
+            r.setdefault("source_ids", src_by_id.get(r["id"], []))
+            r.update(stamp)
+        return new_rows
+
+    # paraphrase variants: legacy behavior (fill toward teacher.examples,
+    # CLI --max-variants caps) unless an augment block took over the config
+    run_paraphrase, para_cap = True, max_variants
+    if aug is not None and max_variants is None:
+        run_paraphrase = aug.paraphrase is not None
+        para_cap = aug.paraphrase.cap if aug.paraphrase else 0
+    extra_rows: list[Row] = []
+    if run_paraphrase and para_cap != 0:
+        variants_raw, sources = generate_variants(
+            teacher, spec, train_reals, spec.teacher.examples,
+            n_new=para_cap, seed=spec.train.seed, hist_rows=train_rows,
+        )
+        variant_rows = (
+            label_items(teacher, spec, variants_raw, origin="variant")
+            if variants_raw else []
+        )
+        extra_rows += _finish(variant_rows, sources, variants_raw)
+
+    if aug and aug.field_dropout and train_reals:
+        d_items, d_sources = generate_field_dropout(
+            spec, train_reals, aug.field_dropout.fields,
+            aug.field_dropout.cap, random.Random(spec.train.seed + 2),
+        )
+        d_rows = label_items(teacher, spec, d_items, origin="dropout") if d_items else []
+        extra_rows += _finish(d_rows, d_sources, d_items)
+
+    if aug and aug.counterfactual and train_reals:
+        cf_rows, hit_rate = counterfactual_rows(
+            teacher, spec, train_reals, aug.counterfactual.cap,
+            seed=spec.train.seed + 3, hist_rows=train_rows + extra_rows,
+        )
+        for r in cf_rows:
+            r["split"] = "train"
+            r.update(stamp)
+        extra_rows += cf_rows
+        if hit_rate is not None:
+            print(
+                f"counterfactuals: {len(cf_rows)} rows, {hit_rate:.0%} moved the "
+                "label (misses kept as invariance examples)"
+            )
 
     probe = consistency_probe(
         teacher, spec, rows, spec.teacher.consistency, seed=spec.train.seed
@@ -479,7 +657,7 @@ def build_dataset(
                 "`smallbatch review --unstable` to inspect"
             )
 
-    return write_dataset(spec, rows + variant_rows, out_dir, probe=probe)
+    return write_dataset(spec, rows + extra_rows, out_dir, probe=probe)
 
 
 def _write_jsonl(path: Path, rows: list[Row]) -> None:
