@@ -901,34 +901,7 @@ The current module boundaries are workable, but the data model should be
 recentered around semantic identity, candidate selection, and portable
 artifacts.
 
-### 1. Model decision calibration explicitly
-
-Add first-class records for:
-
-- `DecisionDraft`: mutable labels, rubric clauses, open questions, and seed
-  cases;
-- `JudgmentEvent`: one teacher or human decision tied to an exact draft hash;
-- `DecisionTest`: an adjudicated anchor, boundary, or regression case with an
-  explanation of the controlling rule; and
-- `DecisionVersion`: an immutable promoted draft, its accepted test suite,
-  known ambiguities, abstention/escalation policy, and change log.
-
-The calibration loop should be:
-
-```text
-seed cases -> draft -> probe -> adjudicate -> revise -> regression test -> freeze
-```
-
-Probe operations can ask the teacher to apply the current draft repeatedly,
-generate close boundary cases, or critique conflicting clauses. They must not
-silently rewrite the rubric. Every suggested semantic change is a diff the
-domain owner accepts or rejects. Every judgment remains attached to the draft
-that produced it.
-
-This state model is the necessary bridge between the user's broader use case
-and the existing label/review machinery.
-
-### 2. Separate the semantic spec from the build recipe
+### 1. Separate the semantic spec from the build recipe
 
 The current YAML mixes what the function means with teacher provider,
 augmentation size, gate policy, base model, precision, LoRA parameters, and
@@ -979,7 +952,7 @@ The semantic hash should cover the function contract and referenced policy
 content. The build ID should cover semantic hash, dataset snapshot, candidate
 recipe, model revisions, code version, and environment lock.
 
-### 3. Make the dataset an append-only ledger
+### 2. Make the dataset an append-only ledger
 
 Store raw inputs, label events, reviews, split assignments, and exclusions as
 versioned records rather than repeatedly rewriting one canonical row. Materialize
@@ -994,7 +967,7 @@ train/dev/test views from that ledger. This supports:
 
 JSONL remains sufficient initially. A database is not required.
 
-### 4. Define a candidate backend protocol
+### 3. Define a candidate backend protocol
 
 ```python
 class CandidateBackend(Protocol):
@@ -1008,23 +981,20 @@ This is a justified abstraction because it changes the product from a wrapper
 around one training method into a method selector. Keep implementations few and
 opinionated. Do not create a public plugin ecosystem before two backends work.
 
-### 5. Make evaluation independent of a backend
+### 4. Make evaluation independent of a backend
 
-One evaluation layer should render distinct decision-definition,
-teacher-application, and implementation reports. The implementation evaluator
-should validate input/output contracts and score predictions from rules,
-sklearn, SetFit, causal LM, or a hosted model identically. It should own
-adjudicated/teacher metric separation, confidence intervals, cost weights,
-final-test locking, and report rendering.
+One evaluator should validate input/output contracts and score predictions from
+rules, sklearn, SetFit, causal LM, or a hosted model identically. It should own
+gold/teacher metric separation, confidence intervals, cost weights, final-test
+locking, and report rendering.
 
-### 6. Build a content-addressed artifact
+### 5. Build a content-addressed artifact
 
 A completed artifact should include:
 
 ```text
 artifact/
   function.yaml          # resolved semantic contract
-  decision-version.json  # immutable version/test provenance, no private cases
   build.lock.json        # immutable inputs and dependency/model revisions
   manifest.json          # backend, license, quality basis, runtime requirements
   model/                 # backend-specific files
@@ -1036,7 +1006,7 @@ artifact/
 Private evaluation cases and rationales should remain in the local build work
 directory, not in the distributable artifact.
 
-### 7. Split builder and runtime packages
+### 6. Split builder and runtime packages
 
 A likely package shape is:
 
@@ -1051,7 +1021,7 @@ smallbatch-runtime         # minimal loader/validator, if a separate package hel
 Do not finalize package names until the first two artifact backends exist, but
 make "recipient does not install the builder" a design invariant.
 
-### 8. Add a real function catalog only after artifacts are stable
+### 7. Add a real function catalog only after artifacts are stable
 
 The catalog should be a local manifest index, not a platform:
 
@@ -1101,25 +1071,20 @@ reference. Recommended order:
 1. **Name and one-sentence outcome.** No banner-only positioning.
 2. **Experimental status.** State what has and has not been validated.
 3. **When it is useful / when it is not.** Let unsuitable users self-select.
-4. **Choose a path.** "Develop a decision" for builders or "call a compiled
-   function" for artifact consumers.
-5. **Develop one decision.** Start with a goal and seed cases; show calibration,
-   adjudication, decision tests, and semantic freeze before training.
-6. **Compile the frozen version.** State exact prerequisites, representative
-   data minimum, expected teacher calls/time, and candidate selection.
-7. **Read the reports.** Explain decision-definition quality, teacher
-   application, implementation quality, runtime budget, and honest failure.
-8. **Try a prebuilt artifact.** A CPU-only, no-teacher, no-GPU path that proves
+4. **Try a prebuilt artifact.** A CPU-only, no-teacher, no-GPU path that proves
    the callable-function experience in under five minutes.
-9. **How it works.** One small diagram with calibration and compilation loops.
-10. **Evidence.** Only reproducible calibration studies and compilation
-   benchmarks, including rejected suggestions, losing baselines, and
-   uncertainty.
-11. **Why not alternatives?** A compact comparison with SetFit, PAW, OpenPipe,
+5. **Build one classifier.** Exact prerequisites, representative data minimum,
+   expected teacher calls/time, and one command path.
+6. **Read the report.** Explain gold quality, teacher agreement, runtime budget,
+   and honest failure before showing advanced features.
+7. **How it works.** One small diagram.
+8. **Evidence.** Only reproducible benchmark results, including losing
+   baselines and uncertainty.
+9. **Why not alternatives?** A compact comparison with SetFit, PAW, OpenPipe,
    DSPy, and plain API calls.
-12. **Responsible use and licenses.** A short accurate summary linking to the
+10. **Responsible use and licenses.** A short accurate summary linking to the
     detailed living document.
-13. **Development and contribution.** Link rather than embedding every detail.
+11. **Development and contribution.** Link rather than embedding every detail.
 
 The current long "What you get" section should become task-oriented docs. It
 front-loads reports, early stopping, GGUF, serving, sweeps, and adapters before
@@ -1130,52 +1095,45 @@ a user knows whether they have enough data or a suitable task.
 ```markdown
 # smallbatch
 
-Turn an evolving judgment into a tested local decision function.
+Turn a rubric and representative examples into a tested local classifier.
 
-Start with a goal and representative cases. smallbatch helps a domain owner
-refine labels, rubric clauses, tie-breakers, and boundary tests with teacher and
-human feedback. Once a decision version is frozen, it compares small local
-implementations and packages the smallest candidate that meets the quality and
-runtime requirements. A completed function runs without a hosted-model API
-call.
+smallbatch uses a teacher you choose to label development data, compares small
+local classifier candidates, and packages the smallest candidate that meets
+your quality and runtime requirements. A completed function runs without a
+hosted-model API call.
 
 > Experimental: the public benchmark and artifact format are still being
-> stabilized, and the rubric-development workflow has not yet been externally
-> validated. Teacher agreement is not the same as a coherent decision or
-> ground-truth accuracy.
+> stabilized. A teacher-agreement result is not ground-truth accuracy.
 
-Use smallbatch when a fuzzy judgment can be expressed as a bounded output, you
-have representative cases, and an accountable domain owner can resolve
-ambiguity. Compile only after a semantic version is stable enough for one
-deployment interval. Keep refining or keep the hosted implementation when it
-is not.
+Use smallbatch when the output is a stable set of labels, the decision runs
+often, and you can provide representative inputs plus an independent reviewed
+test set. Keep the API call when volume is low, the rubric changes often, or
+the task needs open-ended reasoning.
 ```
 
 Do not mention LoRA in the first screen. It is an implementation choice, not
 the value proposition.
 
-### Two audience tracks, not one overloaded quickstart
+### Two quickstarts, not one overloaded quickstart
 
-#### Builder track: develop, freeze, and compile a decision
-
-This is the primary data-scientist/domain-owner path. It should show:
-
-- starting from a goal and a small set of representative cases;
-- drafting label definitions and tie-breakers;
-- using disagreement and generated boundary probes to find ambiguity;
-- reviewing and promoting cases into permanent decision tests;
-- comparing and freezing a semantic version; and
-- only then running candidate compilation and final evaluation.
-
-It should state teacher cost, minimum reviewed evidence, hardware requirements,
-and the meaning of all three failure outcomes: refine, relabel, and decline.
-
-#### Consumer track: call a finished function
+#### Quickstart A: call a finished function
 
 This is the adoption path for application developers. It should install a
 small runtime and one released example artifact, then call it from CLI and
 Python with no teacher, model training, CUDA, Ollama, or llama.cpp checkout.
 It proves the destination before asking the user to build.
+
+#### Quickstart B: build a function
+
+This is the data-scientist path. It should state up front:
+
+- supported OS/Python/GPU matrix;
+- expected downloads and disk use;
+- minimum recommended user-provided and gold examples;
+- exact local or hosted teacher setup;
+- estimated request count/token cost before confirmation;
+- typical build time on named hardware; and
+- what a pass and fail mean.
 
 The current ticket example is useful as a smoke fixture but not as evaluation
 evidence because all 71 inputs are synthetic. Add one released benchmark
@@ -1188,16 +1146,12 @@ Recommended structure:
 ```text
 README.md                         # decision + activation
 docs/getting-started-runtime.md   # call a prebuilt artifact
-docs/getting-started-decision.md  # first calibration + semantic freeze
-docs/getting-started-build.md     # compile a frozen decision
+docs/getting-started-build.md     # first real build
 docs/concepts/function-spec.md
-docs/concepts/decision-lifecycle.md
-docs/concepts/decision-tests.md
 docs/concepts/data-and-labels.md
 docs/concepts/evaluation.md
 docs/concepts/artifacts.md
 docs/guides/reviewing-data.md
-docs/guides/refining-rubrics.md
 docs/guides/local-gpu.md
 docs/guides/cloud-build.md
 docs/guides/sharing-safely.md
@@ -1224,10 +1178,8 @@ to `CHANGELOG.md`. A roadmap should contain user outcomes, evidence required,
 and explicit non-goals, for example:
 
 ```text
-Outcome: one fuzzy judgment can be calibrated into a frozen decision version,
-then independently validated, compiled, and shared.
-Exit criteria: external calibration study, executable decision tests, public
-compilation benchmark, adjudicated gate, resumable labels, redacted bundle.
+Outcome: one independently validated classifier can be built and shared.
+Exit criteria: public benchmark, gold gate, resumable labels, redacted bundle.
 ```
 
 This keeps development from drifting back toward feature count.
