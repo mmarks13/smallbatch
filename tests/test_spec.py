@@ -28,6 +28,16 @@ def test_defaults(tmp_path):
     assert spec.output.range == (0, 10)
 
 
+def test_codex_cli_teacher_parses(tmp_path):
+    body = MINIMAL.replace(
+        "teacher: {backend: claude-cli, model: sonnet}",
+        "teacher: {backend: codex-cli, model: gpt-5.6-terra}",
+    )
+    spec = load_spec(write_spec(tmp_path, body))
+    assert spec.teacher.backend == "codex-cli"
+    assert spec.teacher.model == "gpt-5.6-terra"
+
+
 def test_teacher_block_required(tmp_path):
     body = MINIMAL.replace("teacher: {backend: claude-cli, model: sonnet}\n", "")
     with pytest.raises(ValueError, match="responsible-use"):

@@ -122,7 +122,7 @@ class OutputSpec(BaseModel):
 class TeacherSpec(BaseModel):
     # no defaults: picking a labeling provider (and being authorized to use it)
     # is the user's explicit choice — see docs/responsible-use.md
-    backend: Literal["claude-cli", "openai-compatible"]
+    backend: Literal["claude-cli", "codex-cli", "openai-compatible"]
     model: str
     examples: int = 600
     # gate/dev split sizes: a float < 1 is a fraction of the real rows, an

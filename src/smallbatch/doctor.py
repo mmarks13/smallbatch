@@ -117,6 +117,10 @@ def teacher_findings(spec: FunctionSpec, probe: bool = True) -> list[Finding]:
         if not _shutil.which("claude"):
             return [("fail", "teacher backend claude-cli: `claude` not found on PATH")]
         out.append(("ok", "claude CLI found"))
+    elif spec.teacher.backend == "codex-cli":
+        if not _shutil.which("codex"):
+            return [("fail", "teacher backend codex-cli: `codex` not found on PATH")]
+        out.append(("ok", "Codex CLI found"))
     else:
         if not spec.teacher.base_url:
             return [("fail", "teacher backend openai-compatible needs base_url")]

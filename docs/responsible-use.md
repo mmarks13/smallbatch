@@ -57,6 +57,13 @@ carefully first.
 Other hosted providers reachable through the `openai-compatible` backend
 (Gemini, etc.) have their own terms — check them.
 
+Note on the `codex-cli` teacher backend: it drives the Codex CLI's supported
+non-interactive mode (`codex exec`) using the account authenticated by
+`codex login`. The implementation removes an inherited `OPENAI_API_KEY` so a
+parent shell cannot silently change which account is used. As with
+`claude-cli`, the training-use question depends on what you build, not how the
+teacher is invoked.
+
 ## Practical guidance
 
 1. **Prefer a teacher you unambiguously may use**: a self-hosted open-weights

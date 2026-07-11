@@ -15,6 +15,8 @@ teacher:
   base_url: http://localhost:11434/v1
   # backend: claude-cli             # or: logged-in Claude Code CLI
   # model: sonnet
+  # backend: codex-cli              # or: logged-in OpenAI Codex CLI
+  # model: gpt-5.6-terra
   examples: 150                     # target dataset size (variants fill the gap)
   holdout: 0.15                     # gate split (fraction of reals, or an int count)
   dev: 0.1                          # checkpoint-selection split
