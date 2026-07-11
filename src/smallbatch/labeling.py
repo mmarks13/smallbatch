@@ -88,9 +88,16 @@ def label_items(
     for attempt in range(2):
         if not pending:
             break
+        batch_count = -(-len(pending) // spec.teacher.batch_size)
         for start in range(0, len(pending), spec.teacher.batch_size):
+            batch_number = start // spec.teacher.batch_size + 1
             batch_ids = pending[start : start + spec.teacher.batch_size]
             batch = [items[i] for i in batch_ids]
+            print(
+                f"labeling {origin}: pass {attempt + 1}, "
+                f"batch {batch_number}/{batch_count} ({len(batch)} items)",
+                flush=True,
+            )
             reply = teacher.complete(prompts.teacher_label_prompt(spec, batch, spec_text))
             try:
                 labels = prompts.extract_json(reply)
@@ -173,6 +180,9 @@ def generate_variants(
             count = min(per_call, remaining)
             examples = rng.sample(real, min(3, len(real)))
             example_ids = [r.get("id", row_id(r["input"])) for r in examples]
+            print(
+                f"generating variants: target {band}, {count} item(s)", flush=True
+            )
             reply = teacher.complete(
                 prompts.teacher_variant_prompt(
                     spec, [r["input"] for r in examples], str(band), count, spec_text
@@ -259,7 +269,7 @@ def counterfactual_rows(
     """Minimal label-moving edits of train reals, targeted at thin bands
     (deficits measured over `hist_rows`) and independently relabeled.
 
-    An edit the teacher relabels the SAME as its source is a miss: it gets
+    An edit that does not move CLOSER to its intended band is a miss: it gets
     one stronger retry — but the miss row is kept too (it's a paid-for
     invariance example). Returns (rows, hit_rate); rows carry
     `intended_band` + `source_ids`."""
@@ -273,6 +283,11 @@ def counterfactual_rows(
             continue
         chosen = [pool[rng.randrange(len(pool))] for _ in range(n)]
         for start in range(0, len(chosen), per_call):
+            print(
+                f"generating counterfactuals: target {band}, "
+                f"{len(chosen[start : start + per_call])} item(s)",
+                flush=True,
+            )
             for item, src in _cf_request(
                 teacher, spec, chosen[start : start + per_call], band, spec_text
             ):
@@ -289,7 +304,7 @@ def counterfactual_rows(
             src, band = by_id.get(r["id"], (None, None))
             r["intended_band"] = band
             r["source_ids"] = [src["id"]] if src else []
-            if src is not None and primary_value(spec, r) == primary_value(spec, src):
+            if src is not None and not _closer_to_band(spec, r, src, band):
                 misses.append((src, band))
         return rows, misses
 
@@ -303,26 +318,41 @@ def counterfactual_rows(
         by_band.setdefault(band, []).append(src)
     for band, srcs in by_band.items():
         for start in range(0, len(srcs), per_call):
+            print(
+                f"retrying counterfactuals: target {band}, "
+                f"{len(srcs[start : start + per_call])} item(s)",
+                flush=True,
+            )
             for item, src in _cf_request(
                 teacher, spec, srcs[start : start + per_call], band, spec_text,
-                feedback="the edit did not change the label — make a stronger "
-                         "(but still minimal) change to what the rubric scores",
+                feedback="the edit did not move the label closer to the requested "
+                         "band — make a stronger (but still minimal) change to "
+                         "what the rubric scores",
             ):
                 retry_pairs.append((item, src, band))
     if retry_pairs:
         retry_rows, _ = label_pairs(retry_pairs)
         rows += retry_rows
 
-    # hit rate: fraction of counterfactual rows whose label actually moved
-    src_label = {}
+    # hit rate: fraction independently judged closer to the intended band
+    src_target = {}
     for it, src, band in pairs + retry_pairs:
-        src_label[row_id({k: it.get(k) for k in spec.input_schema})] = primary_value(spec, src)
+        src_target[row_id({k: it.get(k) for k in spec.input_schema})] = (src, band)
     hits = sum(
         1 for r in rows
-        if r["id"] in src_label and primary_value(spec, r) != src_label[r["id"]]
+        if r["id"] in src_target
+        and _closer_to_band(spec, r, *src_target[r["id"]])
     )
     hit_rate = round(hits / len(rows), 4) if rows else None
     return rows, hit_rate
+
+
+def _closer_to_band(spec: FunctionSpec, row: Row, source: Row, band: Any) -> bool:
+    """Whether the primary label moved strictly closer to a target band."""
+    actual = primary_value(spec, row)
+    original = primary_value(spec, source)
+    field = _primary_field(spec)
+    return abs(actual - band) < abs(original - band) if field.type == "int" else actual == band
 
 
 def _out_agrees(spec: FunctionSpec, a: Any, b: Any) -> bool:
@@ -499,6 +529,9 @@ def write_dataset(
 ) -> dict[str, Any]:
     """Write labeled/train/dev/gate JSONL + meta for already-split rows."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    rows, deduplicated = _dedupe_labeled_rows(rows)
+    if deduplicated:
+        print(f"deduplicated {deduplicated} exact-input row(s)", flush=True)
     by_split = {s: [r for r in rows if r["split"] == s] for s in ("train", "dev", "gate")}
     _write_jsonl(out_dir / "labeled.jsonl", rows)
     for split_name, split_rows in by_split.items():
@@ -530,8 +563,35 @@ def write_dataset(
     if probe:
         meta["teacher_self_agreement"] = probe["self_agreement"]
         meta["probe_n"] = probe["n"]
+    if deduplicated:
+        meta["deduplicated"] = deduplicated
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     return meta
+
+
+def _dedupe_labeled_rows(rows: list[Row]) -> tuple[list[Row], int]:
+    """Keep one row per stable input ID while preserving duplicate judgments."""
+    unique: list[Row] = []
+    by_id: dict[str, Row] = {}
+    duplicate_count = 0
+    for row in rows:
+        canonical = by_id.get(row["id"])
+        if canonical is None:
+            by_id[row["id"]] = row
+            unique.append(row)
+            continue
+        duplicate_count += 1
+        output_key = "score" if "score" in row else "output"
+        observation = {
+            "origin": row.get("origin"),
+            output_key: row.get(output_key),
+            "reason": row.get("reason", ""),
+            "source_ids": row.get("source_ids", []),
+        }
+        if "intended_band" in row:
+            observation["intended_band"] = row["intended_band"]
+        canonical.setdefault("duplicate_observations", []).append(observation)
+    return unique, duplicate_count
 
 
 def build_dataset(
@@ -638,8 +698,8 @@ def build_dataset(
         extra_rows += cf_rows
         if hit_rate is not None:
             print(
-                f"counterfactuals: {len(cf_rows)} rows, {hit_rate:.0%} moved the "
-                "label (misses kept as invariance examples)"
+                f"counterfactuals: {len(cf_rows)} rows, {hit_rate:.0%} moved "
+                "closer to the intended band (misses kept as invariance examples)"
             )
 
     probe = consistency_probe(
@@ -657,7 +717,12 @@ def build_dataset(
                 "`smallbatch review --unstable` to inspect"
             )
 
-    return write_dataset(spec, rows + extra_rows, out_dir, probe=probe)
+    meta = write_dataset(spec, rows + extra_rows, out_dir, probe=probe)
+    usage = getattr(teacher, "usage", None)
+    if isinstance(usage, dict) and usage:
+        meta["teacher_usage"] = usage
+        (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    return meta
 
 
 def _write_jsonl(path: Path, rows: list[Row]) -> None:

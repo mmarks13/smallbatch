@@ -2,6 +2,8 @@ import json
 import random
 
 from smallbatch.labeling import (
+    _closer_to_band,
+    _dedupe_labeled_rows,
     build_dataset,
     consistency_probe,
     counterfactual_rows,
@@ -144,7 +146,7 @@ class CFTeacher:
         items = json.loads(prompt[prompt.index("[") :][: FakeTeacher._arr_len(prompt)])
         if "COUNTERFACTUAL" in prompt:
             self.cf_calls += 1
-            self.retry_seen |= "did not change the label" in prompt
+            self.retry_seen |= "did not move the label closer" in prompt
             import re
             band = re.search(r"score around (\d+)", prompt).group(1)
             return json.dumps(
@@ -201,6 +203,41 @@ def test_counterfactual_misses_retry_once_and_are_kept():
     assert teacher.retry_seen  # a second, feedback-carrying pass ran
     assert hit_rate == 0.0  # stubborn teacher never moves the label
     assert all(r["score"] == 2 for r in rows_out)  # kept as invariance rows
+
+
+def test_counterfactual_progress_requires_moving_toward_target():
+    source = {"score": 4}
+    assert _closer_to_band(CF_SPEC, {"score": 2}, source, 0)
+    assert not _closer_to_band(CF_SPEC, {"score": 4}, source, 0)
+    assert not _closer_to_band(CF_SPEC, {"score": 5}, source, 0)
+
+
+def test_exact_input_duplicates_are_collapsed_with_observation():
+    original = {
+        "id": "same",
+        "input": {"title": "x"},
+        "score": 2,
+        "reason": "first",
+        "origin": "real",
+        "split": "train",
+    }
+    duplicate = {
+        **original,
+        "score": 3,
+        "reason": "second",
+        "origin": "counterfactual",
+        "source_ids": ["same"],
+        "intended_band": 4,
+    }
+    unique, n = _dedupe_labeled_rows([original, duplicate])
+    assert n == 1 and unique == [original]
+    assert original["duplicate_observations"] == [{
+        "origin": "counterfactual",
+        "score": 3,
+        "reason": "second",
+        "source_ids": ["same"],
+        "intended_band": 4,
+    }]
 
 
 def test_build_dataset_augment_block_replaces_legacy(tmp_path):

@@ -55,6 +55,19 @@ def test_items_budget_estimate():
     assert any("labeling call" in msg for _, msg in f)
 
 
+def test_items_budget_reports_augment_block():
+    spec = make_spec(
+        augment={
+            "paraphrase": {"cap": 5},
+            "field_dropout": {"fields": ["body"], "cap": 3},
+            "counterfactual": {"cap": 2},
+        }
+    )
+    findings = items_findings(spec, [{"title": "t", "body": "b"}] * 20)
+    assert any("5 paraphrases + 3 field dropouts + 2 counterfactuals" in msg
+               for _, msg in findings)
+
+
 def test_data_findings_read_new_layout(tmp_path):
     spec = make_spec()
     rows = [{"input": {"title": "t", "body": "b"}, "score": 1, "origin": "real"}]

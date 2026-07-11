@@ -47,7 +47,7 @@ for a complete working spec.
 | `output` | The output contract. Scalar form: `{type: int, range: [lo, hi]}` or `{type: enum, labels: [...]}`. Structured form: a flat map of field name → `{labels: [...]}` (enum) or `{range: [lo, hi]}` (int) — see [Structured outputs](#structured-outputs). Parsed, validated, out-of-contract → `None`. |
 | `rubric` | The instructions the teacher labels by; also embedded in the student's training prompt. Anchor it with concrete examples per band — calibration lives here. |
 | `spec_files` | External files whose *content* is part of the spec (embedded into teacher prompts, hashed for staleness). Paths resolve relative to the spec file. |
-| `teacher` | **Required, no defaults**: `backend` (`openai-compatible` \| `claude-cli`), `model`, plus `examples` (target dataset size), `holdout` (gate split) and `dev` (checkpoint-selection split) — each a fraction of the real rows or an absolute int count — `batch_size`, and for openai-compatible `base_url`/`api_key_env`. |
+| `teacher` | **Required, no defaults**: `backend` (`openai-compatible` \| `claude-cli` \| `codex-cli`), `model`, plus `examples` (target dataset size), `holdout` (gate split) and `dev` (checkpoint-selection split) — each a fraction of the real rows or an absolute int count — `batch_size`, and for openai-compatible `base_url`/`api_key_env`. |
 | `gate` | `agreement` (default 0.85; `agreement_pm1` is the legacy alias), `must_beat_zeroshot` (default true), and for structured outputs optional per-field overrides under `gate.fields`. |
 | `train` | `base` model id (default `LiquidAI/LFM2.5-350M-Base`; note an adapter inherits its base model's license — LFM's conditions commercial use above $10M revenue), `precision` (`auto|fp32|bf16|qlora`), LoRA knobs (`lora_r`, `lora_alpha`, `use_dora`), `rationale_distillation`, `max_epochs` (default 12; `epochs` is the legacy alias) with `patience` (default 2, `null` disables early stopping), lr/batch sizes, `loss_type`. Defaults are sensible; a spec can omit the whole block. |
 
@@ -105,13 +105,16 @@ class Teacher(Protocol):
     def complete(self, prompt: str) -> str: ...
 ```
 
-Two shipped implementations, selected by `teacher.backend`:
+Three shipped implementations, selected by `teacher.backend`:
 
 - **`openai-compatible`** — base URL + key + model against any
   `/chat/completions` endpoint. One backend covers OpenAI, Gemini, Ollama,
   vLLM, LM Studio — teacher-agnosticism without a plugin system. Stdlib-only.
 - **`claude-cli`** — shells out to the Claude Code CLI's headless mode
   (`claude -p`); requires the CLI installed and logged in.
+- **`codex-cli`** — shells out to the OpenAI Codex CLI's ephemeral headless
+  mode (`codex exec`); requires the CLI installed and logged in. Labeling runs
+  ignore user config in a read-only sandbox outside the caller's repository.
 
 Before pointing either at a hosted provider, read
 [responsible-use.md](responsible-use.md).
@@ -158,8 +161,10 @@ augment:
   counterfactual: {cap: 30}
 ```
 
-- **paraphrase** — label-*preserving* rewrites (the variant machinery above);
-  teaches the model to ignore wording.
+- **paraphrase** — the legacy name for target-band synthetic variation: the
+  teacher sees three train examples as style references, writes new plausible
+  inputs for thin score bands, and relabels them independently. These are not
+  paired rewrites of one source row.
 - **field_dropout** — copies of train reals with one input field blanked,
   **relabeled by the teacher**. If the field mattered, the label honestly
   moves; if not, the pair teaches invariance. Either outcome is real data —
@@ -169,8 +174,11 @@ augment:
   train real aimed at an underrepresented label band, then the edit is
   relabeled independently. Minimal label-moving pairs trace the rubric's
   decision boundary — the highest-information examples per teacher call. An
-  edit whose label doesn't move gets one stronger retry; the miss is kept
-  anyway (it's a paid-for invariance example). `label` prints the hit rate.
+  edit whose independently judged label does not move closer to the intended
+  band gets one stronger retry; the miss is kept anyway (it's a paid-for
+  invariance example). `label` prints the target-progress hit rate. Note
+  `cap` bounds the first-pass edits — kept retries land on top, so a run can
+  produce more than `cap` counterfactual rows (up to 2× in the worst case).
 
 All augmented rows are generated from **train-split reals only**, land in
 train, and record `source_ids` (origin: `variant`, `dropout`, or

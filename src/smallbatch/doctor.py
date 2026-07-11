@@ -74,11 +74,28 @@ def items_findings(spec: FunctionSpec, items: list[dict]) -> list[Finding]:
                     f"gate split would be {gate} < {SMALL_GATE_N} items — the verdict will be "
                     "noise-dominated (CI is shown, but more real items would help)"))
     batches = -(-len(items) // spec.teacher.batch_size)
-    variants = max(0, spec.teacher.examples - n_real)
-    variant_calls = -(-variants // 20) + -(-variants // spec.teacher.batch_size)
-    out.append(("ok",
-                f"teacher budget: ~{batches} labeling call(s) for reals"
-                + (f", ~{variant_calls} more for ~{variants} variants" if variants else "")))
+    out.append(("ok", f"teacher budget: ~{batches} labeling call(s) for provided items"))
+    if spec.augment:
+        paraphrase = spec.augment.paraphrase.cap if spec.augment.paraphrase else 0
+        dropout = (
+            spec.augment.field_dropout.cap * len(spec.augment.field_dropout.fields)
+            if spec.augment.field_dropout
+            else 0
+        )
+        counterfactual = spec.augment.counterfactual.cap if spec.augment.counterfactual else 0
+        retry = counterfactual
+        out.append((
+            "ok",
+            "augmentation plan: up to "
+            f"{paraphrase} paraphrases + {dropout} field dropouts + "
+            f"{counterfactual} counterfactuals (+ up to {retry} retries); "
+            "generation-call count depends on the observed label histogram",
+        ))
+    else:
+        variants = max(0, spec.teacher.examples - n_real)
+        variant_calls = -(-variants // 20) + -(-variants // spec.teacher.batch_size)
+        if variants:
+            out.append(("ok", f"legacy augmentation: ~{variant_calls} calls for ~{variants} variants"))
     return out
 
 
