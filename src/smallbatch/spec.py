@@ -370,6 +370,17 @@ class FunctionSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _check_reserved_input_fields(self) -> "FunctionSpec":
+        # items carry trusted reference answers under a reserved `gold` key;
+        # an input field with that name would be silently shadowed
+        if "gold" in self.input_schema:
+            raise ValueError(
+                "input field name 'gold' is reserved for gold-label "
+                "annotations on items — rename the field"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _check_augment_fields(self) -> "FunctionSpec":
         if self.augment and self.augment.field_dropout:
             unknown = [

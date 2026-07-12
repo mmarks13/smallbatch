@@ -307,6 +307,7 @@ def build_report(
         headline["teacher_probe_n"] = teacher_probe.get("n")
 
     audit = shortcut_audit(spec, gate_rows, preds, golds)
+    gold_section, gold_warnings = _gold_sections(spec, gate_rows, preds)
 
     return {
         "function": spec.name,
@@ -314,6 +315,7 @@ def build_report(
         "precision": training.get("precision"),
         "headline": headline,
         "gate": gate,
+        "gold": gold_section,
         "small_gate_warning": len(gate_rows) < SMALL_GATE_N,
         "training": {
             k: training.get(k)
@@ -329,6 +331,7 @@ def build_report(
         "failures": failures,
         "shortcut_audit": {"slices": audit["slices"], "surface": audit["surface"]},
         "warnings": audit["warnings"]
+        + gold_warnings
         + (
             [
                 f"eval batch size reduced to {adapter['eval_batch_size_effective']} "
@@ -338,6 +341,39 @@ def build_report(
             else []
         ),
     }
+
+
+def _gold_sections(
+    spec: FunctionSpec, gate_rows: list[Row], preds: list
+) -> tuple[Optional[dict], list[str]]:
+    """Three-way breakdown over the gate rows that carry a gold annotation:
+    teacher-vs-gold (is the teacher even right?), student-vs-gold (is the
+    compiled function right?), student-vs-teacher (imitation — the verdict's
+    basis). Returns (section, warnings). The PASS/FAIL verdict itself remains
+    teacher agreement; gold is independent evidence."""
+    idx = [i for i, r in enumerate(gate_rows) if r.get("gold") is not None]
+    if not idx or len(preds) < len(gate_rows):
+        return None, []
+    from . import metrics as m
+
+    gold_refs = [gate_rows[i]["gold"] for i in idx]
+    teacher_labels = [row_output(spec, gate_rows[i]) for i in idx]
+    student_preds = [preds[i] for i in idx]
+    section = {
+        "n": len(idx),
+        "teacher_vs_gold": m.compare(spec, teacher_labels, gold_refs),
+        "student_vs_gold": m.compare(spec, student_preds, gold_refs),
+        "student_vs_teacher": m.compare(spec, student_preds, teacher_labels),
+    }
+    warnings = []
+    t_agree = section["teacher_vs_gold"]["agreement"]
+    if t_agree < spec.gate.threshold:
+        warnings.append(
+            f"teacher agrees with gold only {t_agree:.0%} on {len(idx)} gold "
+            "row(s) — a teacher-agreement PASS is NOT independent quality "
+            "validation for this function; fix the rubric or the teacher"
+        )
+    return section, warnings
 
 
 def _pct(x) -> str:
@@ -432,6 +468,28 @@ def render_markdown(report: dict) -> str:
     if report.get("confusion"):
         lines += _confusion_md(report["confusion"])
 
+    if report.get("gold"):
+        g = report["gold"]
+        lines.append(f"## Gold labels (n={g['n']})")
+        lines.append(
+            "Independent evidence — the PASS/FAIL verdict above is teacher "
+            "agreement (imitation), not ground truth."
+        )
+        lines += ["", "| comparison | agreement | 95% CI | invalid |", "|---|---|---|---|"]
+        for key, label in (
+            ("teacher_vs_gold", "teacher vs gold"),
+            ("student_vs_gold", "student vs gold"),
+            ("student_vs_teacher", "student vs teacher"),
+        ):
+            c = g[key]
+            ci = c.get("agreement_ci")
+            ci_txt = f"{ci[0]:.0%}–{ci[1]:.0%}" if ci else "-"
+            lines.append(
+                f"| {label} | {c['agreement']:.1%} | {ci_txt} | "
+                f"{_pct(c.get('invalid_rate'))} |"
+            )
+        lines.append("")
+
     for name, section in (report.get("fields") or {}).items():
         lines.append(f"## Field `{name}`")
         m = section.get("metrics") or {}
@@ -475,10 +533,12 @@ def render_markdown(report: dict) -> str:
                     f"{s['student_rho']:.2f} | {s['gap']:.2f}{flag} |"
                 )
             lines.append("")
-        for w in report.get("warnings") or []:
-            lines.append(f"> ⚠ {w}")
-        if report.get("warnings"):
-            lines.append("")
+
+    # warnings render regardless of which sections exist
+    for w in report.get("warnings") or []:
+        lines.append(f"> ⚠ {w}")
+    if report.get("warnings"):
+        lines.append("")
 
     if report["failures"]:
         lines.append("## Largest disagreements")

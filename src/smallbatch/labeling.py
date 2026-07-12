@@ -578,6 +578,7 @@ def write_dataset(
         "train": len(by_split["train"]),
         "dev": len(by_split["dev"]),
         "gate": len(by_split["gate"]),
+        "gold": sum(1 for r in rows if r.get("gold") is not None),
         "label_histogram": hist,
         "teacher_model": spec.teacher.model,
         "teacher_backend": spec.teacher.backend,
@@ -618,6 +619,51 @@ def _dedupe_labeled_rows(rows: list[Row]) -> tuple[list[Row], int]:
     return unique, duplicate_count
 
 
+def _validate_gold(spec: FunctionSpec, items: list[dict]) -> dict[str, Any]:
+    """Validate every item's reserved `gold` annotation against the output
+    contract BEFORE any paid teacher call. Returns {row_id: coerced gold}.
+    Gold never enters teacher prompts or row inputs — prompt serialization and
+    row construction are schema-filtered — it only judges at the gate."""
+    gold_by_id: dict[str, Any] = {}
+    for i, it in enumerate(items):
+        if "gold" not in it:
+            continue
+        coerced = _coerce_valid(spec, it["gold"])
+        if coerced is None:
+            raise ValueError(
+                f"items[{i}] has an invalid gold annotation {it['gold']!r} — "
+                "gold must satisfy the output contract exactly"
+            )
+        gold_by_id[row_id({k: it.get(k) for k in spec.input_schema})] = coerced
+    return gold_by_id
+
+
+def _apply_retroactive_gold(
+    rows: list[Row], gold_by_id: dict[str, Any]
+) -> Optional[dict[str, Any]]:
+    """Annotate existing rows newly supplied with gold. A train/dev row moves
+    to the gate, and every synthetic row derived from it is evicted — its
+    source is now evaluation data. Returns None when nothing changed."""
+    moved = 0
+    regated: set[str] = set()
+    for r in rows:
+        gold = gold_by_id.get(r["id"])
+        if gold is None or r.get("gold") == gold:
+            continue
+        r["gold"] = gold
+        if r.get("split") in ("train", "dev"):
+            r["split"] = "gate"
+            regated.add(r["id"])
+            moved += 1
+    if not moved:
+        return None
+    kept = [
+        r for r in rows
+        if r["origin"] == "real" or not (regated & set(r.get("source_ids") or []))
+    ]
+    return {"rows": kept, "moved": moved, "descendants": len(rows) - len(kept)}
+
+
 def build_dataset(
     teacher: Teacher,
     spec: FunctionSpec,
@@ -636,6 +682,7 @@ def build_dataset(
     this call may generate across all augmentation stages (0 = none).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    gold_by_id = _validate_gold(spec, items)  # before any paid teacher call
     existing: list[Row] = []
     if append and (out_dir / "labeled.jsonl").exists():
         existing = read_jsonl(out_dir / "labeled.jsonl")
@@ -650,6 +697,17 @@ def build_dataset(
             known.add(rid)  # also dedupes within `items` itself
             new_items.append(it)
 
+    # retroactive gold on an already-labeled row: annotate it, and if it sat
+    # in train/dev, move it to the gate and evict its synthetic descendants
+    # (they were derived from what is now evaluation data)
+    evicted = _apply_retroactive_gold(existing, gold_by_id)
+    if evicted:
+        print(
+            f"gold annotation moved {evicted['moved']} row(s) to the gate; "
+            f"evicted {evicted['descendants']} derived synthetic row(s)"
+        )
+        existing = evicted["rows"]
+
     stamp = {
         "teacher_model": spec.teacher.model,
         "teacher_backend": spec.teacher.backend,
@@ -659,17 +717,32 @@ def build_dataset(
     real_new = label_items(teacher, spec, new_items, origin="real") if new_items else []
     for r in real_new:
         r.update(stamp)
+        if r["id"] in gold_by_id:
+            r["gold"] = gold_by_id[r["id"]]
+            r["split"] = "gate"  # gold judges; it is never trained on
     rows = existing + real_new
     if not any(r["origin"] == "real" for r in rows):
         raise RuntimeError("labeling produced no usable rows")
 
     n_real = sum(1 for r in rows if r["origin"] == "real")
+    gate_target = resolve_count(spec.teacher.holdout, n_real)
+    n_gold = sum(1 for r in rows if r.get("gold") is not None)
+    if n_gold > gate_target:
+        print(
+            f"note: {n_gold} gold row(s) exceed the planned gate of "
+            f"{gate_target} — the gate grows to hold them all"
+        )
     assign_splits(
         rows,
-        gate_target=resolve_count(spec.teacher.holdout, n_real),
+        gate_target=gate_target,
         dev_target=resolve_count(spec.teacher.dev, n_real),
         seed=spec.train.seed,
     )
+    if not any(r["split"] == "train" for r in rows):
+        raise ValueError(
+            "gold/gate routing left no train rows — add non-gold items or "
+            "reduce teacher.holdout/teacher.dev"
+        )
 
     train_reals = [r for r in rows if r["origin"] == "real" and r["split"] == "train"]
     train_rows = [r for r in rows if r["split"] == "train"]
