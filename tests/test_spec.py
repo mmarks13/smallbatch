@@ -1,3 +1,4 @@
+import json
 import textwrap
 
 import pytest
@@ -175,3 +176,11 @@ def test_teacher_consistency_validated(tmp_path):
     )
     with pytest.raises(ValueError):
         load_spec(write_spec(tmp_path, body))
+
+
+def test_function_name_slug_validation(tmp_path):
+    for bad in ("../evil", "a/b", "", ".hidden", "-flag", "name\x00", "café", "a" * 81):
+        with pytest.raises(ValueError, match="slug"):
+            load_spec(write_spec(tmp_path, MINIMAL.replace("name: toy", f"name: {json.dumps(bad)}")))
+    ok = load_spec(write_spec(tmp_path, MINIMAL.replace("name: toy", "name: Ticket-priority_2.1")))
+    assert ok.name == "Ticket-priority_2.1"

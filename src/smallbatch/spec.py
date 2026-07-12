@@ -4,11 +4,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
+
+# function/sweep/arm names and run tags become filesystem path components
+# (data/<name>, artifacts/<name>/<sweep>/<tag>), so they must be conservative
+# slugs: ASCII letter/digit start, then letters/digits/._-, no "..", <= 80.
+_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
+
+
+def validate_slug(value: str, what: str) -> str:
+    """Reject names that could escape or mangle the artifact/data layout:
+    path separators, '..', control characters, non-ASCII, leading dots or
+    dashes, and empty/overlong names."""
+    if not isinstance(value, str) or not _SLUG_RE.fullmatch(value) or ".." in value:
+        raise ValueError(
+            f"{what} {value!r} must be a filesystem-safe slug "
+            "(ASCII letters/digits/._-, starting with a letter or digit, "
+            "no '..', at most 80 chars)"
+        )
+    return value
 
 
 class FieldSpec(BaseModel):
@@ -87,8 +106,6 @@ class OutputSpec(BaseModel):
             )
         if not data:
             raise ValueError("output needs at least one field")
-        import re
-
         for name in data:
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", str(name)):
                 raise ValueError(f"output field name {name!r} must be a simple identifier")
@@ -271,6 +288,11 @@ class FunctionSpec(BaseModel):
     _source_path: Optional[Path] = None
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def _check_name(self) -> "FunctionSpec":
+        validate_slug(self.name, "function name")
+        return self
 
     @model_validator(mode="after")
     def _check_augment_fields(self) -> "FunctionSpec":

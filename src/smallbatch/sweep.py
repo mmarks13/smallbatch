@@ -26,7 +26,7 @@ import yaml
 from pydantic import BaseModel, model_validator
 
 from . import artifacts
-from .spec import FunctionSpec
+from .spec import FunctionSpec, validate_slug
 
 
 class SweepSpec(BaseModel):
@@ -48,6 +48,9 @@ class SweepSpec(BaseModel):
             raise ValueError("sweep needs at least one model")
         if not self.arms:
             raise ValueError("sweep needs at least one arm")
+        validate_slug(self.name, "sweep name")
+        for arm in self.arms:
+            validate_slug(arm, "arm name")
         return self
 
     def resolved_spec_path(self) -> Path:
@@ -68,9 +71,10 @@ def make_tag(model_id: str, arm: str) -> str:
     """Stable per-run tag, e.g. Qwen/Qwen3.5-4B + plain -> qwen3.5-4b-plain.
 
     Matches the tags the ad-hoc sweep scripts produced, so old artifacts and
-    manifests keep the same names.
+    manifests keep the same names. Validated: the tag becomes an artifact
+    path component, and a hostile/typo'd model id must fail here.
     """
-    return f"{model_id.split('/')[-1]}-{arm}".lower()
+    return validate_slug(f"{model_id.split('/')[-1]}-{arm}".lower(), "run tag")
 
 
 def merged_train(
