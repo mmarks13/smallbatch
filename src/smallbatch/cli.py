@@ -87,7 +87,17 @@ def cmd_compile(args) -> int:
 def cmd_run(args) -> int:
     from .runtime import load_fn
 
-    fn = load_fn(args.name, artifacts_root=args.artifacts, allow_failed=args.allow_failed)
+    try:
+        fn = load_fn(
+            args.name,
+            artifacts_root=args.artifacts,
+            allow_failed=args.allow_failed,
+            version=args.version,
+            candidate=args.candidate,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     if args.json:
         print(fn(json.loads(args.json)))
     else:
@@ -275,6 +285,10 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--json", help="single input item as JSON")
     rp.add_argument("--input-file", help="JSON/JSONL file of items")
     rp.add_argument("--allow-failed", action="store_true")
+    rp.add_argument("--version", help="artifact version dir name (default: latest usable)")
+    rp.add_argument(
+        "--candidate", help="run a specific retained candidate (e.g. lora, tfidf)"
+    )
     rp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
     rp.set_defaults(fn=cmd_run)
 

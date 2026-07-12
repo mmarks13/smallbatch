@@ -39,24 +39,45 @@ def load_fn(
     name: str,
     artifacts_root: str | Path = artifacts.DEFAULT_ROOT,
     allow_failed: bool = False,
+    version: str | None = None,
+    candidate: str | None = None,
 ) -> CompiledFunction:
+    """Load a compiled function: the latest usable version by default, or an
+    explicit `version` dir name. `candidate` selects a retained non-winner
+    candidate — its own gate/acceptance state applies (an accepted winner
+    never unlocks an unaccepted secondary)."""
     root = Path(artifacts_root)
-    version = artifacts.latest(root, name, passing_only=not allow_failed)
-    if version is None:
-        raise FileNotFoundError(
-            f"no {'passing ' if not allow_failed else ''}artifact for '{name}' under {root}"
-        )
-    manifest = artifacts.read_manifest(version)
-    stale = artifacts.staleness(version)
+    version_dir = artifacts.resolve_version(
+        root, name, version, allow_failed=allow_failed, candidate=candidate
+    )
+    manifest = artifacts.read_manifest(version_dir)
+    stale = artifacts.staleness(version_dir)
     if stale:
         print(f"warning: '{name}' artifact is stale — {stale}; consider recompiling")
+    rec = artifacts.candidate_record(manifest, candidate)
+    chosen = candidate or artifacts.winner(manifest)
+    if not (rec.get("gate") or {}).get("passed"):
+        print(
+            f"warning: '{name}' candidate '{chosen}' FAILED its gate "
+            f"({'; '.join((rec.get('gate') or {}).get('reasons', [])) or 'no reasons recorded'}) — "
+            "loaded anyway"
+        )
+    if rec["backend"] != "lora":
+        raise ValueError(
+            f"candidate '{chosen}' uses backend '{rec['backend']}', which this "
+            "runtime cannot load yet"
+        )
 
     from peft import PeftModel
 
     from .training import load_base_model
 
-    spec = load_spec(version / "spec.yaml")
-    tokenizer, model = load_base_model(manifest["base_model"], manifest["inference_precision"])
-    model = PeftModel.from_pretrained(model, str(version / "adapter"))
+    spec = load_spec(version_dir / "spec.yaml")
+    tokenizer, model = load_base_model(
+        rec.get("base_model") or manifest["base_model"],
+        rec.get("inference_precision") or manifest["inference_precision"],
+    )
+    adapter = version_dir / (rec.get("artifact_path") or "adapter")
+    model = PeftModel.from_pretrained(model, str(adapter))
     model.eval()
     return CompiledFunction(spec, model, tokenizer, manifest)

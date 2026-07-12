@@ -69,10 +69,20 @@ def items_findings(spec: FunctionSpec, items: list[dict]) -> list[Finding]:
     train = n_real - gate - dev
     out.append(("ok" if train > 0 else "fail",
                 f"planned split of reals: {train} train / {dev} dev / {gate} gate"))
-    if gate < SMALL_GATE_N:
+    if gate == 0:
+        # compile hard-errors on an empty gate; failing here prevents paid
+        # labeling that could never produce a compilable dataset
+        out.append(("fail",
+                    "planned gate split is 0 items — compile will refuse this dataset; "
+                    "add more items or raise teacher.holdout"))
+    elif gate < SMALL_GATE_N:
         out.append(("warn",
                     f"gate split would be {gate} < {SMALL_GATE_N} items — the verdict will be "
                     "noise-dominated (CI is shown, but more real items would help)"))
+    if dev == 0 and spec.teacher.dev != 0:  # dev: 0 is an explicit opt-out
+        out.append(("fail",
+                    "planned dev split is 0 items — checkpoint selection needs dev rows; "
+                    "add more items or raise teacher.dev"))
     batches = -(-len(items) // spec.teacher.batch_size)
     out.append(("ok", f"teacher budget: ~{batches} labeling call(s) for provided items"))
     if spec.augment:

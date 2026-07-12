@@ -82,3 +82,32 @@ def test_data_findings_read_new_layout(tmp_path):
     assert any("8 train / 1 dev / 1 gate" in msg for _, msg in f)
     assert any(lvl == "warn" and "zero examples: 0" in msg for lvl, msg in f)
     assert not any(lvl == "warn" and "different spec" in msg for lvl, msg in f)
+
+
+def test_items_zero_gate_plan_is_a_failure():
+    # the starter's 3 placeholder items plan to 3 train / 0 dev / 0 gate;
+    # doctor must stop that before paid labeling, since compile will refuse it
+    spec = make_spec(teacher={**TEACHER, "holdout": 0.15})
+    f = items_findings(spec, [{"title": f"t{i}", "body": "b"} for i in range(3)])
+    assert any(lvl == "fail" and "gate split is 0" in msg for lvl, msg in f)
+    assert any(lvl == "fail" and "dev split is 0" in msg for lvl, msg in f)
+
+
+def test_items_explicit_dev_zero_is_allowed():
+    spec = make_spec(teacher={**TEACHER, "holdout": 5, "dev": 0})
+    f = items_findings(spec, [{"title": f"t{i}", "body": "b"} for i in range(20)])
+    assert not any(lvl == "fail" and "dev split" in msg for lvl, msg in f)
+
+
+def test_data_findings_labeling_hash_mismatch_fails(tmp_path):
+    spec = make_spec()
+    rows = [{"input": {"title": "t", "body": "b"}, "score": 1, "origin": "real"}]
+    for name in ("train", "dev", "gate"):
+        (tmp_path / f"{name}.jsonl").write_text(json.dumps(rows[0]))
+    (tmp_path / "labeled.jsonl").write_text(json.dumps(rows[0]))
+    (tmp_path / "meta.json").write_text(json.dumps({
+        "label_histogram": {},
+        "labeling_hash": "0" * 64,
+    }))
+    f = data_findings(spec, tmp_path)
+    assert any(lvl == "fail" and "different rubric" in msg for lvl, msg in f)

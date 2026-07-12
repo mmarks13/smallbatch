@@ -146,3 +146,21 @@ def test_resolve_version_candidate_scoped(tmp_path):
     assert artifacts.resolve_version(root, "toy", None, True, candidate="lora") == v
     with pytest.raises(ValueError, match="no 'setfit' candidate"):
         artifacts.resolve_version(root, "toy", None, True, candidate="setfit")
+
+
+def test_version_sort_handles_double_digit_revisions(tmp_path):
+    root = tmp_path / "artifacts"
+    base = root / "toy"
+    for name in ["2026-07-11"] + [f"2026-07-11-r{i}" for i in range(2, 12)]:
+        d = base / name
+        d.mkdir(parents=True)
+        artifacts.write_manifest(d, {"function": "toy", "gate": {"passed": True}})
+    vs = [p.name for p in artifacts.versions(root, "toy")]
+    assert vs[-1] == "2026-07-11-r11"
+    assert vs.index("2026-07-11-r9") < vs.index("2026-07-11-r10")
+    assert artifacts.latest(root, "toy").name == "2026-07-11-r11"
+    # dates still order before revisions of a later date
+    d = base / "2026-07-12"
+    d.mkdir()
+    artifacts.write_manifest(d, {"function": "toy", "gate": {"passed": True}})
+    assert artifacts.latest(root, "toy").name == "2026-07-12"

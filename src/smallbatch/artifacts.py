@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -121,11 +122,21 @@ def read_manifest(version_dir: Path) -> dict:
     return json.loads((version_dir / "manifest.json").read_text())
 
 
+def _version_key(p: Path) -> tuple[str, int]:
+    """Sort '<date>' < '<date>-r2' < ... < '<date>-r10' correctly: plain
+    lexicographic ordering puts -r10 before -r9."""
+    m = re.fullmatch(r"(.*?)(?:-r(\d+))?", p.name)
+    return (m.group(1), int(m.group(2) or 1))
+
+
 def versions(root: Path, name: str) -> list[Path]:
     base = root / name
     if not base.is_dir():
         return []
-    return sorted(p for p in base.iterdir() if (p / "manifest.json").exists())
+    return sorted(
+        (p for p in base.iterdir() if (p / "manifest.json").exists()),
+        key=_version_key,
+    )
 
 
 def latest(root: Path, name: str, passing_only: bool = True) -> Optional[Path]:
