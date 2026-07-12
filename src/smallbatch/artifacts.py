@@ -65,6 +65,56 @@ def candidate_is_usable(
     return accepted is not None and accepted == (candidate or winner(manifest))
 
 
+def select_winner(candidates: dict[str, dict], tie_margin: float) -> dict:
+    """Explicit selection order over candidate result records:
+
+    1. only completed candidates compete;
+    2. if any candidate passed every gate check, choose among passing ones
+       (a candidate passing all required fields always beats a field-failing
+       one, whatever their joint headlines);
+    3. highest gate agreement wins;
+    4. within `tie_margin` (a fixed pragmatic margin, not CI equivalence),
+       the smaller artifact wins.
+    """
+    completed = {n: c for n, c in candidates.items() if c.get("status") == "completed"}
+    if not completed:
+        raise ValueError("no completed candidates to select from")
+    passing = {n: c for n, c in completed.items() if (c.get("gate") or {}).get("passed")}
+    pool = passing or completed
+
+    def agreement(rec: dict) -> float:
+        return (rec.get("metrics") or {}).get("agreement") or 0.0
+
+    def size(name: str) -> float:
+        return pool[name].get("artifact_size_bytes") or float("inf")
+
+    best = max(agreement(c) for c in pool.values())
+    tied = [n for n, c in pool.items() if best - agreement(c) <= tie_margin]
+    scope = "passing candidates" if passing else "completed candidates (none passed)"
+    if len(tied) == 1:
+        return {"winner": tied[0], "reason": f"highest gate agreement among {scope}"}
+    winner = min(tied, key=size)
+    return {
+        "winner": winner,
+        "reason": f"tie within {tie_margin:.0%} among {scope} — smallest artifact",
+    }
+
+
+def accept_candidate(version_dir: Path, candidate: str, via: str) -> dict:
+    """Record the user's explicit decision to deploy `candidate` despite a
+    failed gate. Never rewrites the gate result; usability comes from the
+    deployment block (candidate-scoped)."""
+    manifest = read_manifest(version_dir)
+    manifest["deployment"] = {
+        "accepted_despite_gate": True,
+        "accepted_candidate": candidate,
+        "accepted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "accepted_via": via,
+    }
+    write_manifest(version_dir, manifest)
+    return manifest
+
+
 def artifact_is_usable(manifest: dict) -> bool:
     """Usability of the artifact's *selected* candidate — never a grant to
     every retained candidate."""

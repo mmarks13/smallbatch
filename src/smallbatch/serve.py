@@ -51,6 +51,26 @@ def handle_call(
     return 200, {"output": output, "raw": raw}
 
 
+def handle_call_direct(
+    spec: FunctionSpec, item: Any, predict_fn: Callable[[dict], Any]
+) -> tuple[int, dict]:
+    """handle_call for backends that map an item straight to an output (the
+    tfidf candidate) — same input checks, same contract enforcement."""
+    if not isinstance(item, dict):
+        return 400, {"error": "body must be a JSON object of input fields"}
+    missing = [k for k in spec.input_schema if k not in item]
+    if missing:
+        return 400, {"error": f"missing input fields: {missing}"}
+    try:
+        output = predict_fn(item)
+    except Exception as e:  # noqa: BLE001 - surface backend failures as 502
+        return 502, {"error": f"prediction backend failed: {e}"}
+    bad = prompts.incomplete_fields(spec, output)
+    if bad:
+        return 422, {"error": f"output failed contract validation (fields: {', '.join(bad)})"}
+    return 200, {"output": output}
+
+
 def find_export(version_dir: Path, name: str) -> tuple[Path, Path]:
     """(gguf, grammar) from the version's export bundle."""
     export_dir = version_dir / "export"
@@ -102,12 +122,27 @@ def serve(
     port: int = 8080,
     llama_server: str | None = None,
     allow_failed: bool = False,
+    candidate: str | None = None,
 ) -> int:
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-
     root = Path(artifacts_root)
-    version_dir = artifacts.resolve_version(root, name, version, allow_failed)
+    version_dir = artifacts.resolve_version(
+        root, name, version, allow_failed, candidate=candidate
+    )
+    manifest = artifacts.read_manifest(version_dir)
+    rec = artifacts.candidate_record(manifest, candidate)
     spec = load_spec(version_dir / "spec.yaml")
+
+    if rec["backend"] == "tfidf":
+        # a tfidf winner serves straight from the Python runtime: CPU-only,
+        # no GGUF export, no llama.cpp
+        from . import candidates as cand
+
+        model_dir = version_dir / (rec.get("artifact_path") or cand.TFIDF_DIR)
+        predict = lambda item: cand.predict_tfidf(model_dir, spec, [item])[0]  # noqa: E731
+        return _http_serve(
+            spec, port, lambda item: handle_call_direct(spec, item, predict)
+        )
+
     gguf, grammar_path = find_export(version_dir, spec.name)
     server_bin = find_llama_server(llama_server)
     grammar = grammar_path.read_text()
@@ -133,47 +168,9 @@ def serve(
                     return 1
                 time.sleep(1)
         complete_fn = _llama_complete(backend_url, grammar, max_new)
-
-        class Handler(BaseHTTPRequestHandler):
-            def _send(self, status: int, payload: dict) -> None:
-                body = json.dumps(payload, ensure_ascii=False).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def do_GET(self):  # noqa: N802 - http.server API
-                if self.path == "/health":
-                    self._send(200, {"status": "ok", "function": spec.name})
-                else:
-                    self._send(200, {
-                        "function": spec.name,
-                        "description": spec.description.strip(),
-                        "input_fields": list(spec.input_schema),
-                        "usage": f"POST /call with a JSON object of the input fields",
-                    })
-
-            def do_POST(self):  # noqa: N802 - http.server API
-                if self.path != "/call":
-                    self._send(404, {"error": "POST /call"})
-                    return
-                try:
-                    length = int(self.headers.get("Content-Length", 0))
-                    item = json.loads(self.rfile.read(length) or b"{}")
-                except (ValueError, json.JSONDecodeError) as e:
-                    self._send(400, {"error": f"bad JSON body: {e}"})
-                    return
-                self._send(*handle_call(spec, item, complete_fn))
-
-            def log_message(self, *args):  # quiet
-                pass
-
-        print(f"serving '{spec.name}' on http://127.0.0.1:{port}")
-        print(f"  curl -s http://127.0.0.1:{port}/call -d "
-              f"'{json.dumps({k: '...' for k in spec.input_schema})}'")
-        HTTPServer(("127.0.0.1", port), Handler).serve_forever()
-        return 0
+        return _http_serve(
+            spec, port, lambda item: handle_call(spec, item, complete_fn)
+        )
     except KeyboardInterrupt:
         return 0
     finally:
@@ -182,3 +179,53 @@ def serve(
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def _http_serve(spec: FunctionSpec, port: int, call: Callable[[Any], tuple[int, dict]]) -> int:
+    """The stdlib front end shared by both backends: `call` maps a parsed
+    JSON item to (status, payload)."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, status: int, payload: dict) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802 - http.server API
+            if self.path == "/health":
+                self._send(200, {"status": "ok", "function": spec.name})
+            else:
+                self._send(200, {
+                    "function": spec.name,
+                    "description": spec.description.strip(),
+                    "input_fields": list(spec.input_schema),
+                    "usage": "POST /call with a JSON object of the input fields",
+                })
+
+        def do_POST(self):  # noqa: N802 - http.server API
+            if self.path != "/call":
+                self._send(404, {"error": "POST /call"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                item = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, json.JSONDecodeError) as e:
+                self._send(400, {"error": f"bad JSON body: {e}"})
+                return
+            self._send(*call(item))
+
+        def log_message(self, *args):  # quiet
+            pass
+
+    print(f"serving '{spec.name}' on http://127.0.0.1:{port}")
+    print(f"  curl -s http://127.0.0.1:{port}/call -d "
+          f"'{json.dumps({k: '...' for k in spec.input_schema})}'")
+    try:
+        HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0

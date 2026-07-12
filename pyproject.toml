@@ -28,6 +28,9 @@ dependencies = [
     "trl>=0.13",
     "datasets>=2.19",
     "accelerate>=0.30",
+    # the conventional tfidf candidate (torch-free path)
+    "scikit-learn>=1.4",
+    "skops>=0.10",
 ]
 
 [project.optional-dependencies]

@@ -185,6 +185,7 @@ def cmd_serve(args) -> int:
             port=args.port,
             llama_server=args.llama_server,
             allow_failed=args.allow_failed,
+            candidate=args.candidate,
         )
     except (FileNotFoundError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -344,6 +345,9 @@ def main(argv: list[str] | None = None) -> int:
     vs.add_argument("--port", type=int, default=8080)
     vs.add_argument("--version", help="artifact version dir name (default: latest passing)")
     vs.add_argument("--llama-server", help="path to the llama-server binary")
+    vs.add_argument(
+        "--candidate", help="serve a specific retained candidate (e.g. lora, tfidf)"
+    )
     vs.add_argument("--allow-failed", action="store_true")
     vs.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
     vs.set_defaults(fn=cmd_serve)

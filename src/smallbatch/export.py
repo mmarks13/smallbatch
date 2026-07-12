@@ -262,9 +262,20 @@ def export(
         )
 
     root = Path(artifacts_root)
-    version_dir = artifacts.resolve_version(root, name, version, allow_failed)
+    # GGUF export covers the LoRA candidate only, so usability is checked for
+    # THAT candidate — a tfidf winner neither blocks exporting a passing
+    # adapter nor lets a failed, unaccepted adapter slip out
+    version_dir = artifacts.resolve_version(
+        root, name, version, allow_failed, candidate="lora"
+    )
     spec = load_spec(version_dir / "spec.yaml")
     manifest = artifacts.read_manifest(version_dir)
+    if artifacts.candidate_record(manifest, "lora") is None:
+        raise ValueError(
+            f"{version_dir} has no LoRA candidate — GGUF export supports the "
+            "LoRA backend only (a tfidf winner is served/run directly: "
+            "`smallbatch serve` / `smallbatch run`)"
+        )
     adapter_dir = version_dir / "adapter"
 
     out = version_dir / "export"

@@ -221,12 +221,17 @@ class GateSpec(BaseModel):
     # int outputs: |pred - reference| >= severe_delta counts as a severe miss
     # in reports and decision tables
     severe_delta: int = 3
+    # candidate selection: two candidates whose gate agreement differs by no
+    # more than this are a tie, broken by smaller artifact. A pragmatic fixed
+    # margin — NOT a confidence-interval equivalence test.
+    tie_margin: float = 0.02
 
     @model_validator(mode="after")
     def _check_bounds(self) -> "GateSpec":
         for label, v in [
             ("gate.agreement", self.agreement),
             ("gate.agreement_pm1", self.agreement_pm1),
+            ("gate.tie_margin", self.tie_margin),
             *((f"gate.fields.{k}", t) for k, t in self.fields.items()),
         ]:
             if v is not None and not 0 <= v <= 1:

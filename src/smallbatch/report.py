@@ -232,8 +232,12 @@ def build_report(
     gate: dict,
     training: dict,
     teacher_probe: Optional[dict] = None,
+    candidates: Optional[dict] = None,
+    selection: Optional[dict] = None,
 ) -> dict:
-    """Assemble the full eval report from compile outputs."""
+    """Assemble the full eval report from compile outputs. `adapter` is the
+    WINNING candidate's gate metrics (name kept for report-shape stability);
+    `candidates`/`selection` add the per-candidate comparison."""
     preds = adapter.get("preds", [])
     golds = [row_output(spec, r) for r in gate_rows]
 
@@ -308,6 +312,7 @@ def build_report(
 
     audit = shortcut_audit(spec, gate_rows, preds, golds)
     gold_section, gold_warnings = _gold_sections(spec, gate_rows, preds)
+    candidates_section = _candidates_section(candidates, selection)
 
     return {
         "function": spec.name,
@@ -315,6 +320,8 @@ def build_report(
         "precision": training.get("precision"),
         "headline": headline,
         "gate": gate,
+        "candidates": candidates_section,
+        "selection": selection,
         "gold": gold_section,
         "small_gate_warning": len(gate_rows) < SMALL_GATE_N,
         "training": {
@@ -341,6 +348,32 @@ def build_report(
             else []
         ),
     }
+
+
+def _candidates_section(
+    candidates: Optional[dict], selection: Optional[dict]
+) -> Optional[dict]:
+    """Compact per-candidate comparison sourced from the candidate records —
+    never recomputed. Values here are exactly what the manifest carries."""
+    if not candidates:
+        return None
+    out = {}
+    for name, rec in candidates.items():
+        if rec.get("status") != "completed":
+            out[name] = {"status": rec.get("status"), "error": rec.get("error")}
+            continue
+        m = rec.get("metrics") or {}
+        out[name] = {
+            "status": "completed",
+            "agreement": m.get("agreement"),
+            "agreement_ci": m.get("agreement_ci"),
+            "invalid_rate": m.get("invalid_rate"),
+            "artifact_size_bytes": rec.get("artifact_size_bytes"),
+            "gate_passed": (rec.get("gate") or {}).get("passed"),
+            "gate_reasons": (rec.get("gate") or {}).get("reasons"),
+            "winner": bool(selection and selection.get("winner") == name),
+        }
+    return out
 
 
 def _gold_sections(
@@ -467,6 +500,33 @@ def render_markdown(report: dict) -> str:
 
     if report.get("confusion"):
         lines += _confusion_md(report["confusion"])
+
+    if report.get("candidates"):
+        lines.append("## Candidates")
+        sel = report.get("selection") or {}
+        if sel:
+            lines.append(f"Selected: **{sel.get('winner')}** — {sel.get('reason')}.")
+        lines.append(
+            "> ⚠ Both candidates are scored on the same gate, so the selected "
+            "candidate's number is optimistically biased by selection."
+        )
+        lines += ["", "| candidate | agreement | 95% CI | invalid | size | gate |",
+                  "|---|---|---|---|---|---|"]
+        for name, c in report["candidates"].items():
+            if c.get("status") != "completed":
+                lines.append(f"| {name} | ERROR — {c.get('error')} | | | | |")
+                continue
+            ci = c.get("agreement_ci")
+            ci_txt = f"{ci[0]:.0%}–{ci[1]:.0%}" if ci else "-"
+            size = c.get("artifact_size_bytes")
+            size_txt = f"{size / 1e6:.1f} MB" if size else "-"
+            mark = " ←" if c.get("winner") else ""
+            lines.append(
+                f"| {name}{mark} | {c['agreement']:.1%} | {ci_txt} | "
+                f"{_pct(c.get('invalid_rate'))} | {size_txt} | "
+                f"{'PASS' if c.get('gate_passed') else 'FAIL'} |"
+            )
+        lines.append("")
 
     if report.get("gold"):
         g = report["gold"]

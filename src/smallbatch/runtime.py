@@ -44,13 +44,41 @@ class CompiledFunction:
         ]
 
 
+class TfidfFunction:
+    """A compiled tfidf candidate: same call surface as CompiledFunction,
+    no base model, no GPU, no torch import."""
+
+    def __init__(self, spec, model_dir: Path, manifest: dict):
+        self.spec = spec
+        self.model_dir = model_dir
+        self.manifest = manifest
+
+    def __call__(self, item: dict[str, Any]) -> Any:
+        out = self.batch([item])[0]
+        if out is None:
+            raise ValueError("model output failed contract validation")
+        return out
+
+    def batch(self, items: list[dict[str, Any]]) -> list[Any]:
+        from . import candidates as cand
+
+        for it in items:
+            missing = [k for k in self.spec.input_schema if k not in it]
+            if missing:
+                raise ValueError(f"input missing fields {missing} (have {list(it)})")
+        outs = cand.predict_tfidf(self.model_dir, self.spec, items)
+        return [
+            None if prompts.incomplete_fields(self.spec, o) else o for o in outs
+        ]
+
+
 def load_fn(
     name: str,
     artifacts_root: str | Path = artifacts.DEFAULT_ROOT,
     allow_failed: bool = False,
     version: str | None = None,
     candidate: str | None = None,
-) -> CompiledFunction:
+) -> CompiledFunction | TfidfFunction:
     """Load a compiled function: the latest usable version by default, or an
     explicit `version` dir name. `candidate` selects a retained non-winner
     candidate — its own gate/acceptance state applies (an accepted winner
@@ -71,17 +99,20 @@ def load_fn(
             f"({'; '.join((rec.get('gate') or {}).get('reasons', [])) or 'no reasons recorded'}) — "
             "loaded anyway"
         )
+    spec = load_spec(version_dir / "spec.yaml")
+    if rec["backend"] == "tfidf":
+        # CPU-only sklearn pipeline: never imports torch
+        return TfidfFunction(spec, version_dir / (rec.get("artifact_path") or "tfidf"), manifest)
     if rec["backend"] != "lora":
         raise ValueError(
             f"candidate '{chosen}' uses backend '{rec['backend']}', which this "
-            "runtime cannot load yet"
+            "runtime cannot load"
         )
 
     from peft import PeftModel
 
     from .training import load_base_model
 
-    spec = load_spec(version_dir / "spec.yaml")
     tokenizer, model = load_base_model(
         rec.get("base_model") or manifest["base_model"],
         rec.get("inference_precision") or manifest["inference_precision"],

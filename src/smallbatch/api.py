@@ -221,75 +221,140 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         version_dir = artifacts.new_version_dir(root, spec.name)
     print(f"compiling {spec.name} -> {version_dir}")
 
-    info = train(spec, train_rows, version_dir, dev_rows=dev_rows)
-    shutil.rmtree(version_dir / "trainer", ignore_errors=True)
+    import time
 
-    # HF Trainer holds the training model in reference cycles; collect them
-    # before eval loads a second copy of the base model or the two won't
-    # coexist on a 12GB card
-    import gc
+    from .evaluate import compute_metrics
+    from .labeling import row_output
 
-    import torch
+    gate_refs = [row_output(spec, r) for r in gate_rows]
+    candidates: dict[str, dict] = {}
 
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    # ---- tfidf candidate: torch-free, seconds, isolated -------------------
+    # runs FIRST so a later LoRA OOM/crash never discards a completed
+    # conventional candidate
+    try:
+        from . import candidates as cand
 
-    # evaluate adapter (student prompts) and zero-shot base (full-spec prompts)
-    from peft import PeftModel
-
-    from . import prompts
-
-    # eval in the training precision: a qlora adapter was trained against the
-    # 4-bit base, and reloading in fp32 needs 4x the VRAM (36GB for a 9B)
-    inference_precision = info["precision"]
-    tokenizer, base_model = load_base_model(spec.train.base, inference_precision)
-    max_new = prompts.completion_budget(spec)
-
-    spec_text = spec.spec_files_text()
-    zeroshot = None
-    if spec.gate.must_beat_zeroshot:
-        zeroshot = score_holdout(
-            spec, base_model, tokenizer, gate_rows,
-            lambda it: prompts.zeroshot_prompt(spec, it, spec_text),
-            max_new_tokens=max(16, max_new),
+        t0 = time.time()
+        fmt = cand.train_tfidf(spec, train_rows, version_dir / cand.TFIDF_DIR)
+        tfidf_preds = cand.predict_tfidf(
+            version_dir / cand.TFIDF_DIR, spec, [r["input"] for r in gate_rows]
         )
-    student = PeftModel.from_pretrained(base_model, info["adapter_dir"])
-    student.eval()
-    adapter_metrics = score_holdout(
-        spec, student, tokenizer, gate_rows,
-        lambda it: prompts.student_prompt(spec, it), max_new_tokens=max_new,
-    )
+        tfidf_metrics = compute_metrics(spec, tfidf_preds, gate_refs)
+        tfidf_metrics["preds"] = tfidf_preds
+        dev_preds = cand.predict_tfidf(
+            version_dir / cand.TFIDF_DIR, spec, [r["input"] for r in dev_rows]
+        )
+        candidates["tfidf"] = {
+            "backend": "tfidf",
+            "status": "completed",
+            "artifact_path": cand.TFIDF_DIR,
+            "artifact_size_bytes": artifacts.dir_size(version_dir / cand.TFIDF_DIR),
+            **fmt,
+            "train_seconds": round(time.time() - t0, 2),
+            "metrics": tfidf_metrics,
+            "metrics_dev": compute_metrics(
+                spec, dev_preds, [row_output(spec, r) for r in dev_rows]
+            ),
+            "gate": None,  # gated below, once the shared zero-shot exists
+            "error": None,
+        }
+        print(
+            f"tfidf candidate: gate agreement "
+            f"{tfidf_metrics['agreement']:.1%} in {candidates['tfidf']['train_seconds']}s"
+        )
+    except Exception as e:  # noqa: BLE001 - isolation: recorded, not fatal
+        candidates["tfidf"] = {"backend": "tfidf", "status": "error",
+                               "error": f"{type(e).__name__}: {e}"}
+        print(f"tfidf candidate ERROR: {e}")
 
-    gate = run_gate(spec, adapter_metrics, zeroshot)
+    # ---- lora candidate: isolated the same way ----------------------------
+    zeroshot = None
+    info: dict = {}
+    try:
+        info = train(spec, train_rows, version_dir, dev_rows=dev_rows)
+        shutil.rmtree(version_dir / "trainer", ignore_errors=True)
+
+        # HF Trainer holds the training model in reference cycles; collect
+        # them before eval loads a second copy of the base model or the two
+        # won't coexist on a 12GB card
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # evaluate adapter (student prompts) and zero-shot base (full-spec
+        # prompts)
+        from peft import PeftModel
+
+        from . import prompts
+
+        # eval in the training precision: a qlora adapter was trained against
+        # the 4-bit base, and reloading in fp32 needs 4x the VRAM
+        inference_precision = info["precision"]
+        tokenizer, base_model = load_base_model(spec.train.base, inference_precision)
+        max_new = prompts.completion_budget(spec)
+
+        spec_text = spec.spec_files_text()
+        if spec.gate.must_beat_zeroshot:
+            zeroshot = score_holdout(
+                spec, base_model, tokenizer, gate_rows,
+                lambda it: prompts.zeroshot_prompt(spec, it, spec_text),
+                max_new_tokens=max(16, max_new),
+            )
+        student = PeftModel.from_pretrained(base_model, info["adapter_dir"])
+        student.eval()
+        adapter_metrics = score_holdout(
+            spec, student, tokenizer, gate_rows,
+            lambda it: prompts.student_prompt(spec, it), max_new_tokens=max_new,
+        )
+        adapter_dir = Path(info["adapter_dir"])
+        candidates["lora"] = {
+            "backend": "lora",
+            "status": "completed",
+            "artifact_path": adapter_dir.name,
+            "artifact_size_bytes": artifacts.dir_size(adapter_dir),
+            "base_model": spec.train.base,
+            "train_precision": info["precision"],
+            "inference_precision": inference_precision,
+            "use_dora": spec.train.use_dora,
+            "rationale_distillation": spec.train.rationale_distillation,
+            "metrics": adapter_metrics,
+            "gate": None,
+            "train_loss": info["train_loss"],
+            "epochs_run": info.get("epochs_run"),
+            "best_epoch": info.get("best_epoch"),
+            "stopped_reason": info.get("stopped_reason"),
+            **(
+                {"eval_batch_size_effective": adapter_metrics["eval_batch_size_effective"]}
+                if adapter_metrics.get("eval_batch_size_effective") is not None
+                else {}
+            ),
+            "error": None,
+        }
+    except Exception as e:  # noqa: BLE001 - isolation: recorded unless fatal
+        if not any(c.get("status") == "completed" for c in candidates.values()):
+            raise  # every candidate errored: an operational failure, exit 1
+        candidates["lora"] = {"backend": "lora", "status": "error",
+                              "error": f"{type(e).__name__}: {e}"}
+        print(f"lora candidate ERROR: {e} — continuing with completed candidates")
+
+    # ---- gate + selection (zero-shot shared by every candidate) -----------
+    for rec in candidates.values():
+        if rec["status"] == "completed":
+            rec["gate"] = run_gate(spec, rec["metrics"], zeroshot)
+    selection = artifacts.select_winner(candidates, spec.gate.tie_margin)
+    winner = candidates[selection["winner"]]
+    gate = winner["gate"]
+    adapter_metrics = (candidates.get("lora") or {}).get("metrics")
     _archive_spec(spec, version_dir)
     from . import __version__
     from .labeling import dataset_hash
 
-    adapter_dir = Path(info["adapter_dir"])
-    lora_candidate = {
-        "backend": "lora",
-        "status": "completed",
-        "artifact_path": adapter_dir.name,
-        "artifact_size_bytes": artifacts.dir_size(adapter_dir),
-        "base_model": spec.train.base,
-        "train_precision": info["precision"],
-        "inference_precision": inference_precision,
-        "use_dora": spec.train.use_dora,
-        "rationale_distillation": spec.train.rationale_distillation,
-        "metrics": adapter_metrics,
-        "gate": gate,
-        "train_loss": info["train_loss"],
-        "epochs_run": info.get("epochs_run"),
-        "best_epoch": info.get("best_epoch"),
-        "stopped_reason": info.get("stopped_reason"),
-        **(
-            {"eval_batch_size_effective": adapter_metrics["eval_batch_size_effective"]}
-            if adapter_metrics.get("eval_batch_size_effective") is not None
-            else {}
-        ),
-        "error": None,
-    }
+    lora_rec = candidates.get("lora") or {}
     manifest = {
         "manifest_schema_version": artifacts.MANIFEST_SCHEMA_VERSION,
         "function": spec.name,
@@ -301,23 +366,24 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         "labeling_hash": spec.labeling_hash(),
         "dataset_hash": dataset_hash(train_rows + dev_rows + gate_rows),
         **({"stale_labels_override": stale_labels_override} if stale_labels_override else {}),
-        "candidates": {"lora": lora_candidate},
-        "selection": {"winner": "lora", "reason": "only candidate"},
+        "candidates": candidates,
+        "selection": selection,
         "deployment": None,
-        # convenience duplicates of the winner's fields; true as long as the
-        # winner is the adapter, and kept so pre-v2 readers stay working
+        # convenience duplicates of the LORA candidate's fields (true whether
+        # or not it won; never populated from another backend) so pre-v2
+        # readers keep working. `gate` is the WINNER's — what PASS/FAIL means.
         "base_model": spec.train.base,
-        "train_precision": info["precision"],
-        "inference_precision": inference_precision,
+        "train_precision": lora_rec.get("train_precision"),
+        "inference_precision": lora_rec.get("inference_precision"),
         "use_dora": spec.train.use_dora,
         "rationale_distillation": spec.train.rationale_distillation,
         "data": data_meta,
         "metrics": {"adapter": adapter_metrics, "zeroshot": zeroshot},
         "gate": gate,
-        "train_loss": info["train_loss"],
-        "epochs_run": info.get("epochs_run"),
-        "best_epoch": info.get("best_epoch"),
-        "stopped_reason": info.get("stopped_reason"),
+        "train_loss": lora_rec.get("train_loss"),
+        "epochs_run": lora_rec.get("epochs_run"),
+        "best_epoch": lora_rec.get("best_epoch"),
+        "stopped_reason": lora_rec.get("stopped_reason"),
         "smallbatch_version": __version__,
     }
     artifacts.write_manifest(version_dir, manifest)
@@ -325,13 +391,15 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
     from .report import build_report, write_report
 
     report = build_report(
-        spec, gate_rows, adapter_metrics, zeroshot, gate, info,
+        spec, gate_rows, winner["metrics"], zeroshot, gate, info,
         teacher_probe=(
             {"self_agreement": data_meta["teacher_self_agreement"],
              "n": data_meta.get("probe_n")}
             if data_meta.get("teacher_self_agreement") is not None
             else None
         ),
+        candidates=candidates,
+        selection=selection,
     )
     report_path = write_report(version_dir, report)
 

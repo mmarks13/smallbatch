@@ -79,12 +79,27 @@ def resolve_count(value: float | int, n_real: int) -> int:
 
 
 def label_items(
-    teacher: Teacher, spec: FunctionSpec, items: list[dict], origin: str
+    teacher: Teacher, spec: FunctionSpec, items: list[dict], origin: str,
+    journal=None,
 ) -> list[Row]:
-    """Label items in batches; one retry pass for missing/invalid labels."""
+    """Label items in batches; one retry pass for missing/invalid labels.
+
+    With a `journal`, rows labeled by a previous crashed run replay from disk
+    (no repeated teacher call) and every newly accepted row is journaled
+    durably before its batch is considered complete."""
+    from .journal import NullJournal
+
+    journal = journal if journal is not None else NullJournal()
     spec_text = spec.spec_files_text()
     rows: dict[int, Row] = {}
-    pending = list(range(len(items)))
+    for i, it in enumerate(items):
+        inp = {k: it.get(k) for k in spec.input_schema}
+        cached = journal.rows.get(row_id(inp))
+        if cached is not None and cached.get("origin") == origin:
+            rows[i] = dict(cached)
+    if rows:
+        print(f"journal: replayed {len(rows)} {origin} label(s) — no teacher calls")
+    pending = [i for i in range(len(items)) if i not in rows]
     for attempt in range(2):
         if not pending:
             break
@@ -120,6 +135,7 @@ def label_items(
                         "reason": str(entry.get("reason", "")).strip(),
                         "origin": origin,
                     }
+                    journal.record_row(rows[gid])
         pending = [i for i in range(len(items)) if i not in rows]
     if pending:
         print(f"warning: {len(pending)} items failed labeling and were dropped")
@@ -267,6 +283,7 @@ def counterfactual_rows(
     seed: int,
     hist_rows: list[Row],
     per_call: int = 5,
+    journal=None,
 ) -> tuple[list[Row], Optional[float]]:
     """Minimal label-moving edits of train reals, targeted at thin bands
     (deficits measured over `hist_rows`) and independently relabeled.
@@ -275,30 +292,55 @@ def counterfactual_rows(
     one stronger retry — but the miss row is kept too (it's a paid-for
     invariance example). Returns (rows, hit_rate); rows carry
     `intended_band` + `source_ids`."""
+    from .journal import NullJournal
+
+    journal = journal if journal is not None else NullJournal()
     rng = random.Random(seed)
     spec_text = spec.spec_files_text()
+    by_source_id = {r["id"]: r for r in train_reals}
+
+    def _cached_pairs(stage: str) -> Optional[list[tuple[dict, Row, Any]]]:
+        cached = journal.cached_stage(stage)
+        if cached is None:
+            return None
+        print(f"journal: reusing {len(cached)} generated {stage} edit(s)")
+        out = []
+        for c in cached:
+            src = by_source_id.get(c.get("source_id"))
+            if src is not None:  # source row gone: drop the orphaned edit
+                out.append((c["item"], src, c.get("intended_band")))
+        return out
+
     # counterfactuals always trace the boundary regardless of dataset size:
     # ask the band planner for exactly `cap` rows over the observed deficits
     plan = plan_variant_bands(spec, hist_rows, target_total=len(hist_rows) + cap)
-    pairs: list[tuple[dict, Row, Any]] = []
-    for band, n in plan.items():
-        pool = [r for r in train_reals if primary_value(spec, r) != band]
-        if not pool:
-            continue
-        chosen = [pool[rng.randrange(len(pool))] for _ in range(n)]
-        for start in range(0, len(chosen), per_call):
-            print(
-                f"generating counterfactuals: target {band}, "
-                f"{len(chosen[start : start + per_call])} item(s)",
-                flush=True,
-            )
-            for item, src in _cf_request(
-                teacher, spec, chosen[start : start + per_call], band, spec_text
-            ):
-                pairs.append((item, src, band))
+    pairs = _cached_pairs("counterfactual")
+    if pairs is None:
+        pairs = []
+        for band, n in plan.items():
+            pool = [r for r in train_reals if primary_value(spec, r) != band]
+            if not pool:
+                continue
+            chosen = [pool[rng.randrange(len(pool))] for _ in range(n)]
+            for start in range(0, len(chosen), per_call):
+                print(
+                    f"generating counterfactuals: target {band}, "
+                    f"{len(chosen[start : start + per_call])} item(s)",
+                    flush=True,
+                )
+                for item, src in _cf_request(
+                    teacher, spec, chosen[start : start + per_call], band, spec_text
+                ):
+                    pairs.append((item, src, band))
+                    journal.record_stage_item(
+                        "counterfactual", item, source_id=src["id"], intended_band=band
+                    )
+        journal.record_stage_done("counterfactual")
 
     def label_pairs(ps: list[tuple[dict, Row, Any]]) -> tuple[list[Row], list[tuple[Row, Any]]]:
-        rows = label_items(teacher, spec, [p[0] for p in ps], origin="counterfactual")
+        rows = label_items(
+            teacher, spec, [p[0] for p in ps], origin="counterfactual", journal=journal
+        )
         by_id = {
             row_id({k: it.get(k) for k in spec.input_schema}): (src, band)
             for it, src, band in ps
@@ -316,24 +358,31 @@ def counterfactual_rows(
         return [], None
     rows, misses = label_pairs(pairs)
 
-    retry_pairs: list[tuple[dict, Row, Any]] = []
-    by_band: dict[Any, list[Row]] = {}
-    for src, band in misses:
-        by_band.setdefault(band, []).append(src)
-    for band, srcs in by_band.items():
-        for start in range(0, len(srcs), per_call):
-            print(
-                f"retrying counterfactuals: target {band}, "
-                f"{len(srcs[start : start + per_call])} item(s)",
-                flush=True,
-            )
-            for item, src in _cf_request(
-                teacher, spec, srcs[start : start + per_call], band, spec_text,
-                feedback="the edit did not move the label closer to the requested "
-                         "band — make a stronger (but still minimal) change to "
-                         "what the rubric scores",
-            ):
-                retry_pairs.append((item, src, band))
+    retry_pairs = _cached_pairs("counterfactual_retry")
+    if retry_pairs is None:
+        retry_pairs = []
+        by_band: dict[Any, list[Row]] = {}
+        for src, band in misses:
+            by_band.setdefault(band, []).append(src)
+        for band, srcs in by_band.items():
+            for start in range(0, len(srcs), per_call):
+                print(
+                    f"retrying counterfactuals: target {band}, "
+                    f"{len(srcs[start : start + per_call])} item(s)",
+                    flush=True,
+                )
+                for item, src in _cf_request(
+                    teacher, spec, srcs[start : start + per_call], band, spec_text,
+                    feedback="the edit did not move the label closer to the requested "
+                             "band — make a stronger (but still minimal) change to "
+                             "what the rubric scores",
+                ):
+                    retry_pairs.append((item, src, band))
+                    journal.record_stage_item(
+                        "counterfactual_retry", item,
+                        source_id=src["id"], intended_band=band,
+                    )
+        journal.record_stage_done("counterfactual_retry")
     if retry_pairs:
         retry_rows, _ = label_pairs(retry_pairs)
         rows += retry_rows
@@ -373,7 +422,8 @@ def _out_agrees(spec: FunctionSpec, a: Any, b: Any) -> bool:
 
 
 def consistency_probe(
-    teacher: Teacher, spec: FunctionSpec, rows: list[Row], n: int, seed: int = 17
+    teacher: Teacher, spec: FunctionSpec, rows: list[Row], n: int, seed: int = 17,
+    journal=None,
 ) -> Optional[dict[str, Any]]:
     """Double-label a stratified sample of real rows with the input fields in
     shuffled order, and measure how often the teacher agrees with itself.
@@ -381,6 +431,9 @@ def consistency_probe(
 
     Each probed row gains `probe_output`; the original label stays
     authoritative (review --unstable steps through the disagreements)."""
+    from .journal import NullJournal
+
+    journal = journal if journal is not None else NullJournal()
     reals = [r for r in rows if r["origin"] == "real"]
     if n <= 0 or not reals:
         return None
@@ -394,6 +447,16 @@ def consistency_probe(
 
     spec_text = spec.spec_files_text()
     outputs: dict[int, Any] = {}
+    unprobed = []
+    for r in sample:
+        rid = r.get("id") or row_id(r["input"])
+        if rid in journal.probe:
+            outputs[id(r)] = journal.probe[rid]
+        else:
+            unprobed.append(r)
+    if len(sample) - len(unprobed):
+        print(f"journal: replayed {len(sample) - len(unprobed)} probe result(s)")
+    sample_all, sample = sample, unprobed
     for start in range(0, len(sample), spec.teacher.batch_size):
         batch = sample[start : start + spec.teacher.batch_size]
         reply = teacher.complete(
@@ -413,10 +476,12 @@ def consistency_probe(
             raw = entry.get("score") if spec.output.is_scalar else entry.get("output")
             out = _coerce_valid(spec, raw)
             if 0 <= local_id < len(batch) and out is not None:
-                outputs[id(batch[local_id])] = out
+                row = batch[local_id]
+                outputs[id(row)] = out
+                journal.record_probe(row.get("id") or row_id(row["input"]), out)
 
     probed = agree = unstable_in_gate = 0
-    for r in sample:
+    for r in sample_all:
         out = outputs.get(id(r))
         if out is None:
             continue
@@ -590,7 +655,7 @@ def write_dataset(
         meta["probe_n"] = probe["n"]
     if deduplicated:
         meta["deduplicated"] = deduplicated
-    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    _write_json_atomic(out_dir / "meta.json", meta)
     return meta
 
 
@@ -681,8 +746,30 @@ def build_dataset(
     `max_variants` is a global budget: the maximum total new synthetic rows
     this call may generate across all augmentation stages (0 = none).
     """
+    from .journal import LabelJournal
+
     out_dir.mkdir(parents=True, exist_ok=True)
     gold_by_id = _validate_gold(spec, items)  # before any paid teacher call
+    journal = LabelJournal.open(out_dir, spec.labeling_hash())
+    try:
+        return _build_dataset(
+            teacher, spec, items, out_dir, journal, gold_by_id,
+            append=append, max_variants=max_variants,
+        )
+    finally:
+        journal.close()  # no-op when the successful path archived it
+
+
+def _build_dataset(
+    teacher: Teacher,
+    spec: FunctionSpec,
+    items: list[dict],
+    out_dir: Path,
+    journal,
+    gold_by_id: dict[str, Any],
+    append: bool,
+    max_variants: Optional[int],
+) -> dict[str, Any]:
     existing: list[Row] = []
     if append and (out_dir / "labeled.jsonl").exists():
         existing = read_jsonl(out_dir / "labeled.jsonl")
@@ -714,7 +801,10 @@ def build_dataset(
         "prompt_version": prompts.PROMPT_VERSION,
         "labeled_at": datetime.date.today().isoformat(),
     }
-    real_new = label_items(teacher, spec, new_items, origin="real") if new_items else []
+    real_new = (
+        label_items(teacher, spec, new_items, origin="real", journal=journal)
+        if new_items else []
+    )
     for r in real_new:
         r.update(stamp)
         if r["id"] in gold_by_id:
@@ -781,17 +871,28 @@ def build_dataset(
     extra_rows: list[Row] = []
     effective = _stage_cap(para_cap)
     if run_paraphrase and effective != 0:
-        variants_raw, sources = generate_variants(
-            teacher, spec, train_reals, spec.teacher.examples,
-            cap=effective, seed=spec.train.seed, hist_rows=train_rows,
-        )
+        cached = journal.cached_stage("paraphrase")
+        if cached is not None:
+            print(f"journal: reusing {len(cached)} generated paraphrase input(s)")
+            variants_raw = [c["item"] for c in cached]
+            sources = [c.get("source_ids") or [] for c in cached]
+        else:
+            variants_raw, sources = generate_variants(
+                teacher, spec, train_reals, spec.teacher.examples,
+                cap=effective, seed=spec.train.seed, hist_rows=train_rows,
+            )
+            for it, src in zip(variants_raw, sources):
+                journal.record_stage_item("paraphrase", it, source_ids=src)
+            journal.record_stage_done("paraphrase")
         variant_rows = (
-            label_items(teacher, spec, variants_raw, origin="variant")
+            label_items(teacher, spec, variants_raw, origin="variant", journal=journal)
             if variants_raw else []
         )
         extra_rows += _finish(variant_rows, sources, variants_raw)
 
     if aug and aug.field_dropout and train_reals and _stage_cap(None) != 0:
+        # dropout inputs are generated locally and deterministically (seeded
+        # rng over the same reals), so only their labels need the journal
         d_items, d_sources = generate_field_dropout(
             spec, train_reals, aug.field_dropout.fields,
             aug.field_dropout.cap, random.Random(spec.train.seed + 2),
@@ -799,7 +900,10 @@ def build_dataset(
         remaining = _stage_cap(None)
         if remaining is not None:
             d_items, d_sources = d_items[:remaining], d_sources[:remaining]
-        d_rows = label_items(teacher, spec, d_items, origin="dropout") if d_items else []
+        d_rows = (
+            label_items(teacher, spec, d_items, origin="dropout", journal=journal)
+            if d_items else []
+        )
         extra_rows += _finish(d_rows, d_sources, d_items)
 
     cf_cap = _stage_cap(aug.counterfactual.cap) if aug and aug.counterfactual else 0
@@ -807,6 +911,7 @@ def build_dataset(
         cf_rows, hit_rate = counterfactual_rows(
             teacher, spec, train_reals, cf_cap,
             seed=spec.train.seed + 3, hist_rows=train_rows + extra_rows,
+            journal=journal,
         )
         for r in cf_rows:
             r["split"] = "train"
@@ -819,7 +924,8 @@ def build_dataset(
             )
 
     probe = consistency_probe(
-        teacher, spec, rows, spec.teacher.consistency, seed=spec.train.seed
+        teacher, spec, rows, spec.teacher.consistency, seed=spec.train.seed,
+        journal=journal,
     )
     if probe:
         print(
@@ -837,14 +943,33 @@ def build_dataset(
     usage = getattr(teacher, "usage", None)
     if isinstance(usage, dict) and usage:
         meta["teacher_usage"] = usage
-        (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        _write_json_atomic(out_dir / "meta.json", meta)
+    # dataset files are complete and validated on disk — only now does the
+    # journal retire (a crash during the fold leaves the journal intact)
+    journal.archive()
     return meta
 
 
 def _write_jsonl(path: Path, rows: list[Row]) -> None:
-    with path.open("w") as f:
+    """Atomic: a crash mid-write leaves the previous complete file, never a
+    truncated one (write to a sibling temp file, fsync, rename over)."""
+    import os
+
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    import os
+
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(tmp, path)
 
 
 def read_jsonl(path: Path) -> list[Row]:
