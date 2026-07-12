@@ -521,6 +521,24 @@ def _migrate_legacy_splits(rows: list[Row], out_dir: Path) -> None:
             r["split"] = "gate" if r["id"] in gate_ids else "train"
 
 
+def dataset_hash(rows: list[Row]) -> str:
+    """Deterministic identity of the exact rows a compile consumes: id, input,
+    split routing, origin, label, and gold annotation. Review edits, split
+    changes, and gold changes all change it; row ordering does not."""
+    h = hashlib.sha256()
+    for r in sorted(rows, key=lambda r: str(r.get("id"))):
+        key = {
+            "id": r.get("id"),
+            "input": r.get("input"),
+            "split": r.get("split"),
+            "origin": r.get("origin"),
+            "label": r.get("score") if "score" in r else r.get("output"),
+            "gold": r.get("gold"),
+        }
+        h.update(json.dumps(key, sort_keys=True, default=str).encode())
+    return h.hexdigest()
+
+
 def write_dataset(
     spec: FunctionSpec,
     rows: list[Row],
@@ -544,6 +562,8 @@ def write_dataset(
     meta = {
         "function": spec.name,
         "spec_hash": spec.spec_hash(),
+        "labeling_hash": spec.labeling_hash(),
+        "dataset_hash": dataset_hash(rows),
         "real": sum(1 for r in rows if r["origin"] == "real"),
         "variants": sum(1 for r in rows if r["origin"] == "variant"),
         **{

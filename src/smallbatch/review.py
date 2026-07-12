@@ -19,6 +19,7 @@ from .labeling import (
     _coerce_valid,
     _out_agrees,
     _write_jsonl,
+    dataset_hash,
     primary_value,
     read_jsonl,
     row_output,
@@ -127,6 +128,7 @@ def save(spec: FunctionSpec, rows: list[Row], out_dir: Path) -> dict[str, int]:
     if meta_path.exists():
         meta = json.loads(meta_path.read_text())
         meta["review"] = {**counts, "reviewed_at": datetime.date.today().isoformat()}
+        meta["dataset_hash"] = dataset_hash(kept)
         meta_path.write_text(json.dumps(meta, indent=2))
     return counts
 

@@ -123,7 +123,15 @@ def data_findings(spec: FunctionSpec, data_dir: Path) -> list[Finding]:
         empty = [k for k, v in hist.items() if v == 0]
         if empty:
             out.append(("warn", f"label bands with zero examples: {', '.join(empty)}"))
-        if meta.get("spec_hash") and meta["spec_hash"] != spec.spec_hash():
+        if meta.get("labeling_hash"):
+            if meta["labeling_hash"] != spec.labeling_hash():
+                out.append((
+                    "fail",
+                    "dataset was labeled under a different rubric/contract/teacher — "
+                    "compile will refuse it (relabel with --append, or override with "
+                    "compile --allow-stale-labels)",
+                ))
+        elif meta.get("spec_hash") and meta["spec_hash"] != spec.spec_hash():
             out.append(("warn", "dataset was labeled under a different spec/spec_files version"))
     return out
 

@@ -55,6 +55,52 @@ def _as_spec(spec: FunctionSpec | str | Path) -> FunctionSpec:
     return spec if isinstance(spec, FunctionSpec) else load_spec(spec)
 
 
+def _check_labeling_identity(
+    spec: FunctionSpec, data: Path, data_meta: dict, allow_stale_labels: bool
+) -> dict | None:
+    """Refuse to train on labels generated under a different labeling identity
+    (rubric, contract, teacher, reference file, or prompt change). Build-only
+    changes — base, precision, train hyperparameters, gate thresholds — never
+    trip this. Returns the override record for the manifest when the user
+    explicitly bypassed the check, else None.
+    """
+    recorded = data_meta.get("labeling_hash")
+    if recorded is None:
+        # pre-labeling_hash dataset: the legacy spec_hash also covered build
+        # settings, so a mismatch may be benign — warn, don't fail
+        if data_meta.get("spec_hash") and data_meta["spec_hash"] != spec.spec_hash():
+            print(
+                f"warning: {data} was labeled under a different spec version "
+                "(legacy dataset without a labeling identity — re-run "
+                "`smallbatch label --append` to record one)"
+            )
+        return None
+    current = spec.labeling_hash()
+    if recorded == current:
+        return None
+    if not allow_stale_labels:
+        raise ValueError(
+            f"dataset in {data} was labeled under a different labeling identity\n"
+            f"  dataset:      {recorded}\n"
+            f"  current spec: {current}\n"
+            "the rubric, output contract, teacher, a referenced spec_file, or the\n"
+            "labeling prompt changed since these labels were generated. Relabel with\n"
+            "`smallbatch label --append`, or pass --allow-stale-labels to train on\n"
+            "the old labels anyway (the override is recorded in the artifact)."
+        )
+    print(
+        f"warning: training on stale labels from {data} (--allow-stale-labels); "
+        "the artifact manifest records this override"
+    )
+    import datetime
+
+    return {
+        "dataset_labeling_hash": recorded,
+        "spec_labeling_hash": current,
+        "allowed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
 def label(
     spec: FunctionSpec | str | Path,
     items: list[dict],
@@ -87,6 +133,7 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
     sweep_name: str | None = None,
     tag: str | None = None,
     arm: str | None = None,
+    allow_stale_labels: bool = False,
 ) -> CompileResult:
     """Train + evaluate + gate one adapter for `spec`.
 
@@ -104,6 +151,8 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         spec.train.precision = precision
 
     data = Path(data_dir or f"data/{spec.name}")
+    data_meta = json.loads((data / "meta.json").read_text()) if (data / "meta.json").exists() else {}
+    stale_labels_override = _check_labeling_identity(spec, data, data_meta, allow_stale_labels)
     train_rows = read_jsonl(data / "train.jsonl")
     gate_path = data / "gate.jsonl"
     if not gate_path.exists():  # pre-v0.2 dataset layout
@@ -184,8 +233,8 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         (version_dir / "spec.yaml").write_text(
             yaml.safe_dump(spec.model_dump(mode="json"), sort_keys=False)
         )
-    data_meta = json.loads((data / "meta.json").read_text()) if (data / "meta.json").exists() else {}
     from . import __version__
+    from .labeling import dataset_hash
 
     manifest = {
         "function": spec.name,
@@ -194,6 +243,9 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         "tag": tag,
         "arm": arm,
         "spec_hash": spec.spec_hash(),
+        "labeling_hash": spec.labeling_hash(),
+        "dataset_hash": dataset_hash(train_rows + dev_rows + gate_rows),
+        **({"stale_labels_override": stale_labels_override} if stale_labels_override else {}),
         "base_model": spec.train.base,
         "train_precision": info["precision"],
         "inference_precision": inference_precision,

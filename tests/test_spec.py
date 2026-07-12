@@ -69,6 +69,36 @@ def test_hash_tracks_spec_files(tmp_path):
     assert load_spec(tmp_path / "toy.yaml").spec_hash() != h1
 
 
+def test_labeling_hash_ignores_build_settings(tmp_path):
+    spec = load_spec(write_spec(tmp_path))
+    lh, bh = spec.labeling_hash(), spec.spec_hash()
+    spec.train.base = "some/other-model"
+    spec.train.precision = "fp32"
+    spec.train.lora_r = 64
+    spec.gate.agreement_pm1 = 0.99
+    assert spec.labeling_hash() == lh  # build knobs never invalidate labels
+    assert spec.spec_hash() != bh  # ...but the build identity does change
+
+
+def test_labeling_hash_tracks_semantics(tmp_path):
+    spec = load_spec(write_spec(tmp_path))
+    lh = spec.labeling_hash()
+    spec.rubric = "10 = junk, 0 = great"
+    assert spec.labeling_hash() != lh
+    spec2 = load_spec(write_spec(tmp_path))
+    spec2.teacher.model = "opus"
+    assert spec2.labeling_hash() != lh
+
+
+def test_labeling_hash_tracks_spec_file_contents(tmp_path):
+    ref = tmp_path / "prefs.yaml"
+    ref.write_text("likes: cats")
+    body = MINIMAL + "spec_files: [prefs.yaml]\n"
+    h1 = load_spec(write_spec(tmp_path, body)).labeling_hash()
+    ref.write_text("likes: dogs")
+    assert load_spec(tmp_path / "toy.yaml").labeling_hash() != h1
+
+
 def test_extra_keys_rejected(tmp_path):
     with pytest.raises(ValueError):
         load_spec(write_spec(tmp_path, MINIMAL + "surprise: true\n"))

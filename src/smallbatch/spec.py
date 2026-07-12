@@ -313,13 +313,46 @@ class FunctionSpec(BaseModel):
         return "\n\n".join(parts)
 
     def spec_hash(self) -> str:
-        """Hash of the spec plus the contents of every spec_file.
-
-        A compiled artifact records this; a mismatch later means the adapter
-        is stale (the spec or a referenced file changed).
+        """Build identity: hash of the full resolved spec plus the contents of
+        every spec_file. Covers training/gate/build settings too, so it changes
+        on any spec edit — use `labeling_hash()` to ask the narrower question
+        "are existing labels still valid for this spec?".
         """
         h = hashlib.sha256()
         h.update(json.dumps(self.model_dump(mode="json"), sort_keys=True).encode())
+        for p in self.resolved_spec_files():
+            h.update(p.read_bytes())
+        return h.hexdigest()
+
+    def labeling_hash(self) -> str:
+        """Labeling identity: hash of everything that can change generated
+        dataset rows or their meaning — the input/output contract, description,
+        rubric, referenced-file contents (not paths), teacher identity, prompt
+        version, and split/augment recipe.
+
+        Deliberately EXCLUDES train hyperparameters, base model, precision, and
+        gate thresholds: changing those must not invalidate a labeled dataset.
+        Compile fails closed when a dataset's recorded labeling_hash differs
+        from the current spec's.
+        """
+        from . import prompts  # lazy: prompts imports this module
+
+        payload = {
+            "description": self.description,
+            "input_schema": self.input_schema,
+            "output": self.output.model_dump(mode="json"),
+            "rubric": self.rubric,
+            "teacher": {
+                "backend": self.teacher.backend,
+                "model": self.teacher.model,
+                "base_url": self.teacher.base_url,
+            },
+            "split": {"holdout": self.teacher.holdout, "dev": self.teacher.dev},
+            "augment": self.augment.model_dump(mode="json") if self.augment else None,
+            "prompt_version": prompts.PROMPT_VERSION,
+        }
+        h = hashlib.sha256()
+        h.update(json.dumps(payload, sort_keys=True).encode())
         for p in self.resolved_spec_files():
             h.update(p.read_bytes())
         return h.hexdigest()

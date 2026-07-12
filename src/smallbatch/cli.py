@@ -58,6 +58,7 @@ def cmd_compile(args) -> int:
             sweep_name=getattr(args, "sweep_name", None),
             tag=getattr(args, "tag", None),
             arm=getattr(args, "arm", None),
+            allow_stale_labels=getattr(args, "allow_stale_labels", False),
         )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -255,6 +256,12 @@ def main(argv: list[str] | None = None) -> int:
     cp.add_argument("--data", help="labeled data dir (default data/<name>)")
     cp.add_argument("--base", help="override train.base model id")
     cp.add_argument("--precision", choices=["auto", "fp32", "bf16", "qlora"])
+    cp.add_argument(
+        "--allow-stale-labels",
+        action="store_true",
+        help="train even though the dataset was labeled under a different "
+        "rubric/contract/teacher (recorded in the artifact manifest)",
+    )
     cp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
     # sweep-internal: route the artifact into artifacts/<fn>/<sweep>/<tag> and
     # stamp the manifest, instead of a dated version dir (see cmd_sweep)

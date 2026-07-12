@@ -341,3 +341,17 @@ def test_legacy_dataset_migrates_holdout_to_gate(tmp_path):
     old_titles = {r["input"]["title"] for r in holdout}
     assert old_titles <= {r["input"]["title"] for r in gate}
     assert meta["real"] == 21
+
+
+def test_dataset_hash_order_invariant_and_content_sensitive():
+    from smallbatch.labeling import dataset_hash
+
+    rows = [
+        {"id": "a", "input": {"t": "x"}, "score": 2, "split": "train", "origin": "real"},
+        {"id": "b", "input": {"t": "y"}, "score": 3, "split": "gate", "origin": "real"},
+    ]
+    h = dataset_hash(rows)
+    assert dataset_hash(list(reversed(rows))) == h  # row order is presentation
+    assert dataset_hash([dict(rows[0], score=4), rows[1]]) != h  # label edit
+    assert dataset_hash([dict(rows[0], split="gate"), rows[1]]) != h  # rerouting
+    assert dataset_hash([dict(rows[0], gold=1), rows[1]]) != h  # gold annotation
