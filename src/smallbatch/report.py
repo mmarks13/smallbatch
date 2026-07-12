@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .labeling import Row, row_output
+from .metrics import DEFAULT_SEVERE_DELTA, spearman_rho
 from .spec import FieldSpec, FunctionSpec
 
 SMALL_GATE_N = 50  # below this, the verdict is noise-dominated — say so
-SEVERE_DELTA = 3  # int outputs: |pred - gold| >= this is a severe miss
 
 # shortcut audit knobs
 MIN_SLICE_N = 8  # a presence slice needs this many rows on BOTH sides
@@ -32,7 +32,9 @@ def _input_excerpt(row: Row, limit: int = 110) -> str:
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
-def _field_breakdown(field: FieldSpec, preds: list, golds: list) -> dict:
+def _field_breakdown(
+    field: FieldSpec, preds: list, golds: list, severe_delta: int = DEFAULT_SEVERE_DELTA
+) -> dict:
     """per-value agreement + confusion (+severe for int) for one field."""
     values = field.values()
     per_value: dict[str, dict] = {}
@@ -58,10 +60,10 @@ def _field_breakdown(field: FieldSpec, preds: list, golds: list) -> dict:
         severe_k = sum(
             1
             for p, g in zip(preds, golds)
-            if p is None or abs(p - g) >= SEVERE_DELTA
+            if p is None or abs(p - g) >= severe_delta
         )
         severe = {
-            "threshold": SEVERE_DELTA,
+            "threshold": severe_delta,
             "rate": round(severe_k / n, 4) if n else 0.0,
             "count": severe_k,
         }
@@ -72,35 +74,7 @@ def _field_breakdown(field: FieldSpec, preds: list, golds: list) -> dict:
     }
 
 
-def _spearman(xs: list[float], ys: list[float]) -> float | None:
-    """Spearman ρ = pearson on average ranks. Local so report.py stays
-    torch-free (evaluate.py is a torch-heavy import)."""
-    n = len(xs)
-    if n < 2:
-        return None
-
-    def ranks(vals: list[float]) -> list[float]:
-        order = sorted(range(len(vals)), key=lambda i: vals[i])
-        out = [0.0] * len(vals)
-        i = 0
-        while i < len(order):
-            j = i
-            while j + 1 < len(order) and vals[order[j + 1]] == vals[order[i]]:
-                j += 1
-            avg = (i + j) / 2 + 1
-            for k in range(i, j + 1):
-                out[order[k]] = avg
-            i = j + 1
-        return out
-
-    rx, ry = ranks(xs), ranks(ys)
-    mx, my = sum(rx) / n, sum(ry) / n
-    vx = sum((x - mx) ** 2 for x in rx)
-    vy = sum((y - my) ** 2 for y in ry)
-    if vx == 0 or vy == 0:
-        return None
-    cov = sum((x - mx) * (y - my) for x, y in zip(rx, ry))
-    return cov / (vx**0.5 * vy**0.5)
+_spearman = spearman_rho  # shared metric layer (metrics.py is torch-free)
 
 
 def _row_agreement(spec: FunctionSpec, preds: list, golds: list) -> list[bool]:
@@ -265,11 +239,13 @@ def build_report(
 
     fields_section = None
     if spec.output.is_scalar:
-        breakdown = _field_breakdown(spec.output.scalar, preds, golds)
+        breakdown = _field_breakdown(
+            spec.output.scalar, preds, golds, spec.gate.severe_delta
+        )
         misses = []
         for i, (p, g) in enumerate(zip(preds, golds)):
             if spec.output.scalar.type == "int":
-                delta = SEVERE_DELTA + 1 if p is None else abs(p - g)
+                delta = spec.gate.severe_delta + 1 if p is None else abs(p - g)
                 if delta > 1:
                     misses.append((delta, i))
             elif p != g:
@@ -280,7 +256,10 @@ def build_report(
             name: {
                 "metrics": (adapter.get("fields") or {}).get(name),
                 **_field_breakdown(
-                    field, [d.get(name) for d in dicts], [g[name] for g in golds]
+                    field,
+                    [d.get(name) for d in dicts],
+                    [g[name] for g in golds],
+                    spec.gate.severe_delta,
                 ),
             }
             for name, field in spec.output.fields.items()

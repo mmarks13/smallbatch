@@ -6,6 +6,8 @@ from typing import Any, Callable
 
 from . import prompts
 from .labeling import Row
+from .metrics import agrees as _agrees
+from .metrics import pearson_r, wilson_ci  # noqa: F401 (legacy import sites)
 from .spec import FunctionSpec
 
 
@@ -112,42 +114,13 @@ def score_holdout(
     return metrics
 
 
-def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
-    """Wilson score interval for a proportion k/n — honest about small n,
-    where the gate verdict is otherwise statistical theater."""
-    if n == 0:
-        return None
-    p = k / n
-    denom = 1 + z**2 / n
-    center = (p + z**2 / (2 * n)) / denom
-    half = (z / denom) * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5)
-    return (round(max(0.0, center - half), 4), round(min(1.0, center + half), 4))
-
-
-def pearson_r(xs: list[float], ys: list[float]) -> float | None:
-    n = len(xs)
-    if n < 2:
-        return None
-    mx, my = sum(xs) / n, sum(ys) / n
-    vx = sum((x - mx) ** 2 for x in xs)
-    vy = sum((y - my) ** 2 for y in ys)
-    if vx == 0 or vy == 0:
-        return None  # constant series: correlation undefined
-    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-    return cov / (vx**0.5 * vy**0.5)
-
-
-def _agrees(field, p, g) -> bool:
-    """Field-level agreement: ±1 for int fields, exact for enum fields."""
-    if p is None:
-        return False
-    return abs(p - g) <= 1 if field.type == "int" else p == g
 
 
 def constant_baseline(field, golds: list) -> dict[str, Any] | None:
-    """The strongest trivial competitor: the single constant prediction that
-    scores best on these labels under the field's agreement rule. A model
-    that can't beat this has learned the label prior, not the task."""
+    """The ORACLE constant on this split: the single constant prediction that
+    scores best on these exact labels under the field's agreement rule. It is
+    a conservative gate hurdle, not a deployable train-fitted model — a model
+    that can't beat it has learned the label prior, not the task."""
     if not golds:
         return None
     candidates = field.values()
@@ -159,66 +132,22 @@ def constant_baseline(field, golds: list) -> dict[str, Any] | None:
     return {"value": best_v, "agreement": round(best_k / len(golds), 4)}
 
 
-def _scalar_metrics(field, preds: list, golds: list) -> dict[str, Any]:
-    n = len(golds)
-    invalid = sum(1 for p in preds if p is None)
-    exact = sum(1 for p, g in zip(preds, golds) if p == g)
-    agree_k = sum(1 for p, g in zip(preds, golds) if _agrees(field, p, g))
-    metrics: dict[str, Any] = {"n": n}
-    metrics["agreement"] = round(agree_k / n, 4) if n else 0.0
-    if field.type == "int":
-        valid = [(p, g) for p, g in zip(preds, golds) if p is not None]
-        r = pearson_r([p for p, _ in valid], [g for _, g in valid])
-        metrics["pearson_r"] = round(r, 4) if r is not None else None
-        # distance metric: immune to the ±1 tolerance a constant predictor
-        # can game on concentrated labels (invalid preds excluded)
-        metrics["mae"] = (
-            round(sum(abs(p - g) for p, g in valid) / len(valid), 4) if valid else None
-        )
-    ci = wilson_ci(agree_k, n)
-    metrics["agreement_ci"] = list(ci) if ci else None
-    metrics["exact"] = round(exact / n, 4) if n else 0.0
-    metrics["invalid_rate"] = round(invalid / n, 4) if n else 0.0
-    metrics["constant_baseline"] = constant_baseline(field, golds)
-    return metrics
-
-
 def compute_metrics(spec: FunctionSpec, preds: list, golds: list) -> dict[str, Any]:
-    """Scalar contracts: agreement/CI/exact/invalid (+pearson for int).
-    Multi-field contracts: the same per field under `fields`, with the
-    headline `agreement` being the JOINT rate (every field agreeing)."""
-    if spec.output.is_scalar:
-        return _scalar_metrics(spec.output.scalar, preds, golds)
+    """The full shared metric set (see metrics.compare) plus the gate's
+    constant-baseline comparison attached per field. Multi-field contracts
+    report per-field metrics under `fields` with the headline `agreement`
+    being the JOINT rate (every field agreeing)."""
+    from . import metrics as m
 
-    n = len(golds)
-    fields = spec.output.fields
-    dicts = [p if isinstance(p, dict) else {} for p in preds]
-    per_field = {
-        name: _scalar_metrics(
-            field, [d.get(name) for d in dicts], [g[name] for g in golds]
+    out = m.compare(spec, preds, golds)
+    if spec.output.is_scalar:
+        out["constant_baseline"] = constant_baseline(spec.output.scalar, golds)
+        return out
+    for name, field in spec.output.fields.items():
+        out["fields"][name]["constant_baseline"] = constant_baseline(
+            field, [g[name] for g in golds]
         )
-        for name, field in fields.items()
-    }
-    joint_k = sum(
-        1
-        for d, g in zip(dicts, golds)
-        if all(_agrees(f, d.get(name), g[name]) for name, f in fields.items())
-    )
-    exact_k = sum(
-        1
-        for d, g in zip(dicts, golds)
-        if all(d.get(name) == g[name] for name in fields)
-    )
-    invalid = sum(1 for d in dicts if any(d.get(name) is None for name in fields))
-    ci = wilson_ci(joint_k, n)
-    return {
-        "n": n,
-        "agreement": round(joint_k / n, 4) if n else 0.0,  # joint: all fields
-        "agreement_ci": list(ci) if ci else None,
-        "exact": round(exact_k / n, 4) if n else 0.0,
-        "invalid_rate": round(invalid / n, 4) if n else 0.0,
-        "fields": per_field,
-    }
+    return out
 
 
 def run_gate(spec: FunctionSpec, adapter: dict, zeroshot: dict | None) -> dict[str, Any]:
@@ -241,8 +170,9 @@ def run_gate(spec: FunctionSpec, adapter: dict, zeroshot: dict | None) -> dict[s
         if spec.gate.must_beat_constant and const is not None:
             if adapter["agreement"] <= const["agreement"]:
                 reasons.append(
-                    f"adapter agreement {adapter['agreement']:.2%} does not beat "
-                    f"constant \"{const['value']}\" baseline {const['agreement']:.2%}"
+                    f"adapter agreement {adapter['agreement']:.2%} does not beat the "
+                    f"oracle constant \"{const['value']}\" on this split "
+                    f"({const['agreement']:.2%})"
                 )
         return {"passed": not reasons, "reasons": reasons}
 
@@ -261,7 +191,7 @@ def run_gate(spec: FunctionSpec, adapter: dict, zeroshot: dict | None) -> dict[s
         if spec.gate.must_beat_constant and const is not None:
             if a <= const["agreement"]:
                 reasons.append(
-                    f"{name}: adapter agreement {a:.2%} does not beat "
-                    f"constant \"{const['value']}\" baseline {const['agreement']:.2%}"
+                    f"{name}: adapter agreement {a:.2%} does not beat the oracle "
+                    f"constant \"{const['value']}\" on this split ({const['agreement']:.2%})"
                 )
     return {"passed": not reasons, "reasons": reasons}

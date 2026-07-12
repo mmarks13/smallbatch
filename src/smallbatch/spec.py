@@ -164,6 +164,9 @@ class GateSpec(BaseModel):
     must_beat_constant: bool = True
     # structured outputs: per-field threshold overrides, e.g. {reason: 0.7}
     fields: dict[str, float] = Field(default_factory=dict)
+    # int outputs: |pred - reference| >= severe_delta counts as a severe miss
+    # in reports and decision tables
+    severe_delta: int = 3
 
     @property
     def threshold(self) -> float:
