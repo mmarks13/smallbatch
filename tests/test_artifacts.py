@@ -41,11 +41,111 @@ def test_latest_prefers_passing(tmp_path):
     assert artifacts.latest(tmp_path / "artifacts", "toy", passing_only=False) == v2
 
 
+def make_archived_artifact(tmp_path, name="toy", spec_files=True):
+    """A version dir built the way compile now archives: resolved spec +
+    content-addressed spec_files copies + local provenance."""
+    import textwrap as tw
+
+    from smallbatch.api import _archive_spec
+    from smallbatch.spec import load_spec
+
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    body = tw.dedent(
+        f"""
+        name: {name}
+        description: Score.
+        input_schema: {{title: str}}
+        output: {{type: int, range: [0, 10]}}
+        rubric: "original rubric"
+        teacher: {{backend: claude-cli, model: sonnet}}
+        """
+    )
+    if spec_files:
+        (project / "prefs.yaml").write_text("likes: cats")
+        body += "spec_files: [prefs.yaml]\n"
+    (project / "spec.yaml").write_text(body)
+    spec = load_spec(project / "spec.yaml")
+    v = artifacts.new_version_dir(tmp_path / "artifacts", name)
+    _archive_spec(spec, v)
+    artifacts.write_manifest(
+        v, {"function": name, "spec_hash": spec.spec_hash(), "gate": {"passed": True}}
+    )
+    return v, project
+
+
 def test_staleness_detects_spec_file_change(tmp_path):
-    v, ref = make_artifact(tmp_path, "toy")
+    v, project = make_archived_artifact(tmp_path)
     assert artifacts.staleness(v) is None
-    ref.write_text("likes: dogs")
+    (project / "prefs.yaml").write_text("likes: dogs")
     assert "changed" in artifacts.staleness(v)
+
+
+def test_archived_artifact_is_self_contained(tmp_path, monkeypatch):
+    """The archive reproduces its manifest hash from another cwd with the
+    source project deleted — a moved/removed project is never 'stale'."""
+    import shutil
+
+    v, project = make_archived_artifact(tmp_path)
+    shutil.rmtree(project)
+    monkeypatch.chdir(tmp_path / "artifacts")
+    assert artifacts.artifact_integrity(v) is None
+    assert artifacts.source_drift(v) == artifacts.SOURCE_UNAVAILABLE
+    assert artifacts.staleness(v) is None  # unavailable source != stale
+
+
+def test_tampered_archive_reports_integrity_failure(tmp_path):
+    v, _ = make_archived_artifact(tmp_path)
+    archived_ref = next((v / "spec_files").iterdir())
+    archived_ref.write_text("tampered")
+    assert "no longer match" in artifacts.artifact_integrity(v)
+
+
+def test_source_rubric_edit_is_drift_not_integrity_failure(tmp_path):
+    v, project = make_archived_artifact(tmp_path)
+    src = project / "spec.yaml"
+    src.write_text(src.read_text().replace("original rubric", "new rubric"))
+    assert artifacts.artifact_integrity(v) is None  # snapshot intact
+    assert "rubric/contract/teacher changed" in artifacts.source_drift(v)
+
+
+def test_same_basename_spec_files_both_survive(tmp_path):
+    from smallbatch.api import _archive_spec
+    from smallbatch.spec import load_spec
+
+    project = tmp_path / "p"
+    (project / "a").mkdir(parents=True)
+    (project / "b").mkdir()
+    (project / "a" / "schema.md").write_text("alpha")
+    (project / "b" / "schema.md").write_text("beta")
+    (project / "spec.yaml").write_text(
+        "name: toy\ndescription: '-'\ninput_schema: {title: str}\n"
+        "output: {type: int, range: [0, 10]}\nrubric: '-'\n"
+        "teacher: {backend: claude-cli, model: sonnet}\n"
+        "spec_files: [a/schema.md, b/schema.md]\n"
+    )
+    spec = load_spec(project / "spec.yaml")
+    v = artifacts.new_version_dir(tmp_path / "artifacts", "toy")
+    _archive_spec(spec, v)
+    copies = sorted(p.read_text() for p in (v / "spec_files").iterdir())
+    assert copies == ["alpha", "beta"]
+
+
+def test_compile_override_would_archive_resolved_spec(tmp_path):
+    """--base/--precision mutate the spec before archiving; the archive must
+    reproduce the mutated hash (self-consistent artifact)."""
+    from smallbatch.api import _archive_spec
+    from smallbatch.spec import load_spec
+
+    v, project = make_archived_artifact(tmp_path, spec_files=False)
+    spec = load_spec(project / "spec.yaml")
+    spec.train.base = "some/other-model"  # what compile --base does
+    _archive_spec(spec, v)
+    artifacts.write_manifest(
+        v, {"function": "toy", "spec_hash": spec.spec_hash(), "gate": {"passed": True}}
+    )
+    assert artifacts.artifact_integrity(v) is None
+    assert artifacts.source_drift(v) == "build settings changed since compile"
 
 
 def test_sweep_run_dir_replaces_populated_dir(tmp_path):

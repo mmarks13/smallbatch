@@ -228,11 +228,16 @@ def cmd_status(args) -> int:
     for fn_dir in sorted(root.iterdir()):
         for v in artifacts.versions(root, fn_dir.name):
             m = artifacts.read_manifest(v)
-            stale = artifacts.staleness(v)
             flags = []
             flags.append("PASS" if m["gate"]["passed"] else "FAIL")
-            if stale:
-                flags.append(f"STALE ({stale})")
+            broken = artifacts.artifact_integrity(v)
+            drift = artifacts.source_drift(v)
+            if broken:
+                flags.append(f"INTEGRITY ({broken})")
+            elif drift == artifacts.SOURCE_UNAVAILABLE:
+                pass  # immutable snapshot; missing source is not a problem
+            elif drift:
+                flags.append(f"SOURCE DRIFT ({drift})")
             agr = m["metrics"]["adapter"]["agreement"]
             print(f"{fn_dir.name}/{v.name}  [{' '.join(flags)}]  agreement={agr:.2%}  base={m['base_model']}")
         for v in artifacts.sweep_runs(root, fn_dir.name):

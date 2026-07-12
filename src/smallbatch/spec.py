@@ -413,13 +413,17 @@ class FunctionSpec(BaseModel):
         return "\n\n".join(parts)
 
     def spec_hash(self) -> str:
-        """Build identity: hash of the full resolved spec plus the contents of
-        every spec_file. Covers training/gate/build settings too, so it changes
-        on any spec edit — use `labeling_hash()` to ask the narrower question
-        "are existing labels still valid for this spec?".
+        """Build identity: hash of the full resolved spec plus the ordered
+        CONTENTS of every spec_file — the path strings themselves are excluded,
+        so an archived copy with relocated reference files reproduces the same
+        hash as long as the contents match. Covers training/gate/build settings
+        too, so it changes on any spec edit — use `labeling_hash()` to ask the
+        narrower question "are existing labels still valid for this spec?".
         """
+        dump = self.model_dump(mode="json")
+        dump.pop("spec_files", None)  # identity comes from contents, not paths
         h = hashlib.sha256()
-        h.update(json.dumps(self.model_dump(mode="json"), sort_keys=True).encode())
+        h.update(json.dumps(dump, sort_keys=True).encode())
         for p in self.resolved_spec_files():
             h.update(p.read_bytes())
         return h.hexdigest()

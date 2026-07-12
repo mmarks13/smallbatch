@@ -101,6 +101,39 @@ def _check_labeling_identity(
     }
 
 
+def _archive_spec(spec: FunctionSpec, version_dir: Path) -> None:
+    """Make the artifact self-contained: archive the RESOLVED spec (so CLI
+    overrides like --base/--precision are captured, and the archive reproduces
+    the manifest's spec_hash) plus every referenced spec_file under a
+    collision-safe content-addressed name. Absolute source paths go only into
+    provenance.local.json — a local diagnostic file that never ships.
+    """
+    import hashlib
+
+    dump = spec.model_dump(mode="json")
+    source_files = spec.resolved_spec_files()
+    if source_files:
+        dest = version_dir / "spec_files"
+        dest.mkdir(exist_ok=True)
+        rel_paths = []
+        for p in source_files:
+            digest = hashlib.sha256(p.read_bytes()).hexdigest()[:12]
+            name = f"{digest}-{p.name}"  # two files named schema.md both survive
+            shutil.copy(p, dest / name)
+            rel_paths.append(f"spec_files/{name}")
+        dump["spec_files"] = rel_paths
+    (version_dir / "spec.yaml").write_text(yaml.safe_dump(dump, sort_keys=False))
+    (version_dir / "provenance.local.json").write_text(
+        json.dumps(
+            {
+                "source_spec": str(spec._source_path) if spec._source_path else None,
+                "source_spec_files": [str(p) for p in source_files],
+            },
+            indent=2,
+        )
+    )
+
+
 def label(
     spec: FunctionSpec | str | Path,
     items: list[dict],
@@ -229,12 +262,7 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
     )
 
     gate = run_gate(spec, adapter_metrics, zeroshot)
-    if spec._source_path is not None:
-        shutil.copy(spec._source_path, version_dir / "spec.yaml")
-    else:  # spec built programmatically: serialize it so the artifact is complete
-        (version_dir / "spec.yaml").write_text(
-            yaml.safe_dump(spec.model_dump(mode="json"), sort_keys=False)
-        )
+    _archive_spec(spec, version_dir)
     from . import __version__
     from .labeling import dataset_hash
 

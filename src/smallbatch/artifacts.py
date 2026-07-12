@@ -179,12 +179,13 @@ def resolve_version(
     return d
 
 
-def staleness(version_dir: Path) -> Optional[str]:
-    """None if fresh; otherwise a human-readable reason the artifact is stale.
+SOURCE_UNAVAILABLE = "source comparison unavailable"
 
-    Compares the manifest's recorded spec_hash against a re-hash of the spec
-    copy's referenced spec_files today, plus the live spec if it still exists.
-    """
+
+def artifact_integrity(version_dir: Path) -> Optional[str]:
+    """None when the ARCHIVED spec + spec_files still reproduce the manifest's
+    recorded spec_hash; otherwise the reason the artifact itself is damaged.
+    Self-contained: never consults the original project files."""
     manifest = read_manifest(version_dir)
     spec_path = version_dir / "spec.yaml"
     if not spec_path.exists():
@@ -192,7 +193,41 @@ def staleness(version_dir: Path) -> Optional[str]:
     try:
         current = load_spec(spec_path).spec_hash()
     except FileNotFoundError as e:
-        return f"spec file missing: {e}"
-    if current != manifest["spec_hash"]:
-        return "spec or a spec_file changed since compile"
+        return f"archived spec file missing: {e}"
+    if manifest.get("spec_hash") and current != manifest["spec_hash"]:
+        return "archived spec/spec_files no longer match the manifest"
     return None
+
+
+def source_drift(version_dir: Path) -> Optional[str]:
+    """None when the live source spec still matches the artifact snapshot;
+    SOURCE_UNAVAILABLE when the original project can't be found (a moved or
+    deleted source never makes a self-contained artifact unusable); otherwise
+    what drifted. Reads provenance.local.json, which stays on this machine."""
+    prov_path = version_dir / "provenance.local.json"
+    if not prov_path.exists():
+        return SOURCE_UNAVAILABLE
+    source = json.loads(prov_path.read_text()).get("source_spec")
+    if not source or not Path(source).exists():
+        return SOURCE_UNAVAILABLE
+    try:
+        live = load_spec(source)
+        archived = load_spec(version_dir / "spec.yaml")
+        if live.labeling_hash() != archived.labeling_hash():
+            return "rubric/contract/teacher changed since compile — labels and artifact no longer describe the live spec"
+        if live.spec_hash() != archived.spec_hash():
+            return "build settings changed since compile"
+    except (FileNotFoundError, ValueError):
+        return SOURCE_UNAVAILABLE
+    return None
+
+
+def staleness(version_dir: Path) -> Optional[str]:
+    """Legacy single-string view: an integrity failure, else source drift.
+    A missing source project is NOT staleness — the artifact is an immutable
+    snapshot and stays valid."""
+    broken = artifact_integrity(version_dir)
+    if broken:
+        return broken
+    drift = source_drift(version_dir)
+    return None if drift == SOURCE_UNAVAILABLE else drift
