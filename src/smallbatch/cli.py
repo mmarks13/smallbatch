@@ -190,6 +190,7 @@ def cmd_push(args) -> int:
             version=args.version,
             private=not args.public,
             allow_failed=args.allow_failed,
+            dry_run=args.dry_run,
         )
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -395,6 +396,10 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--repo", required=True, help="Hub repo id, e.g. you/fn-name")
     pp.add_argument("--version", help="artifact version dir name (default: latest passing)")
     pp.add_argument("--public", action="store_true", help="create the repo public")
+    pp.add_argument(
+        "--dry-run", action="store_true",
+        help="print the exact upload list + privacy preflight; no network",
+    )
     pp.add_argument("--allow-failed", action="store_true")
     pp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
     pp.set_defaults(fn=cmd_push)

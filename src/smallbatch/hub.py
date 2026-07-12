@@ -106,7 +106,7 @@ labels. It does exactly one job — given the input fields below, it emits
 | model | agreement | invalid rate |
 |---|---|---|
 {chr(10).join(rows)}
-{field_rows}
+{field_rows}{_candidates_card_section(manifest)}
 Full metrics (per-band tables, confusion, training curve) are in `report.md`
 and `report.json`; complete provenance in `manifest.json`; the exact function
 definition in `spec.yaml`.
@@ -153,6 +153,96 @@ Compiled with smallbatch {manifest.get("smallbatch_version", "")}.
 """
 
 
+def _candidates_card_section(manifest: dict) -> str:
+    """Every retained candidate's independent quality + deployment state —
+    a multi-candidate artifact must not read as one uniformly-blessed model."""
+    candidates = manifest.get("candidates")
+    if not candidates:
+        return ""
+    deployment = manifest.get("deployment") or {}
+    winner = (manifest.get("selection") or {}).get("winner")
+    lines = ["\n### Candidates in this artifact\n",
+             "| candidate | status | agreement | gate | deployment |", "|---|---|---|---|---|"]
+    for name, rec in candidates.items():
+        if rec.get("status") != "completed":
+            lines.append(f"| {name} | ERROR | - | - | - |")
+            continue
+        agr = (rec.get("metrics") or {}).get("agreement")
+        gate_txt = "PASS" if (rec.get("gate") or {}).get("passed") else "FAIL"
+        dep = (
+            "accepted despite failed gate"
+            if deployment.get("accepted_candidate") == name
+            else ("selected winner" if name == winner else "retained")
+        )
+        lines.append(
+            f"| {name} | completed | {agr:.1%} | {gate_txt} | {dep} |"
+            if agr is not None else f"| {name} | completed | - | {gate_txt} | {dep} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+# what a pushed artifact contains, and nothing else: redacted reports only —
+# report_details.json (raw inputs/rationales) and provenance.local.json
+# (absolute local paths) must never leave the machine
+SHIP_PATTERNS = [
+    "manifest.json",
+    "spec.yaml",
+    "report.json",
+    "report.md",
+    "spec_files/**",
+    "adapter/**",
+    "tfidf/**",
+    "export/**",
+]
+_EXCLUDE = ["export/merged/**"]
+
+
+def ship_list(version_dir: Path) -> list[str]:
+    """The exact files a push would upload (positive whitelist)."""
+    from fnmatch import fnmatch
+
+    out = []
+    for p in sorted(version_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(version_dir).as_posix()
+        keep = any(
+            fnmatch(rel, pat) or (pat.endswith("/**") and rel.startswith(pat[:-2]))
+            for pat in SHIP_PATTERNS
+        )
+        drop = any(rel.startswith(pat[:-2]) for pat in _EXCLUDE)
+        if keep and not drop:
+            out.append(rel)
+    return out
+
+
+def _tfidf_privacy_preflight(version_dir: Path, manifest: dict, spec) -> list[str]:
+    """Trained artifacts are NOT redacted: a fitted TfidfVectorizer stores a
+    vocabulary of raw tokens from the training text. Say so before transfer."""
+    rec = (manifest.get("candidates") or {}).get("tfidf") or {}
+    if rec.get("status") != "completed":
+        return []
+    lines = [
+        "PRIVACY: the tfidf candidate's vectorizer stores a vocabulary_ of raw",
+        "tokens learned from your training text (names, ids, project terms).",
+        "Reports are redacted; trained model state is not.",
+    ]
+    try:
+        from .candidates import _load_pipelines
+
+        pipes = _load_pipelines(version_dir / (rec.get("artifact_path") or "tfidf"))
+        for field, pipe in pipes.items():
+            vec = pipe.named_steps.get("tfidf")
+            if vec is not None:
+                lines.append(
+                    f"  {field}: vocabulary of {len(vec.vocabulary_)} tokens "
+                    f"(min_df={vec.min_df})"
+                )
+    except Exception:  # noqa: BLE001 - preflight info is best-effort
+        pass
+    return lines
+
+
 def push(
     name: str,
     repo_id: str,
@@ -160,13 +250,33 @@ def push(
     version: str | None = None,
     private: bool = True,
     allow_failed: bool = False,
+    dry_run: bool = False,
 ) -> str:
-    """Upload an artifact version to the Hub; returns the repo URL."""
+    """Upload an artifact version to the Hub; returns the repo URL.
+
+    Uploads a positive whitelist (SHIP_PATTERNS) — never the whole folder —
+    prints the exact file list before any transfer, and runs a privacy
+    preflight. `dry_run` does everything except authentication and network.
+    """
     root = Path(artifacts_root)
     version_dir = artifacts.resolve_version(root, name, version, allow_failed)
     manifest = artifacts.read_manifest(version_dir)
     spec = load_spec(version_dir / "spec.yaml")
     card = model_card(spec, manifest, repo_id)
+
+    files = ship_list(version_dir)
+    print(f"upload list for {version_dir} ({len(files)} files):")
+    for f in files:
+        print(f"  {f}")
+    print(
+        "note: spec.yaml, the rubric, and spec_files/ ship with the artifact "
+        "and may themselves be proprietary — review them like code."
+    )
+    for line in _tfidf_privacy_preflight(version_dir, manifest, spec):
+        print(line)
+    if dry_run:
+        print("--dry-run: nothing uploaded")
+        return ""
 
     try:
         from huggingface_hub import HfApi
@@ -179,7 +289,8 @@ def push(
         repo_id=repo_id,
         folder_path=version_dir,
         commit_message=f"smallbatch push: {name}/{manifest.get('version', version_dir.name)}",
-        ignore_patterns=["export/merged/**"],
+        allow_patterns=SHIP_PATTERNS,
+        ignore_patterns=_EXCLUDE,
     )
     api.upload_file(
         path_or_fileobj=io.BytesIO(card.encode()),

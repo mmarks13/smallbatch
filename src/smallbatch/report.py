@@ -149,7 +149,12 @@ def shortcut_audit(
         if 2 <= len(distinct) <= MAX_SLICE_VALUES and all(len(v) <= 60 for v in distinct):
             for dv in sorted(distinct):
                 idx = [i for i, v in enumerate(vals) if v == dv]
-                slices.append({"slice": f"{k} = {dv}", **_slice_stats(idx, flags, deltas)})
+                # field/value kept structured so redaction can anonymize the
+                # raw input value while preserving the stats
+                slices.append({
+                    "slice": f"{k} = {dv}", "field": k, "value": str(dv),
+                    **_slice_stats(idx, flags, deltas),
+                })
 
     text_fields = [
         (k, sum(len(v) for v in str_vals[k]) / len(inputs))
@@ -192,6 +197,9 @@ def shortcut_audit(
             for key, rows in token_rows.items():
                 if len(rows) >= MIN_SLICE_N and len(set(rows.values())) >= 2:
                     features[f"{k}:{key}"] = rows
+        # `k:token` features embed tokens lifted from user input text —
+        # anonymized by redaction, unlike the structural features above
+        token_features = {n for n in features if ":" in n}
 
         for name, rows in features.items():
             idx = [i for i in sorted(rows) if preds[i] is not None]
@@ -206,6 +214,7 @@ def shortcut_audit(
             flagged = gap > CORR_GAP_WARN
             surface.append({
                 "feature": name,
+                "kind": "token" if name in token_features else "structural",
                 "n": len(idx),
                 "teacher_rho": round(t_rho, 4),
                 "student_rho": round(s_rho, 4),
@@ -288,6 +297,7 @@ def build_report(
     misses.sort(reverse=True)
     failures = [
         {
+            "gate_row": i,
             "input": _input_excerpt(gate_rows[i]),
             "teacher": golds[i],
             "adapter": preds[i],
@@ -616,18 +626,55 @@ def render_markdown(report: dict) -> str:
     if report["failures"]:
         lines.append("## Largest disagreements")
         for f in report["failures"]:
+            where = f.get("input") or f"gate row {f.get('gate_row')}"
             lines.append(
-                f"- teacher **{f['teacher']}** / adapter **{f['adapter']}** — {f['input']}"
+                f"- teacher **{f['teacher']}** / adapter **{f['adapter']}** — {where}"
             )
             if f.get("teacher_reason"):
                 lines.append(f"  - teacher: {f['teacher_reason']}")
+        if report.get("redacted"):
+            lines.append(
+                "  - (inputs and rationales redacted — see the local "
+                "report_details.json)"
+            )
         lines.append("")
 
     return "\n".join(lines)
 
 
+def redact_report(report: dict) -> dict:
+    """The distributable form: an explicit redacted structure with all the
+    metrics and none of the user's text. Raw input excerpts, teacher
+    rationales, input-derived slice values, and input-lifted token names live
+    only in the local report_details.json."""
+    red = json.loads(json.dumps(report))  # deep copy, JSON-shaped by contract
+    red["failures"] = [
+        {"gate_row": f.get("gate_row"), "teacher": f.get("teacher"),
+         "adapter": f.get("adapter")}
+        for f in red.get("failures") or []
+    ]
+    audit = red.get("shortcut_audit") or {}
+    seen: dict[str, dict[str, int]] = {}
+    for s in audit.get("slices") or []:
+        if s.get("value") is not None:  # per-value slice: raw input value
+            field = s.get("field", "?")
+            n = seen.setdefault(field, {}).setdefault(s["value"], len(seen[field]) + 1)
+            s["slice"] = f"{field} = <value {n}>"
+            del s["value"]
+    for j, f in enumerate(audit.get("surface") or []):
+        if f.get("kind") == "token":  # token names are lifted from input text
+            f["feature"] = f"<input numeric token {j + 1}>"
+    red["redacted"] = True
+    return red
+
+
 def write_report(version_dir: Path, report: dict) -> Path:
-    (version_dir / "report.json").write_text(json.dumps(report, indent=2))
+    """report_details.json keeps full diagnostics and NEVER leaves this
+    machine; report.json/report.md are redacted and safe to ship with the
+    artifact (push/export whitelist exactly those)."""
+    (version_dir / "report_details.json").write_text(json.dumps(report, indent=2))
+    redacted = redact_report(report)
+    (version_dir / "report.json").write_text(json.dumps(redacted, indent=2))
     md = version_dir / "report.md"
-    md.write_text(render_markdown(report))
+    md.write_text(render_markdown(redacted))
     return md
