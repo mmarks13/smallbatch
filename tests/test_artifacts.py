@@ -70,3 +70,79 @@ def test_sweep_runs_found_but_ignored_by_versions(tmp_path):
     assert artifacts.versions(root, "toy") == [v]  # depth-1 only
     runs = artifacts.sweep_runs(root, "toy")
     assert {p.name for p in runs} == {"m-plain", "m-rationale"}
+
+
+def _v2_manifest(tfidf_passed, lora_passed, winner="tfidf", accepted=None):
+    return {
+        "manifest_schema_version": 2,
+        "function": "toy",
+        "candidates": {
+            "tfidf": {
+                "backend": "tfidf", "status": "completed",
+                "gate": {"passed": tfidf_passed, "reasons": []},
+            },
+            "lora": {
+                "backend": "lora", "status": "completed",
+                "gate": {"passed": lora_passed, "reasons": []},
+            },
+        },
+        "selection": {"winner": winner, "reason": "highest gate agreement"},
+        "deployment": (
+            {"accepted_despite_gate": True, "accepted_candidate": accepted}
+            if accepted else None
+        ),
+        "gate": {"passed": tfidf_passed if winner == "tfidf" else lora_passed},
+    }
+
+
+def test_candidate_usability_is_candidate_scoped():
+    # both fail, tfidf accepted: only tfidf becomes usable
+    m = _v2_manifest(False, False, winner="tfidf", accepted="tfidf")
+    assert artifacts.candidate_is_usable(m, "tfidf")
+    assert not artifacts.candidate_is_usable(m, "lora")
+    assert artifacts.candidate_is_usable(m, "lora", allow_failed=True)
+    assert artifacts.artifact_is_usable(m)
+
+
+def test_passing_winner_does_not_unlock_failed_secondary():
+    m = _v2_manifest(True, False, winner="tfidf")
+    assert artifacts.candidate_is_usable(m, "tfidf")
+    assert not artifacts.candidate_is_usable(m, "lora")
+
+
+def test_unaccepted_all_fail_artifact_unusable():
+    m = _v2_manifest(False, False, winner="tfidf")
+    assert not artifacts.artifact_is_usable(m)
+    assert not artifacts.candidate_is_usable(m, "tfidf")
+
+
+def test_errored_candidate_never_usable():
+    m = _v2_manifest(False, False, winner="tfidf", accepted="tfidf")
+    m["candidates"]["tfidf"]["status"] = "error"
+    assert not artifacts.candidate_is_usable(m, "tfidf")
+    assert not artifacts.candidate_is_usable(m, "tfidf", allow_failed=True)
+
+
+def test_legacy_v1_manifest_synthesized():
+    m = {"function": "toy", "gate": {"passed": True},
+         "base_model": "b", "inference_precision": "fp32",
+         "metrics": {"adapter": {"agreement": 0.9}}}
+    assert artifacts.winner(m) == "lora"
+    rec = artifacts.candidate_record(m)
+    assert rec["backend"] == "lora" and rec["gate"]["passed"]
+    assert artifacts.artifact_is_usable(m)
+    assert artifacts.candidate_record(m, "tfidf") is None
+
+
+def test_resolve_version_candidate_scoped(tmp_path):
+    import pytest
+
+    root = tmp_path / "artifacts"
+    v = artifacts.new_version_dir(root, "toy")
+    artifacts.write_manifest(v, _v2_manifest(False, False, accepted="tfidf"))
+    assert artifacts.resolve_version(root, "toy", None, allow_failed=False) == v
+    with pytest.raises(ValueError, match="lora"):
+        artifacts.resolve_version(root, "toy", None, False, candidate="lora")
+    assert artifacts.resolve_version(root, "toy", None, True, candidate="lora") == v
+    with pytest.raises(ValueError, match="no 'setfit' candidate"):
+        artifacts.resolve_version(root, "toy", None, True, candidate="setfit")

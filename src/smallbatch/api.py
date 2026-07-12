@@ -236,7 +236,27 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
     from . import __version__
     from .labeling import dataset_hash
 
+    adapter_dir = Path(info["adapter_dir"])
+    lora_candidate = {
+        "backend": "lora",
+        "status": "completed",
+        "artifact_path": adapter_dir.name,
+        "artifact_size_bytes": artifacts.dir_size(adapter_dir),
+        "base_model": spec.train.base,
+        "train_precision": info["precision"],
+        "inference_precision": inference_precision,
+        "use_dora": spec.train.use_dora,
+        "rationale_distillation": spec.train.rationale_distillation,
+        "metrics": adapter_metrics,
+        "gate": gate,
+        "train_loss": info["train_loss"],
+        "epochs_run": info.get("epochs_run"),
+        "best_epoch": info.get("best_epoch"),
+        "stopped_reason": info.get("stopped_reason"),
+        "error": None,
+    }
     manifest = {
+        "manifest_schema_version": artifacts.MANIFEST_SCHEMA_VERSION,
         "function": spec.name,
         "version": f"{sweep_name}/{tag}" if (sweep_name and tag) else version_dir.name,
         "sweep_name": sweep_name,
@@ -246,6 +266,11 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         "labeling_hash": spec.labeling_hash(),
         "dataset_hash": dataset_hash(train_rows + dev_rows + gate_rows),
         **({"stale_labels_override": stale_labels_override} if stale_labels_override else {}),
+        "candidates": {"lora": lora_candidate},
+        "selection": {"winner": "lora", "reason": "only candidate"},
+        "deployment": None,
+        # convenience duplicates of the winner's fields; true as long as the
+        # winner is the adapter, and kept so pre-v2 readers stay working
         "base_model": spec.train.base,
         "train_precision": info["precision"],
         "inference_precision": inference_precision,
