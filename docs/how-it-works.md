@@ -14,25 +14,39 @@ spec.yaml
    │
    ▼
 [1] teacher labels your real items (+ generated variants)
-   │        -> data/<fn>/{train,dev,gate}.jsonl      (stratified; gate is sticky)
+   │        -> data/<fn>/{train,dev,gate}.jsonl      (stratified; gate is sticky;
+   │           every paid call journaled — crashes resume, never re-spend)
    ▼
-[2] LoRA fine-tune of a small base model (HF PEFT/TRL)
-   │        dev split scored each epoch -> keep the best checkpoint,
-   │        stop early when it plateaus
+[2] two candidates trained on the same labels:
+   │        a. tfidf + logistic regression (seconds, CPU, ~KBs)
+   │        b. LoRA fine-tune of a small base model (HF PEFT/TRL);
+   │           dev split scored each epoch -> keep the best checkpoint,
+   │           stop early when it plateaus
    ▼
-[3] eval report + acceptance gate: best adapter vs the untouched gate split,
-   │        and vs the zero-shot base                (report.md / report.json)
+[3] eval report + acceptance gate: BOTH candidates vs the untouched gate split
+   │        and vs the zero-shot base; winner = highest teacher agreement,
+   │        ties (within gate.tie_margin) go to the smaller artifact
+   │                                              (report.md / report.json)
    ▼
-artifacts/<fn>/<version>/    adapter (~tens of MB) + manifest + report
+artifacts/<fn>/<version>/    candidates (tfidf/ + adapter/) + manifest + report
 ```
 
+Both candidates are scored on the same gate, so the winner's number is
+optimistically biased by selection — the report carries that caveat verbatim.
+A candidate that passes every required field always beats a field-failing one
+regardless of joint headlines, and an errored candidate never competes (a
+LoRA OOM can't discard a completed tfidf candidate, and vice versa).
+
 The sweet spot is a student small enough to run on almost any hardware
-(typically under 2B parameters), but any open-weights causal LM works as the
-base — tested to 9B via 4-bit training on 12GB cards. What a compiled small
-specialist **can** do: genuinely match the teacher on narrow tasks with
-constrained outputs — scoring, classification, extraction. What it **cannot**
-do: open-ended generation, and it inherits the teacher's mistakes (a student
-can't exceed its labels). Task choice is the biggest quality lever.
+(typically under 2B parameters). Other open-weights causal LMs may work as
+the base — the tested set spans four architectures from 350M to 9B (the
+larger via 4-bit training on 12GB cards); treat anything outside that as
+best-effort. What a compiled small specialist **can** do: genuinely match
+the teacher on narrow tasks with constrained outputs — scoring and
+classification (bounded structured decisions, not free-text extraction).
+What it **cannot** do: open-ended generation, and it inherits the teacher's
+mistakes (a student can't exceed its labels — supply `gold` items so the
+report can show you both). Task choice is the biggest quality lever.
 
 ## Function specs
 
@@ -48,23 +62,39 @@ for a complete working spec.
 | `rubric` | The instructions the teacher labels by; also embedded in the student's training prompt. Anchor it with concrete examples per band — calibration lives here. |
 | `spec_files` | External files whose *content* is part of the spec (embedded into teacher prompts, hashed for staleness). Paths resolve relative to the spec file. |
 | `teacher` | **Required, no defaults**: `backend` (`openai-compatible` \| `claude-cli` \| `codex-cli`), `model`, plus `examples` (target dataset size), `holdout` (gate split) and `dev` (checkpoint-selection split) — each a fraction of the real rows or an absolute int count — `batch_size`, and for openai-compatible `base_url`/`api_key_env`. |
-| `gate` | `agreement` (default 0.85; `agreement_pm1` is the legacy alias), `must_beat_zeroshot` (default true), and for structured outputs optional per-field overrides under `gate.fields`. |
-| `train` | `base` model id (default `LiquidAI/LFM2.5-350M-Base`; note an adapter inherits its base model's license — LFM's conditions commercial use above $10M revenue), `precision` (`auto|fp32|bf16|qlora`), LoRA knobs (`lora_r`, `lora_alpha`, `use_dora`), `rationale_distillation`, `max_epochs` (default 12; `epochs` is the legacy alias) with `patience` (default 2, `null` disables early stopping), lr/batch sizes, `loss_type`. Defaults are sensible; a spec can omit the whole block. |
+| `gate` | `agreement` (default 0.85; `agreement_pm1` is the legacy alias), `must_beat_zeroshot` (default true), `must_beat_constant` (default true — the oracle constant on the split), `tie_margin` (default 0.02 — candidate agreements within it tie, smaller artifact wins; a pragmatic margin, not a CI test), `severe_delta` (default 3 — int misses at/beyond it count severe), and for structured outputs optional per-field overrides under `gate.fields`. |
+| `train` | `base` model id (default `ibm-granite/granite-4.0-350m`, Apache-2.0; an adapter inherits its base model's license), `precision` (`auto|fp32|bf16|qlora`), LoRA knobs (`lora_r`, `lora_alpha`, `use_dora`), `rationale_distillation`, `max_epochs` (default 12; `epochs` is the legacy alias) with `patience` (default 2, `null` disables early stopping), lr/batch sizes, `loss_type`. Defaults are sensible; a spec can omit the whole block. |
 
 Both the spec and `train` overrides reject unknown keys (`extra="forbid"`), so
 a typo fails at load time, not silently.
 
-**Staleness:** the artifact manifest records `spec_hash` — a SHA-256 of the
-spec plus the contents of every `spec_files` entry. `smallbatch status` and
-`load_fn` warn when a deployed adapter was compiled from a stale spec.
-Recompilation is explicit, never automatic.
+**Identities:** the manifest records three hashes. `labeling_hash` covers
+everything that gives labels their meaning — contract, description, rubric,
+`spec_files` *contents*, teacher identity, prompt version, split/augment
+recipe — and deliberately excludes build knobs, so `compile --base`/
+`--precision` never invalidates a dataset while a rubric edit makes compile
+**refuse** stale labels (override: `--allow-stale-labels`, recorded in the
+manifest). `spec_hash` is the full build identity; `dataset_hash` fingerprints
+the exact rows consumed (review edits change it). Artifacts archive the
+*resolved* spec plus content-addressed copies of every spec_file, so they
+verify from any machine: `status` reports **integrity** (archive vs manifest)
+separately from **source drift** (your live spec vs the snapshot) — a moved
+or deleted project is "source comparison unavailable," never stale.
+
+**Gold labels:** any item may carry `"gold": <answer>` — a trusted reference
+(human decision, historical outcome, a public dataset's ground truth). Gold
+is validated against the contract before any paid call, routed to the gate
+(never trained on, the gate grows to hold it), and never sent to the teacher.
+With gold present the report shows teacher-vs-gold, student-vs-gold, and
+student-vs-teacher side by side; the PASS/FAIL verdict stays **teacher
+agreement** and is named as such.
 
 **Starting out:** `smallbatch init classifier|scorer|structured <name>` writes
 a working spec skeleton + starter `items.json`, and `smallbatch doctor
 <spec>` preflights everything — contract complexity, teacher reachability
-(one live probe call), data splits and label coverage, CUDA/precision/qlora
-readiness, free disk, export prerequisites — before you spend teacher calls
-or GPU time.
+(one live probe call), data splits and label coverage (a planned gate or dev
+of zero is a hard failure), CUDA/precision/qlora readiness, free disk, export
+prerequisites — before you spend teacher calls or GPU time.
 
 ## Structured outputs
 
@@ -144,7 +174,19 @@ is the classic silent failure of this kind of training.
 only unseen items and re-splits without ever moving a row out of the gate —
 once anything has trained against the rest of the data, reshuffling the gate
 would quietly leak. Top-ups to gate/dev come only from newly labeled reals.
-`--max-variants N` caps a balance-driven synthetic top-up.
+`--max-variants N` is a **global cost budget**: the maximum total new
+synthetic rows one `label` invocation may generate across paraphrase,
+field-dropout, and counterfactual stages (`0` = no synthetic generation or
+labeling calls at all; retained rows never count).
+
+**Every paid call is journaled.** Labeled rows, teacher-generated variant
+inputs (with their provenance), and consistency-probe results are appended
+durably to `data/<fn>/journal/` the moment they complete. A crash — transport
+failure, OOM, ^C — loses at most the in-flight batch; rerunning the same
+command replays the journal instead of re-spending, then folds everything
+into the dataset files atomically and archives itself. A lock file prevents
+two labeling processes from fighting over one dataset. Journals are keyed by
+the labeling identity, so a rubric change never replays stale work.
 
 ### The `augment:` block — making each label teach more
 
@@ -306,7 +348,7 @@ name: pick-a-base
 spec: ../examples/ticket-priority/spec.yaml
 timeout_minutes: 180
 models:
-  LiquidAI/LFM2.5-350M-Base: {}
+  ibm-granite/granite-4.0-350m: {}
   ibm-granite/granite-4.1-3b: {precision: qlora, batch_size: 2}
 arms:
   plain: {}
@@ -385,12 +427,23 @@ training did — `[<fn-name>]\n<field>: <value>...\noutput:` — which is what
 Local-first is the default — nothing is ever uploaded unless you ask.
 `smallbatch push <fn> --repo you/fn-name` uploads an artifact version
 (adapter, spec.yaml, manifest.json, and any export/ files) with a model card
-rendered from the manifest: base model, gate verdict, metrics table, data
-provenance, and a usage snippet. Repos are created **private** unless you
-pass `--public`; gate-failed artifacts are refused without `--allow-failed`.
-Auth is the standard `hf auth login` / `HF_TOKEN`. Remember the adapter
-inherits its base model's license, and your teacher provider's terms govern
-distribution — see [responsible-use.md](responsible-use.md).
+rendered from the manifest: base model, gate verdict, metrics table, every
+candidate's independent quality + deployment state, data provenance, and a
+usage snippet. Repos are created **private** unless you pass `--public`;
+gate-failed artifacts are refused without `--allow-failed`. Auth is the
+standard `hf auth login` / `HF_TOKEN`.
+
+What ships is a **positive whitelist** — manifest, spec + spec_files copies,
+the redacted `report.json`/`report.md`, and the candidate model files — and
+the exact upload list is printed before any transfer (`--dry-run` stops
+there). The local-only `report_details.json` (raw input excerpts, teacher
+rationales) and `provenance.local.json` (absolute local paths) never ship.
+Two things are NOT redacted and are warned about at push time: the spec/
+rubric/spec_files themselves, and trained model state — a fitted TF-IDF
+vectorizer stores a `vocabulary_` of raw tokens from your training text.
+Remember the adapter inherits its base model's license, and your teacher
+provider's terms govern distribution — see
+[responsible-use.md](responsible-use.md).
 
 ## Relationship to Program-as-Weights
 

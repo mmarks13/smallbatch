@@ -1,72 +1,83 @@
 # Roadmap
 
 Where smallbatch is headed. The philosophy stays fixed: **narrow functions
-with checkable output contracts, compiled and run local-first**. Features
+with checkable output contracts, compiled and run local-first** — and the
+compiler proves when weights are useful rather than assuming it. Features
 that dilute that (chat task types, hosted endpoints, multi-GPU rigs, GUIs)
 are non-goals — see the bottom of this page.
 
-## Near-term: table stakes
+Shipped work lives in [CHANGELOG.md](CHANGELOG.md); this page holds outcomes
+we haven't reached yet, each with the evidence that would count as "done."
 
-- **Richer eval reports.** ✅ Shipped: every compile writes
-  `report.md`/`report.json` — agreement with a Wilson 95% CI, per-label
-  agreement, confusion matrix, severe-miss rate, training curve + chosen
-  epoch, and the largest disagreements with the teacher's rationale.
-- **Checkpoint selection + early stopping.** ✅ Shipped: a dev split is
-  scored each epoch (same constrained decoding as the final eval), the best
-  checkpoint is kept, and training stops on `patience` stale epochs. The
-  gate is a final acceptance check, not the discovery mechanism.
-- **Constrained decoding.** ✅ Shipped: the PyTorch runtime and eval mask the
-  vocabulary token-by-token to the output contract (adapter, zero-shot
-  baseline, and `run` alike; rationale mode stays unconstrained), and the
-  GGUF export ships a GBNF grammar. Invalid outputs are structurally
-  impossible.
-- **Structured outputs.** ✅ Shipped: a flat multi-field output map (enum /
-  int-range fields, e.g. label + reason code + confidence) with per-field
-  metrics and gates, fixed-order line emission, and per-field grammar.
-- **Preflight.** ✅ Shipped as `smallbatch doctor`: contract complexity,
-  teacher reachability probe, split/coverage checks, CUDA/precision/qlora
-  readiness, disk, export prerequisites.
-- **Checkpoint resume + training telemetry.** `resume_from_checkpoint` and
-  `report_to=[tensorboard]` pass-throughs from TRL. Long runs on consumer
-  GPUs fail for boring reasons; resuming beats restarting.
+## Next: broaden the candidate ladder
 
-## The headline: a zero-PyTorch runtime artifact
+- **SetFit / small-encoder candidate.** A third compile candidate between
+  TF-IDF and the causal adapter. Done when: a public benchmark task selects
+  it over both neighbours, or the data shows it's dominated.
+- **Vocabulary-free TF-IDF variant.** HashingVectorizer pipeline for
+  privacy-critical sharing (no raw training tokens stored in the artifact).
+  Done when: a shared artifact passes a token-leakage scan with equivalent
+  quality on the benchmark.
+- **Dev-based candidate selection.** Select the winner on dev, spend the
+  gate exactly once on it (today both candidates are scored on the gate with
+  a recorded selection-bias caveat). Done when: the benchmark quantifies the
+  bias and the dev split is routinely large enough to select on.
 
-**Mostly shipped** as `smallbatch export`
-([docs](docs/how-it-works.md#exporting-to-a-zero-pytorch-runtime)):
-merged + quantized GGUF with quant presets ✅, GBNF grammar generated from
-the output contract ✅, Ollama Modelfile ✅, `--adapter-only` GGUF for
-`llama-server --lora` over a shared base ✅.
+## Runtime & artifacts
 
-- **`smallbatch serve`** ✅ Shipped: wraps llama-server on the exported GGUF
-  behind a validating `POST /call` endpoint. The export bundle is now
-  self-describing (README with exact commands, spec/manifest/report copies).
+- **A runtime-only install.** A recipient of a compiled function shouldn't
+  install the training stack: split extras (`smallbatch[train]`, a slim
+  runtime core). Done when: a clean venv calls a TF-IDF artifact with no
+  torch and an adapter with torch-only.
+- **Shared-base multi-adapter runtime.** Load one base model, route calls to
+  many adapters (until then, functions share a base on *disk*, not in RAM).
+  Done when: ten compatible functions serve from one loaded base with
+  measured memory.
+- **Version promotion & rollback.** A stable alias (`production`) per
+  function, one-command rollback, garbage collection. Done when: promotion
+  survives recompiles and a rollback is a single command.
+- **Build lock / reproducibility metadata.** Immutable model+tokenizer
+  revisions, package/CUDA/hardware facts in every manifest. Done when: a
+  rebuild either reproduces the candidate or names every changed input.
+- **Transactional builds.** Compile into a temp dir, atomically promote on
+  completion. Done when: a killed compile can't leave a half-populated
+  version dir.
 
-## After that
+## Evaluation & data
 
-- **Production capture and drift.** Optionally log `run()` inputs/outputs to
-  a per-function dataset; periodically spot-check a sample against the
-  teacher; surface drift in `smallbatch status` the same way spec staleness
-  is surfaced today, and make "recompile on accumulated real data" a
-  one-command loop.
-- **HF Hub push (opt-in).** ✅ Shipped as `smallbatch push` — uploads a
-  passing artifact with the manifest rendered as the model card, private by
-  default.
-- **Label review loop.** ✅ Shipped as `smallbatch review`:
-  accept/reject/edit/annotate with split/origin/label/field filters, audit
-  trail kept, splits rebuilt. Still to come from this line: regenerating
-  variants from review notes.
+- **Gate-on-gold verdict.** When the gate holds enough gold rows, the
+  PASS/FAIL verdict itself uses gold accuracy (today gold is independent
+  evidence beside a teacher-agreement verdict).
+- **Bootstrap CIs for macro F1** (declared resampling, recorded seed).
+- **Typed input contracts.** A small JSON-Schema subset validated identically
+  at labeling and runtime (types, lengths, unknown-field policy) — today's
+  `input_schema` is informational.
+- **Review-to-gold.** Mark human-reviewed labels as gold from `smallbatch
+  review`; regenerate variants from review notes.
 - **Variant diversity axes.** Band-targeting balances labels but not input
-  space. Let the spec declare variation dimensions (e.g. length, formality,
-  domain) and steer variant generation across them.
-- **Extraction task type.** Largely covered by structured outputs (multiple
-  typed fields per item, per-field gates). What remains from this line:
-  free-position span extraction — deliberately parked until it can be done
-  without open-ended text output.
+  space; let the spec declare variation dimensions (length, formality,
+  domain).
+- **Production capture and drift.** Opt-in `run()` capture with redaction,
+  scheduled gold spot-checks, drift surfaced in `status`, one-command
+  recompile on accumulated real data.
+
+## Training conveniences
+
+- **Checkpoint resume + training telemetry** (`resume_from_checkpoint`,
+  tensorboard pass-through). Long consumer-GPU runs fail for boring reasons;
+  resuming beats restarting.
+- **Sweep redesign.** Dev-based selection inside sweeps and first-class
+  per-cell metric retention (today's sweep compares cells on the same gate —
+  fine for exploration, biased for selection, and documented as such).
+
+## Parked
+
+Free-position span extraction (until it can be done without open-ended text
+output); `--include-examples` opt-in disclosure of report excerpts.
 
 ## Non-goals
 
 Open-ended generation task types, general chatbots, preference tuning (DPO),
-multi-GPU/distributed training, hosted inference, a GUI. Other tools do these
-well; smallbatch stays a compiler for narrow fuzzy functions that run on the
-hardware you already have.
+multi-GPU/distributed training, hosted inference, a GUI, a public function
+marketplace. Other tools do these well; smallbatch stays a compiler for
+narrow constrained functions that run on the hardware you already have.

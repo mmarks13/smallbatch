@@ -37,7 +37,7 @@ bin you'll get a warning to sharpen the rubric.
 
 ## 2. Compile
 
-Fine-tunes the base model (default `LiquidAI/LFM2.5-350M-Base`, ~minutes on
+Fine-tunes the base model (default `ibm-granite/granite-4.0-350m`, ~minutes on
 any CUDA GPU) and gates the result against the teacher's held-out labels:
 
 ```bash

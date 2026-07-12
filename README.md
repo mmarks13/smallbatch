@@ -2,36 +2,46 @@
   <img src="https://raw.githubusercontent.com/mmarks13/smallbatch/main/assets/smallbatch_banner.png" alt="smallbatch — distill once, own the function" width="100%">
 </p>
 
-*Small-batch distillation: compile a frontier model's ability on one narrow
-task into a small model you own.*
+*Turn a rubric and representative examples into a tested local classifier.*
+
+> **Project status: experimental.** The CPU-only unit suite covers the spec,
+> data, metric, report, and orchestration layers; the complete pipeline has
+> been exercised end-to-end on a small number of tasks. A passing
+> teacher-agreement gate is **not** ground-truth accuracy — see
+> [What the gate means](#what-the-gate-means). Interfaces and the artifact
+> format may still change before 1.0.
 
 Lots of useful functions are fuzzy: *score this item 0–10 against a rubric*,
 *classify this ticket as urgent/normal/low*. A frontier model does these well
 from a prompt — so teams end up renting one forever for a task that never
-changes: every call costs money, takes seconds, hits rate limits, and sends
-your data to someone else's computer.
+changes.
 
-smallbatch turns that prompt into a function you own. It uses the big model
-**once**, as a teacher to label your real examples, then trains a small model
-that runs on almost any hardware (typically under 2B parameters) to do that
-one job. After that the function is yours: no per-call cost, no rate limits,
-no network dependency, your data stays local, milliseconds per call — and a
-fraction of the energy per call that frontier-model inference burns.
-
-The whole loop — spec → teacher-labeled data → small-model training → quality
-check → callable function — is open source and runs from one YAML file on
-your own machine. You choose the teacher (any `/chat/completions` endpoint,
-including a local Ollama model, or the Claude Code CLI). You choose the
-student — any open-weights model — and train it on whatever GPU you have,
-your own or a rented spot instance. No platform, no account, no production
-traffic required: just a spec and some example items.
+smallbatch is a **classifier compiler** for exactly that shape of function.
+You write the rubric as a YAML spec and provide representative inputs; a
+teacher model you choose labels them **during dataset creation** (labeling is
+batched — it's "a teacher phase," not literally one call); then the compiler
+trains **two candidates on the same labels** — a TF-IDF + logistic-regression
+pipeline (KBs, CPU-only) and a LoRA adapter on a small base model — scores
+both against a held-out gate, and selects the winner (highest teacher
+agreement; within a small margin, the smaller artifact wins). After that, the
+function runs locally with **no hosted-model API fee** at runtime (local
+compute is still yours to pay for).
 
 Outputs are deliberately constrained — an integer in a range, one label from
-a fixed list, or several such fields at once (a label plus a controlled
-reason code plus a confidence). That narrowness is the point: it's the regime
-where a small student genuinely matches its teacher, it makes quality
-measurable per field, and it keeps compiled functions squarely in
-"specialized classifier" territory (see [Responsible use](#responsible-use)).
+a fixed list, or several such fields at once. That narrowness is the point:
+it's the regime where a small student can genuinely match its teacher, it
+makes quality measurable per field, and it keeps compiled functions squarely
+in "specialized classifier" territory (see
+[Responsible use](#responsible-use)).
+
+## When to use it — and when not to
+
+Use smallbatch when the output is a stable set of labels or a bounded score,
+the decision runs often enough to be worth compiling, and you can provide
+representative inputs (ideally some with trusted `gold` answers to judge
+against). Keep the API call when volume is low, the rubric changes weekly, or
+the task needs current knowledge, long reasoning, or open-ended text. If a
+regex or a SQL expression already solves it, use that.
 
 ## Install
 
@@ -39,10 +49,11 @@ measurable per field, and it keeps compiled functions squarely in
 pip install smallbatch            # + [qlora] for 4-bit training of 3-9B bases
 ```
 
-Training needs a CUDA GPU — a few minutes on any card for the default-size
-student ([docs/local-gpu.md](docs/local-gpu.md)), or rent one per compile
-([docs/cloud.md](docs/cloud.md)). Match your torch build to your GPU — old
-and very new cards both need specific wheels ([details](docs/local-gpu.md)).
+Compilation trains a LoRA candidate, so **a CUDA GPU is required to compile**
+(minutes for the default 350M base — [docs/local-gpu.md](docs/local-gpu.md),
+or rent one per compile: [docs/cloud.md](docs/cloud.md)). Match your torch
+build to your GPU — old and very new cards both need specific wheels. A
+compiled function whose winner is the TF-IDF candidate then runs CPU-only.
 
 ## Quickstart
 
@@ -52,26 +63,29 @@ priority classifier with 71 bundled synthetic tickets and a zero-API-key
 teacher config (local Ollama):
 
 ```bash
-# 0. (optional) preflight: teacher reachable? GPU/precision sane? disk? splits?
+# 0. preflight: teacher reachable? GPU/precision sane? splits viable?
 smallbatch doctor examples/ticket-priority/spec.yaml \
     --items examples/ticket-priority/items.json
 
 # 1. the teacher labels the items into a train/dev/gate dataset
+#    (journaled: a crash resumes without re-paying completed calls)
 smallbatch label examples/ticket-priority/spec.yaml \
     --items examples/ticket-priority/items.json
 
-# 2. train (best checkpoint by dev agreement) + eval report + acceptance gate
-smallbatch compile examples/ticket-priority/spec.yaml
-#    -> artifacts/ticket-priority/<date>/  (adapter + report.md + manifest)
+# 2. inspect/correct the teacher's labels before spending GPU time
+smallbatch review examples/ticket-priority/spec.yaml
 
-# 3. call it
+# 3. train both candidates + eval report + acceptance gate
+smallbatch compile examples/ticket-priority/spec.yaml
+#    -> artifacts/ticket-priority/<date>/  (candidates + report.md + manifest)
+
+# 4. call it
 smallbatch run ticket-priority --json '{"subject": "Site down", "body": "...", "product_area": "auth", "customer_tier": "pro"}'
-smallbatch status        # list compiled functions, quality verdicts, staleness
+smallbatch status        # functions, verdicts, winners, integrity/drift
 ```
 
 (Starting from scratch instead? `smallbatch init classifier my-fn` writes a
-working spec skeleton. Want to inspect the teacher's labels before training?
-`smallbatch review <spec>`.)
+working spec skeleton.)
 
 Or from Python:
 
@@ -86,82 +100,91 @@ fn({"subject": "Site down", "body": "...", "product_area": "auth", "customer_tie
 # -> "urgent"
 ```
 
+## What the gate means
+
+The acceptance gate measures **agreement with the teacher's held-out labels**
+— imitation, not ground truth. A teacher that misreads your rubric produces a
+student that faithfully misreads it too, and the gate cannot see that. Two
+things keep this honest:
+
+- **Gold labels.** Any item may carry a `"gold"` value — an answer you trust
+  independently (a human decision, a historical outcome). Gold rows are
+  routed to the gate, never trained on, and the report then shows three
+  numbers side by side: teacher-vs-gold (is the teacher right?),
+  student-vs-gold (is the function right?), and student-vs-teacher. A
+  teacher that scores poorly against your gold gets called out loudly.
+- **Baselines.** Every candidate must beat the zero-shot base model and the
+  best constant prediction (an *oracle* constant picked on the gate labels —
+  a hurdle, not a deployable model) before it can pass.
+
+Exit codes are load-bearing: **0** gate pass, **2** honest fail, **1** error.
+When every candidate fails, compile shows a full decision table (both
+candidates, baselines, gold breakdown, error margins) and lets you *explicitly*
+accept the best one for deployment — recorded in the manifest, surfaced by
+`status` as `IN USE - GATE FAIL`, exit code still 2.
+
 ## What you get
 
 - **A spec, not a script.** One diffable YAML file defines the function:
-  input fields, output contract, and the rubric the teacher labels by. The
-  spec (plus any files it references) is content-hashed, so a deployed
-  function knows when its definition has drifted.
-- **A real eval report, not just a verdict.** Every compile writes
-  `report.md`/`report.json`: agreement with the teacher **with a 95%
-  confidence interval**, per-label breakdown, a confusion matrix, severe-miss
-  rate, the training curve, and the largest disagreements alongside the
-  teacher's own rationale. The acceptance gate (vs held-out teacher labels
-  and vs the untrained base) is recorded in the manifest; `load_fn` refuses
-  failing adapters by default, and exit codes stay automation-friendly:
-  **0** pass, **2** honest fail, **1** error.
-- **Training that picks its best artifact.** A dev split is scored after
-  every epoch with the same constrained decoding as the final eval; the
-  compile keeps the best checkpoint, stops early when dev agreement
-  plateaus, and records which epoch won and why training stopped — the gate
-  is a final trust check, not the way you discover whether training worked.
-  Decoding is constrained to the output contract end to end, so the function
-  can't return garbage — only a right or wrong answer.
-- **Small artifacts, shared base.** Training uses LoRA adapters — each
-  compiled function is tens of MB layered on one frozen base model, so ten
-  functions don't cost ten models of disk or RAM.
-- **Runs anywhere once compiled.** `smallbatch export <fn>` merges and
-  quantizes the function into a single GGUF file (~230MB for the default
-  base) with an Ollama Modelfile, a llama.cpp grammar generated from the
-  output contract, and a README with the exact commands for this function —
-  CPU-only inference where invalid outputs are impossible by construction, no
-  Python required. `smallbatch serve <fn>` turns that bundle into a local
-  HTTP endpoint with input/output validation
-  ([details](docs/how-it-works.md#exporting-to-a-zero-pytorch-runtime)).
-- **A model picker built in.** `smallbatch sweep` runs a `(base model) ×
-  (technique)` grid, each cell in an isolated subprocess so one OOM can't
-  poison the rest, and writes a comparison table. Finding the smallest model
-  that clears your bar is a one-command experiment
-  ([details](docs/how-it-works.md#sweeps)).
+  input fields, output contract, and the rubric the teacher labels by.
+  Build-setting changes (base model, precision) never invalidate your labeled
+  data; rubric/contract/teacher changes make compile refuse stale labels.
+- **Two candidates, one honest comparison.** Every compile fits the TF-IDF
+  candidate (seconds, CPU) and the LoRA adapter on the same labels and gates
+  both. When the linear model wins, that's your artifact — hundreds of KB,
+  no base model needed. Both are scored on the same gate, so the selected
+  number is optimistically biased by selection; the report says so.
+- **A real eval report, not just a verdict.** `report.md`/`report.json`:
+  agreement **with a 95% confidence interval**, macro F1 / balanced accuracy /
+  per-class breakdown (enums) or MAE / severe-miss / correlation (scores),
+  confusion matrix, training curve, shortcut audit, and the gold three-way
+  when gold exists. Shipped reports are **redacted by default** — raw inputs
+  and teacher rationales stay in a local-only `report_details.json`.
+- **Labeling that can crash.** Every paid teacher call is journaled the
+  moment it completes; rerunning `label` resumes instead of re-spending.
+- **Small adapter artifacts.** LoRA adapters are tens of MB layered on a
+  frozen base, so ten functions share one base model **on disk** (the Python
+  runtime currently loads a base per loaded function — a shared-base
+  multi-adapter runtime is on the roadmap).
+- **Constrained decoding end to end.** The LoRA path decodes under the output
+  contract, so the function always returns a value *inside the contract*;
+  whether it's the right value is what the gate and report measure.
 
-## Does it work?
+## Experimental commands
 
-Results from the pilot task — relevance-scoring news items 0–10 against an
-editorial rubric, teacher = Claude Sonnet, n=22 real-item holdout:
+These work and are tested to the level noted, but haven't had enough
+end-to-end mileage to call production-ready. Expect rough edges:
 
-| student (base model) | agreement ±1 | zero-shot base |
-|---|---|---|
-| LFM2.5-1.2B-Instruct | **81.8%** | 4.6% |
-| MiniCPM5-1B | **81.8%** | 13.6% |
-| Qwen3-0.6B-Base (2m43s on an 11GB card) | 77.3% | 0.0% |
-| Qwen3.5-4B (4-bit, 12GB card) | 77.3% | 18.2% |
+| command | state |
+|---|---|
+| `smallbatch export <fn>` | GGUF + grammar + Modelfile for the **LoRA candidate only** (llama.cpp checkout required). Unit-tested generation; conversion exercised manually per release. |
+| `smallbatch serve <fn>` | Local HTTP endpoint. TF-IDF winners serve straight from Python (CPU); LoRA winners need an export bundle + `llama-server`. Single-threaded stdlib server — not a production stack. |
+| `smallbatch push <fn> --repo you/name` | Hub upload of a **whitelisted** file set (redacted reports only; exact upload list printed first; `--dry-run` available). Note: trained model state is *not* redacted — a fitted TF-IDF vectorizer stores raw training-text tokens in its vocabulary, and push warns about this. |
+| `smallbatch sweep <sweep.yaml>` | Model × technique grid for research. Cells are honest results, but selection over many cells on one small gate overfits it — treat the table as exploration, not evidence. |
 
-- The teacher's own self-agreement ceiling (relabeling the same items) was
-  97.3% — a student at 81.8% has closed most of the gap from a zero-shot
-  floor of ≤13.6%. **Compilation added +68–77 points of agreement.**
-- These runs sat just under a strict 85% bar on a small n=22 holdout (one
-  item ≈ 4.5 points) — the honest conclusion, recorded by the quality check
-  itself, was "accumulate a bigger real holdout," not "ship it."
-- Technique arms (DoRA, rationale distillation) never beat plain fine-tuning
-  on this task. Model-agnosticism held: four different architectures compiled
-  through the identical pipeline with zero code changes.
+## Evidence
+
+*A reproducible public-dataset benchmark (teacher-labeled train/dev/gate, a
+locked external gold test scored exactly once, both candidates + baselines,
+three LoRA seeds) is the release gate for v0.2.0 and will be published here
+with its scripts and raw per-seed results.*
 
 ## Responsible use
 
 smallbatch trains on teacher outputs, so **your teacher provider's terms
 govern what you may build**. Constrained scorers/classifiers like these fit
 the "specialized, non-competing tool" category that major providers expressly
-allow (e.g. content categorization, sentiment, extraction) — but general
-chatbots or open-ended generators trained on provider outputs are prohibited,
-and some providers require prior authorization for any training use. Using a
+allow (e.g. content categorization, sentiment) — but general chatbots or
+open-ended generators trained on provider outputs are prohibited, and some
+providers restrict distribution of models trained on their outputs. Using a
 self-hosted open-weights teacher (Ollama/vLLM) sidesteps the question for
 labeling. Read [docs/responsible-use.md](docs/responsible-use.md) before
 pointing a hosted teacher at a dataset.
 
-Note also that an adapter inherits its **base model's** license — the default
-student (`LiquidAI/LFM2.5-350M-Base`) ships under the LFM Open License, which
-conditions commercial use above $10M annual revenue; swap the base in one
-YAML line if that matters for you.
+An adapter inherits its **base model's** license. The default student
+(`ibm-granite/granite-4.0-350m`) is Apache-2.0. Remember also that
+`spec.yaml`, your rubric, and any `spec_files` ship inside the artifact —
+review them like code before sharing.
 
 ## Docs
 
@@ -171,8 +194,9 @@ YAML line if that matters for you.
 | [docs/local-gpu.md](docs/local-gpu.md) | Running on your own GPU: precision auto-select, VRAM sizing, old-GPU (Pascal) pins, OOM knobs. |
 | [docs/cloud.md](docs/cloud.md) | Renting a GPU per compile with SkyPilot; the label-locally/compile-remotely split. |
 | [docs/responsible-use.md](docs/responsible-use.md) | Provider-terms guidance for choosing a teacher. |
-| [examples/ticket-priority/](examples/ticket-priority/) | Complete runnable example. |
-| [ROADMAP.md](ROADMAP.md) | Where this is headed (GGUF export, constrained decoding, drift detection) — and what's deliberately out of scope. |
+| [examples/ticket-priority/](examples/ticket-priority/) | Complete runnable example (synthetic data — a smoke fixture, not evidence). |
+| [ROADMAP.md](ROADMAP.md) | Outcomes we're working toward — and what's deliberately out of scope. |
+| [CHANGELOG.md](CHANGELOG.md) | What shipped, per release. |
 
 ## Development
 
@@ -180,6 +204,7 @@ YAML line if that matters for you.
 uv venv && source .venv/bin/activate
 uv pip install -e .[dev]
 pytest -q          # CPU-only; no GPU or network needed
+ruff check src tests
 ```
 
 MIT licensed. Inspired by
