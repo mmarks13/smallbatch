@@ -33,7 +33,7 @@ class CompiledFunction:
             if missing:
                 raise ValueError(f"input missing fields {missing} (have {list(it)})")
         texts = [prompts.student_prompt(self.spec, it) for it in items]
-        raw = generate_batch(
+        raw, _ = generate_batch(
             self.model, self.tokenizer, texts, self._max_new,
             batch_size=self.spec.train.eval_batch_size,
             allowed_completions=prompts.allowed_completions(self.spec),

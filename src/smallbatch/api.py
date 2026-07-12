@@ -111,8 +111,10 @@ def label(
     """Teacher-label `items` into a train/dev/gate dataset for `spec`.
 
     `append` keeps an existing dataset's rows and split assignments (the gate
-    is sticky) and only labels unseen items; `max_variants` caps how many new
-    balance-driven synthetic variants this call generates.
+    is sticky) and only labels unseen items. `max_variants` is a global cost
+    budget: the maximum total new synthetic rows this call may generate across
+    paraphrase, field-dropout, and counterfactual augmentation (0 performs no
+    synthetic generation or labeling calls; retained rows never count).
     """
     from .labeling import build_dataset
     from .teacher import make_teacher
@@ -253,6 +255,11 @@ def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product ver
         "epochs_run": info.get("epochs_run"),
         "best_epoch": info.get("best_epoch"),
         "stopped_reason": info.get("stopped_reason"),
+        **(
+            {"eval_batch_size_effective": adapter_metrics["eval_batch_size_effective"]}
+            if adapter_metrics.get("eval_batch_size_effective") is not None
+            else {}
+        ),
         "error": None,
     }
     manifest = {

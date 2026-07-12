@@ -328,7 +328,15 @@ def build_report(
         "fields": fields_section,
         "failures": failures,
         "shortcut_audit": {"slices": audit["slices"], "surface": audit["surface"]},
-        "warnings": audit["warnings"],
+        "warnings": audit["warnings"]
+        + (
+            [
+                f"eval batch size reduced to {adapter['eval_batch_size_effective']} "
+                "after OOM — set train.eval_batch_size to avoid the retry cost"
+            ]
+            if adapter.get("eval_batch_size_effective") is not None
+            else []
+        ),
     }
 
 

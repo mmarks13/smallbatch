@@ -42,6 +42,36 @@ def _prefix_allowed_fn(trie: dict, terminals: set, prompt_len: int, eos_id: int)
     return fn
 
 
+def _oom_backoff(process, items: list, batch_size: int, is_oom, on_oom=None):
+    """Run `process(slice)` over successive slices of `items`, halving the
+    batch size (floor 1) and retrying the SAME slice whenever `is_oom(exc)`.
+
+    The reduction is sticky for the remainder of the call: prompts in one
+    eval are similar length, so growing back up just re-pays the OOM. OOM at
+    size 1 re-raises — that is a genuine capacity failure and must stay a
+    loud error, not an infinite loop. Non-OOM exceptions propagate untouched.
+
+    Returns (results, final_batch_size). Pure: torch-free and unit-testable
+    with a stub exception class.
+    """
+    results: list = []
+    size = max(1, batch_size)
+    start = 0
+    while start < len(items):
+        chunk = items[start : start + size]
+        try:
+            results.extend(process(chunk))
+        except Exception as e:  # noqa: BLE001 - is_oom decides; others re-raise
+            if not is_oom(e) or size == 1:
+                raise
+            if on_oom is not None:
+                on_oom()
+            size = max(1, size // 2)
+            continue  # retry the same slice at the new size
+        start += len(chunk)
+    return results, size
+
+
 def generate_batch(
     model,
     tokenizer,
@@ -49,11 +79,15 @@ def generate_batch(
     max_new_tokens: int,
     batch_size: int = 16,
     allowed_completions: list[str] | None = None,
-) -> list[str]:
-    """Greedy generation; returns only the newly generated text per prompt.
+) -> tuple[list[str], int]:
+    """Greedy generation; returns (newly generated text per prompt, the
+    effective batch size after any OOM backoff).
 
     With `allowed_completions`, decoding is constrained token-by-token to
     those exact strings (plus EOS), so an invalid output is impossible.
+    Eval-time OOM is data-dependent (prompt length), so the batch loop
+    self-heals by halving instead of asking the user to predict a safe size;
+    results are unaffected because decoding is greedy with left padding.
     """
     import torch
 
@@ -65,9 +99,8 @@ def generate_batch(
         if eos_id is None:
             eos_id = tokenizer.pad_token_id
         constrain = (trie, terminals, eos_id)
-    outs: list[str] = []
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start : start + batch_size]
+
+    def process(batch: list[str]) -> list[str]:
         enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=2048)
         enc = {k: v.to(model.device) for k, v in enc.items()}
         extra = {}
@@ -85,8 +118,22 @@ def generate_batch(
                 **extra,
             )
         new_tokens = gen[:, enc["input_ids"].shape[1] :]
-        outs.extend(tokenizer.batch_decode(new_tokens, skip_special_tokens=True))
-    return outs
+        return tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
+
+    outs, effective = _oom_backoff(
+        process,
+        texts,
+        batch_size,
+        is_oom=lambda e: isinstance(e, torch.OutOfMemoryError),
+        on_oom=lambda: torch.cuda.empty_cache() if torch.cuda.is_available() else None,
+    )
+    if effective != batch_size:
+        print(
+            f"eval batch {batch_size} OOM'd — continuing at {effective}; set "
+            f"train.eval_batch_size: {effective} to avoid the retry cost",
+            flush=True,
+        )
+    return outs, effective
 
 
 def score_holdout(
@@ -101,7 +148,7 @@ def score_holdout(
     # both the adapter and the zero-shot baseline decode under the same
     # output-contract constraint (None in rationale mode), so the gate
     # comparison stays apples-to-apples and invalid outputs are impossible
-    raw = generate_batch(
+    raw, effective_batch = generate_batch(
         model, tokenizer, texts, max_new_tokens,
         batch_size=spec.train.eval_batch_size,
         allowed_completions=prompts.allowed_completions(spec),
@@ -111,6 +158,8 @@ def score_holdout(
     preds = [prompts.parse_output(spec, t) for t in raw]
     metrics = compute_metrics(spec, preds, [row_output(spec, r) for r in holdout])
     metrics["preds"] = preds  # per-item, aligned with the holdout file order
+    if effective_batch != spec.train.eval_batch_size:
+        metrics["eval_batch_size_effective"] = effective_batch
     return metrics
 
 

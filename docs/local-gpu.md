@@ -51,7 +51,11 @@ match the torch build to your card.
 ## Fitting bigger models: knobs that matter
 
 - `precision: qlora` — the main lever for 3–8B bases.
-- `batch_size` / `eval_batch_size` — first thing to lower on OOM.
+- `batch_size` — first thing to lower on a TRAINING-side OOM (the HF Trainer
+  loop does not self-heal).
+- Eval-side OOMs self-heal: evaluation halves its batch size and retries with
+  a warning, and the report/manifest record the effective size. Set
+  `train.eval_batch_size` to that value to avoid paying the retry next time.
 - `loss_type: nll` — TRL's default `chunked_nll` loss casts the LM head to
   fp32 (~3.8GB for a 150k-vocab model) and OOMs 12GB cards; `nll` materializes
   plain logits instead, which is smaller for huge-vocab models.

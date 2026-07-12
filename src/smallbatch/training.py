@@ -93,7 +93,9 @@ def _make_dev_callback(spec: FunctionSpec, tokenizer, dev_rows: list[Row], adapt
             pad_side = tokenizer.padding_side
             model.eval()
             with torch.no_grad():
-                raw = generate_batch(
+                # dev-eval reductions print generate_batch's one-liner; the
+                # final eval re-derives its own effective size for the report
+                raw, _ = generate_batch(
                     model, tokenizer, dev_texts, max_new,
                     batch_size=spec.train.eval_batch_size,
                     allowed_completions=allowed,

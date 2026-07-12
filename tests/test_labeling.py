@@ -355,3 +355,53 @@ def test_dataset_hash_order_invariant_and_content_sensitive():
     assert dataset_hash([dict(rows[0], score=4), rows[1]]) != h  # label edit
     assert dataset_hash([dict(rows[0], split="gate"), rows[1]]) != h  # rerouting
     assert dataset_hash([dict(rows[0], gold=1), rows[1]]) != h  # gold annotation
+
+
+def test_plan_variant_bands_cap_is_a_ceiling():
+    # a cap can only reduce the balance-derived need, never force generation
+    full = rows([0, 1, 2, 3, 4] * 10)  # 50 >= target_total
+    assert plan_variant_bands(SPEC, full, target_total=40, cap=25) == {}
+    sparse = rows([2] * 20 + [3] * 10)
+    capped = plan_variant_bands(SPEC, sparse, target_total=40, cap=4)
+    assert 0 < sum(capped.values()) <= 5  # ~10 needed, capped (± band rounding)
+
+
+def test_max_variants_is_a_global_budget(tmp_path):
+    from smallbatch.spec import AugmentSpec
+
+    aug_spec = SPEC.model_copy(update={"augment": AugmentSpec(paraphrase={"cap": 50})})
+    meta = build_dataset(
+        FakeTeacher(), aug_spec, [{"title": f"real{i}"} for i in range(10)],
+        tmp_path, max_variants=2,
+    )
+    assert meta["variants"] <= 2  # stage cap 50 bounded by the global budget
+
+
+def test_max_variants_budget_covers_dropout_stage(tmp_path):
+    from smallbatch.spec import AugmentSpec
+
+    aug_spec = SPEC.model_copy(
+        update={"augment": AugmentSpec(field_dropout={"fields": ["title"], "cap": 30})}
+    )
+    meta = build_dataset(
+        FakeTeacher(), aug_spec, [{"title": f"real{i}"} for i in range(10)],
+        tmp_path, max_variants=1,
+    )
+    assert meta.get("dropout", 0) <= 1
+    assert meta["variants"] == 0  # no paraphrase stage configured
+
+
+def test_max_variants_zero_makes_no_generation_calls(tmp_path):
+    from smallbatch.spec import AugmentSpec
+
+    aug_spec = SPEC.model_copy(update={"augment": AugmentSpec(
+        paraphrase={"cap": 50},
+        field_dropout={"fields": ["title"], "cap": 30},
+    )})
+    teacher = FakeTeacher()
+    meta = build_dataset(
+        teacher, aug_spec, [{"title": f"real{i}"} for i in range(10)],
+        tmp_path, max_variants=0,
+    )
+    assert meta["variants"] == 0 and meta.get("dropout", 0) == 0
+    assert teacher.calls == 1  # exactly the one real-labeling batch

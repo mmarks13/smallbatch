@@ -130,15 +130,17 @@ def plan_variant_bands(
     spec: FunctionSpec,
     real: list[Row],
     target_total: int,
-    n_new: Optional[int] = None,
+    cap: Optional[int] = None,
 ) -> dict[Any, int]:
     """How many variants to request per score value: fill toward uniform
-    coverage so rare bands exist in training. `n_new` overrides the count
-    derived from target_total (used for balance-driven top-ups on an already
-    full dataset). Variants are relabeled afterward, so these are targets,
-    not labels."""
+    coverage so rare bands exist in training. `cap` is a true ceiling on the
+    count derived from target_total — it can only reduce the request, never
+    force generation on an already-full dataset. Variants are relabeled
+    afterward, so these are targets, not labels."""
     values = _score_values(spec)
-    needed = n_new if n_new is not None else max(0, target_total - len(real))
+    needed = max(0, target_total - len(real))
+    if cap is not None:
+        needed = min(needed, cap)
     if needed <= 0:
         return {}
     counts = {v: sum(1 for r in real if primary_value(spec, r) == v) for v in values}
@@ -154,7 +156,7 @@ def generate_variants(
     spec: FunctionSpec,
     real: list[Row],
     target_total: int,
-    n_new: Optional[int] = None,
+    cap: Optional[int] = None,
     per_call: int = 20,
     seed: int = 17,
     hist_rows: Optional[list[Row]] = None,
@@ -171,7 +173,7 @@ def generate_variants(
     rng = random.Random(seed)
     spec_text = spec.spec_files_text()
     plan = plan_variant_bands(spec, hist_rows if hist_rows is not None else real,
-                              target_total, n_new=n_new)
+                              target_total, cap=cap)
     variants: list[dict] = []
     sources: list[list[str]] = []
     for band, n in plan.items():
@@ -275,7 +277,9 @@ def counterfactual_rows(
     `intended_band` + `source_ids`."""
     rng = random.Random(seed)
     spec_text = spec.spec_files_text()
-    plan = plan_variant_bands(spec, hist_rows, target_total=0, n_new=cap)
+    # counterfactuals always trace the boundary regardless of dataset size:
+    # ask the band planner for exactly `cap` rows over the observed deficits
+    plan = plan_variant_bands(spec, hist_rows, target_total=len(hist_rows) + cap)
     pairs: list[tuple[dict, Row, Any]] = []
     for band, n in plan.items():
         pool = [r for r in train_reals if primary_value(spec, r) != band]
@@ -628,7 +632,8 @@ def build_dataset(
     sticky) are kept; `items` already present are skipped. Splits are assigned
     BEFORE variants are generated, and variants are generated from train-split
     reals only, so gate/dev never contain or influence synthetic data.
-    `max_variants` caps this call's newly generated variants (balance-driven).
+    `max_variants` is a global budget: the maximum total new synthetic rows
+    this call may generate across all augmentation stages (0 = none).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     existing: list[Row] = []
@@ -681,17 +686,31 @@ def build_dataset(
             r.update(stamp)
         return new_rows
 
-    # paraphrase variants: legacy behavior (fill toward teacher.examples,
-    # CLI --max-variants caps) unless an augment block took over the config
-    run_paraphrase, para_cap = True, max_variants
-    if aug is not None and max_variants is None:
+    # `max_variants` is a GLOBAL budget: the maximum total new synthetic rows
+    # this invocation may generate across paraphrase, field-dropout, and
+    # counterfactual stages. Allocation is deterministic (pipeline order, each
+    # stage consumes what it generates). 0 disables synthetic work entirely;
+    # None means only the per-stage caps apply.
+    budget = max_variants
+
+    def _stage_cap(stage_cap: Optional[int]) -> Optional[int]:
+        """Effective ceiling for a stage: min of its own cap and the global
+        budget's remainder (None = unlimited)."""
+        if budget is None:
+            return stage_cap
+        remaining = max(0, budget - len(extra_rows))
+        return remaining if stage_cap is None else min(stage_cap, remaining)
+
+    run_paraphrase, para_cap = True, None  # legacy: fill toward teacher.examples
+    if aug is not None:
         run_paraphrase = aug.paraphrase is not None
         para_cap = aug.paraphrase.cap if aug.paraphrase else 0
     extra_rows: list[Row] = []
-    if run_paraphrase and para_cap != 0:
+    effective = _stage_cap(para_cap)
+    if run_paraphrase and effective != 0:
         variants_raw, sources = generate_variants(
             teacher, spec, train_reals, spec.teacher.examples,
-            n_new=para_cap, seed=spec.train.seed, hist_rows=train_rows,
+            cap=effective, seed=spec.train.seed, hist_rows=train_rows,
         )
         variant_rows = (
             label_items(teacher, spec, variants_raw, origin="variant")
@@ -699,17 +718,21 @@ def build_dataset(
         )
         extra_rows += _finish(variant_rows, sources, variants_raw)
 
-    if aug and aug.field_dropout and train_reals:
+    if aug and aug.field_dropout and train_reals and _stage_cap(None) != 0:
         d_items, d_sources = generate_field_dropout(
             spec, train_reals, aug.field_dropout.fields,
             aug.field_dropout.cap, random.Random(spec.train.seed + 2),
         )
+        remaining = _stage_cap(None)
+        if remaining is not None:
+            d_items, d_sources = d_items[:remaining], d_sources[:remaining]
         d_rows = label_items(teacher, spec, d_items, origin="dropout") if d_items else []
         extra_rows += _finish(d_rows, d_sources, d_items)
 
-    if aug and aug.counterfactual and train_reals:
+    cf_cap = _stage_cap(aug.counterfactual.cap) if aug and aug.counterfactual else 0
+    if aug and aug.counterfactual and train_reals and cf_cap != 0:
         cf_rows, hit_rate = counterfactual_rows(
-            teacher, spec, train_reals, aug.counterfactual.cap,
+            teacher, spec, train_reals, cf_cap,
             seed=spec.train.seed + 3, hist_rows=train_rows + extra_rows,
         )
         for r in cf_rows:

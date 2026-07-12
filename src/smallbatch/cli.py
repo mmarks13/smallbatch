@@ -257,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     lp.add_argument(
         "--max-variants", type=int,
-        help="cap newly generated synthetic variants (balance-driven top-up)",
+        help="global budget: max total new synthetic rows this run across "
+        "paraphrase/field-dropout/counterfactual (0 = no synthetic work)",
     )
     lp.set_defaults(fn=cmd_label)
 
