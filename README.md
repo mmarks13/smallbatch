@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/smallbatch_banner.png" alt="smallbatch — distill once, own the function" width="100%">
+  <img src="https://raw.githubusercontent.com/mmarks13/smallbatch/main/assets/smallbatch_banner.png" alt="smallbatch — distill once, own the function" width="100%">
 </p>
 
 *Small-batch distillation: compile a frontier model's ability on one narrow

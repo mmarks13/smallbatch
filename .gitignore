@@ -15,3 +15,8 @@ data/
 CLAUDE.local.md
 local/
 .claude/
+
+# internal review documents — never ship these
+PROJECT_EVALUATION.md
+V0.2_RELEASE_PLAN_REVIEW.md
+V0.2_RELEASE_PLAN_READINESS_REVIEW.md
