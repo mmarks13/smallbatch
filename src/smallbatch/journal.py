@@ -18,7 +18,7 @@ import datetime
 import json
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 EVENTS_FILE = "events.jsonl"
 LOCK_FILE = "lock"
@@ -52,7 +52,7 @@ class LabelJournal:
     # -- lifecycle -----------------------------------------------------------
 
     @classmethod
-    def open(cls, out_dir: Path, fingerprint: str) -> "LabelJournal":
+    def open(cls, out_dir: Path, fingerprint: str) -> LabelJournal:
         journal_dir = out_dir / "journal"
         journal_dir.mkdir(parents=True, exist_ok=True)
         j = cls(journal_dir, fingerprint)
@@ -154,7 +154,7 @@ class LabelJournal:
 
     # -- replay ---------------------------------------------------------------
 
-    def cached_stage(self, stage: str) -> Optional[list[dict]]:
+    def cached_stage(self, stage: str) -> list[dict] | None:
         """The stage's generated items (with provenance) iff generation
         COMPLETED before the crash; None means regenerate."""
         if stage not in self._stage_done:
@@ -180,7 +180,7 @@ class NullJournal:
     def record_probe(self, row_id: str, output: Any) -> None:
         pass
 
-    def cached_stage(self, stage: str) -> Optional[list[dict]]:
+    def cached_stage(self, stage: str) -> list[dict] | None:
         return None
 
     def close(self) -> None:

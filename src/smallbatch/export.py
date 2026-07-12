@@ -25,7 +25,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from . import artifacts
 from .spec import FunctionSpec, load_spec
@@ -177,7 +176,7 @@ class LlamaCpp:
     root: Path
     convert_hf: Path
     convert_lora: Path
-    quantize: Optional[Path]  # None is fine for --quant f16
+    quantize: Path | None  # None is fine for --quant f16
 
 
 _INSTALL_HINT = (
@@ -232,7 +231,7 @@ class ExportResult:
     export_dir: Path
     gguf: Path
     grammar: Path
-    modelfile: Optional[Path]  # None for adapter-only exports
+    modelfile: Path | None  # None for adapter-only exports
     quant: str
 
 

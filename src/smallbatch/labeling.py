@@ -8,7 +8,7 @@ import hashlib
 import json
 import random
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from . import prompts
 from .spec import FunctionSpec
@@ -146,7 +146,7 @@ def plan_variant_bands(
     spec: FunctionSpec,
     real: list[Row],
     target_total: int,
-    cap: Optional[int] = None,
+    cap: int | None = None,
 ) -> dict[Any, int]:
     """How many variants to request per score value: fill toward uniform
     coverage so rare bands exist in training. `cap` is a true ceiling on the
@@ -172,10 +172,10 @@ def generate_variants(
     spec: FunctionSpec,
     real: list[Row],
     target_total: int,
-    cap: Optional[int] = None,
+    cap: int | None = None,
     per_call: int = 20,
     seed: int = 17,
-    hist_rows: Optional[list[Row]] = None,
+    hist_rows: list[Row] | None = None,
 ) -> tuple[list[dict], list[list[str]]]:
     """Generate band-targeted synthetic items from `real` example rows.
 
@@ -249,7 +249,7 @@ def _cf_request(
     batch: list[Row],
     band: Any,
     spec_text: str,
-    feedback: Optional[str] = None,
+    feedback: str | None = None,
 ) -> list[tuple[dict, Row]]:
     """One counterfactual-edit call: (edited item, source row) pairs."""
     reply = teacher.complete(
@@ -284,7 +284,7 @@ def counterfactual_rows(
     hist_rows: list[Row],
     per_call: int = 5,
     journal=None,
-) -> tuple[list[Row], Optional[float]]:
+) -> tuple[list[Row], float | None]:
     """Minimal label-moving edits of train reals, targeted at thin bands
     (deficits measured over `hist_rows`) and independently relabeled.
 
@@ -299,7 +299,7 @@ def counterfactual_rows(
     spec_text = spec.spec_files_text()
     by_source_id = {r["id"]: r for r in train_reals}
 
-    def _cached_pairs(stage: str) -> Optional[list[tuple[dict, Row, Any]]]:
+    def _cached_pairs(stage: str) -> list[tuple[dict, Row, Any]] | None:
         cached = journal.cached_stage(stage)
         if cached is None:
             return None
@@ -424,7 +424,7 @@ def _out_agrees(spec: FunctionSpec, a: Any, b: Any) -> bool:
 def consistency_probe(
     teacher: Teacher, spec: FunctionSpec, rows: list[Row], n: int, seed: int = 17,
     journal=None,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Double-label a stratified sample of real rows with the input fields in
     shuffled order, and measure how often the teacher agrees with itself.
     That self-agreement is the ceiling on any student's gate agreement.
@@ -612,7 +612,7 @@ def write_dataset(
     spec: FunctionSpec,
     rows: list[Row],
     out_dir: Path,
-    probe: Optional[dict[str, Any]] = None,
+    probe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write labeled/train/dev/gate JSONL + meta for already-split rows."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -705,7 +705,7 @@ def _validate_gold(spec: FunctionSpec, items: list[dict]) -> dict[str, Any]:
 
 def _apply_retroactive_gold(
     rows: list[Row], gold_by_id: dict[str, Any]
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Annotate existing rows newly supplied with gold. A train/dev row moves
     to the gate, and every synthetic row derived from it is evicted — its
     source is now evaluation data. Returns None when nothing changed."""
@@ -735,7 +735,7 @@ def build_dataset(
     items: list[dict],
     out_dir: Path,
     append: bool = False,
-    max_variants: Optional[int] = None,
+    max_variants: int | None = None,
 ) -> dict[str, Any]:
     """The full labeling pipeline. Writes labeled/train/dev/gate JSONL + meta.
 
@@ -768,7 +768,7 @@ def _build_dataset(
     journal,
     gold_by_id: dict[str, Any],
     append: bool,
-    max_variants: Optional[int],
+    max_variants: int | None,
 ) -> dict[str, Any]:
     existing: list[Row] = []
     if append and (out_dir / "labeled.jsonl").exists():
@@ -856,7 +856,7 @@ def _build_dataset(
     # None means only the per-stage caps apply.
     budget = max_variants
 
-    def _stage_cap(stage_cap: Optional[int]) -> Optional[int]:
+    def _stage_cap(stage_cap: int | None) -> int | None:
         """Effective ceiling for a stage: min of its own cap and the global
         budget's remainder (None = unlimited)."""
         if budget is None:

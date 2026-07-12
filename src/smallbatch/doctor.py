@@ -12,7 +12,6 @@ import json
 import os
 import shutil as _shutil
 from pathlib import Path
-from typing import Optional
 
 from . import prompts
 from .labeling import read_jsonl, resolve_count
@@ -243,8 +242,8 @@ _ICONS = {"ok": "  ok ", "warn": "WARN ", "fail": "FAIL "}
 
 def run_doctor(
     spec: FunctionSpec,
-    items: Optional[list[dict]] = None,
-    data_dir: Optional[Path] = None,
+    items: list[dict] | None = None,
+    data_dir: Path | None = None,
     probe: bool = True,
 ) -> int:
     sections: list[tuple[str, list[Finding]]] = [

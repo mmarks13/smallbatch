@@ -7,9 +7,8 @@ import json
 import re
 import shutil
 from pathlib import Path
-from typing import Optional
 
-from .spec import FunctionSpec, load_spec
+from .spec import load_spec
 
 DEFAULT_ROOT = Path("artifacts")
 
@@ -26,7 +25,7 @@ def winner(manifest: dict) -> str:
     return (manifest.get("selection") or {}).get("winner", "lora")
 
 
-def candidate_record(manifest: dict, name: Optional[str] = None) -> Optional[dict]:
+def candidate_record(manifest: dict, name: str | None = None) -> dict | None:
     """A candidate's result record; synthesizes one for pre-v2 manifests so
     every consumer can speak the v2 shape."""
     name = name or winner(manifest)
@@ -48,7 +47,7 @@ def candidate_record(manifest: dict, name: Optional[str] = None) -> Optional[dic
 
 
 def candidate_is_usable(
-    manifest: dict, candidate: Optional[str] = None, allow_failed: bool = False
+    manifest: dict, candidate: str | None = None, allow_failed: bool = False
 ) -> bool:
     """One predicate for every consumer (run/load_fn/status/serve/export):
     a candidate is usable when its own gate passed, or the user explicitly
@@ -189,7 +188,7 @@ def versions(root: Path, name: str) -> list[Path]:
     )
 
 
-def latest(root: Path, name: str, passing_only: bool = True) -> Optional[Path]:
+def latest(root: Path, name: str, passing_only: bool = True) -> Path | None:
     for v in reversed(versions(root, name)):
         if not passing_only or artifact_is_usable(read_manifest(v)):
             return v
@@ -199,9 +198,9 @@ def latest(root: Path, name: str, passing_only: bool = True) -> Optional[Path]:
 def resolve_version(
     root: Path,
     name: str,
-    version: Optional[str],
+    version: str | None,
     allow_failed: bool,
-    candidate: Optional[str] = None,
+    candidate: str | None = None,
 ) -> Path:
     """Pick an artifact version dir (explicit name or latest), refusing
     unusable candidates unless allow_failed. `candidate` scopes the usability
@@ -232,7 +231,7 @@ def resolve_version(
 SOURCE_UNAVAILABLE = "source comparison unavailable"
 
 
-def artifact_integrity(version_dir: Path) -> Optional[str]:
+def artifact_integrity(version_dir: Path) -> str | None:
     """None when the ARCHIVED spec + spec_files still reproduce the manifest's
     recorded spec_hash; otherwise the reason the artifact itself is damaged.
     Self-contained: never consults the original project files."""
@@ -249,7 +248,7 @@ def artifact_integrity(version_dir: Path) -> Optional[str]:
     return None
 
 
-def source_drift(version_dir: Path) -> Optional[str]:
+def source_drift(version_dir: Path) -> str | None:
     """None when the live source spec still matches the artifact snapshot;
     SOURCE_UNAVAILABLE when the original project can't be found (a moved or
     deleted source never makes a self-contained artifact unusable); otherwise
@@ -272,7 +271,7 @@ def source_drift(version_dir: Path) -> Optional[str]:
     return None
 
 
-def staleness(version_dir: Path) -> Optional[str]:
+def staleness(version_dir: Path) -> str | None:
     """Legacy single-string view: an integrity failure, else source drift.
     A missing source project is NOT staleness — the artifact is an immutable
     snapshot and stays valid."""

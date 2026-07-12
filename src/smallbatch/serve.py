@@ -20,8 +20,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import artifacts, prompts
 from .spec import FunctionSpec, load_spec

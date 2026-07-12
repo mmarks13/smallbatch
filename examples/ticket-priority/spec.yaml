@@ -43,5 +43,5 @@ train:
   # any open-weights causal LM works here; your adapter inherits the base
   # model's license (LFM Open License conditions commercial use above $10M
   # revenue — swap the base if that matters for you)
-  base: LiquidAI/LFM2.5-350M-Base
+  base: ibm-granite/granite-4.0-350m
   precision: auto # fp32 on pre-Ampere, bf16 on Ampere+; qlora for bigger bases

@@ -69,7 +69,6 @@ def _make_dev_callback(spec: FunctionSpec, tokenizer, dev_rows: list[Row], adapt
 
     from . import prompts
     from .evaluate import compute_metrics, generate_batch
-
     from .labeling import row_output
 
     dev_texts = [prompts.student_prompt(spec, r["input"]) for r in dev_rows]

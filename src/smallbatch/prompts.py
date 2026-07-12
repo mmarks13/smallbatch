@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Optional
+from typing import Any
 
 from .spec import SCALAR_FIELD, FunctionSpec
 
@@ -51,7 +51,7 @@ def student_completion(spec: FunctionSpec, output: Any, reason: str = "") -> str
 _MAX_COMPLETIONS = 5000
 
 
-def allowed_completions(spec: FunctionSpec) -> Optional[list[str]]:
+def allowed_completions(spec: FunctionSpec) -> list[str] | None:
     """Every completion the student may legally emit (see student_completion),
     for constrained decoding. None in rationale mode (free text can't be
     enumerated) or when the multi-field cross product is too large — those
@@ -107,7 +107,7 @@ def teacher_label_prompt(
     spec: FunctionSpec,
     items: list[dict[str, Any]],
     spec_files_text: str,
-    field_order: Optional[list[str]] = None,
+    field_order: list[str] | None = None,
 ) -> str:
     ref = f"\nReference files:\n{spec_files_text}\n" if spec_files_text else ""
     order = field_order if field_order is not None else list(spec.input_schema)
@@ -168,7 +168,7 @@ def teacher_counterfactual_prompt(
     sources: list[dict[str, Any]],
     band: str,
     spec_files_text: str,
-    feedback: Optional[str] = None,
+    feedback: str | None = None,
 ) -> str:
     """Ask for a MINIMAL edit of each source item aimed at a target label.
     Minimal edits trace the rubric's decision boundary — they teach the
@@ -201,7 +201,7 @@ _SCORE_RE = re.compile(r"score:\s*(-?\d+)", re.IGNORECASE)
 _INT_RE = re.compile(r"-?\d+")
 
 
-def _parse_field(field, text: str) -> Optional[Any]:
+def _parse_field(field, text: str) -> Any | None:
     """Parse and validate one field's value out of `text`."""
     if field.type == "int":
         m = _INT_RE.search(text)
@@ -220,7 +220,7 @@ def _parse_field(field, text: str) -> Optional[Any]:
     return min(hits)[1] if hits else None
 
 
-def parse_output(spec: FunctionSpec, text: str) -> Optional[Any]:
+def parse_output(spec: FunctionSpec, text: str) -> Any | None:
     """Parse a student/zero-shot generation into a validated output value:
     a scalar for legacy contracts, a {field: value} dict (missing/invalid
     fields are None) for multi-field contracts — or None if nothing parsed."""
@@ -242,7 +242,7 @@ def parse_output(spec: FunctionSpec, text: str) -> Optional[Any]:
     return None if all(v is None for v in out.values()) else out
 
 
-def incomplete_fields(spec: FunctionSpec, output: Optional[Any]) -> list[str]:
+def incomplete_fields(spec: FunctionSpec, output: Any | None) -> list[str]:
     """The contract fields `output` fails to satisfy — [] means fully valid.
 
     The ONE completeness check for every runtime boundary (Python runtime,

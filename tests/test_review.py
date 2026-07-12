@@ -72,10 +72,10 @@ def test_run_review_accept_reject_and_save(tmp_path):
     out = []
     run_review(SPEC, tmp_path, make_args(), input_fn=lambda _: next(answers),
                print_fn=out.append)
-    saved = [json.loads(l) for l in (tmp_path / "labeled.jsonl").read_text().splitlines()]
+    saved = [json.loads(line) for line in (tmp_path / "labeled.jsonl").read_text().splitlines()]
     assert saved[0]["review"]["status"] == "accepted"
     assert saved[1]["review"]["status"] == "rejected"
-    train = [json.loads(l) for l in (tmp_path / "train.jsonl").read_text().splitlines()]
+    train = [json.loads(line) for line in (tmp_path / "train.jsonl").read_text().splitlines()]
     assert len(train) == 5  # rejected row excluded from splits
     assert {r["id"] for r in train} == {"r0", "r2", "r3", "r4", "r5"}
     meta = json.loads((tmp_path / "meta.json").read_text())
@@ -91,5 +91,5 @@ def test_save_writes_all_split_files(tmp_path):
     assert counts == {"rejected": 1, "unreviewed": 5}
     dev = (tmp_path / "dev.jsonl").read_text().strip()
     assert dev == ""  # the only dev row was rejected
-    gate = [json.loads(l) for l in (tmp_path / "gate.jsonl").read_text().splitlines()]
+    gate = [json.loads(line) for line in (tmp_path / "gate.jsonl").read_text().splitlines()]
     assert len(gate) == 1

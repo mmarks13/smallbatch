@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:  # the release workflow reuses this as its gate
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      # the unit suite is deliberately torch-free at runtime, but the package
+      # imports must resolve; install CPU torch to keep the job small
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check src tests
+      - name: Unit tests (CPU-only, no network)
+        run: pytest -q
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install -U pip build
+          python -m build
+      - name: Wheel smoke (install + CLI + torch-free tfidf path)
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install -q dist/*.whl --extra-index-url https://download.pytorch.org/whl/cpu
+          /tmp/smoke/bin/smallbatch --help
+          /tmp/smoke/bin/smallbatch init classifier smoke-fn --dir /tmp/smoke-fn
+          /tmp/smoke/bin/python - <<'PY'
+          import importlib.metadata
+          import smallbatch
+          assert importlib.metadata.version("smallbatch") == smallbatch.__version__
+          # the tfidf candidate trains + predicts without touching torch
+          import sys
+          from pathlib import Path
+          from smallbatch.candidates import TFIDF_DIR, predict_tfidf, train_tfidf
+          from smallbatch.spec import FunctionSpec
+          spec = FunctionSpec(
+              name="smoke", description="-", input_schema={"t": "str"},
+              output={"type": "enum", "labels": ["a", "b"]}, rubric="-",
+              teacher={"backend": "claude-cli", "model": "sonnet"},
+          )
+          rows = [
+              {"id": str(i), "input": {"t": w}, "score": s, "origin": "real", "split": "train"}
+              for i, (w, s) in enumerate(
+                  [("apple fruit", "a"), ("apricot fruit", "a"), ("banana loaf", "b"), ("bread loaf", "b")]
+              )
+          ]
+          out = Path("/tmp/smoke-artifact") / TFIDF_DIR
+          train_tfidf(spec, rows, out)
+          assert predict_tfidf(out, spec, [{"t": "fruit apple"}]) == ["a"]
+          assert "torch" not in sys.modules
+          print("wheel smoke ok")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

@@ -10,7 +10,7 @@ compile still exits 2.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from .spec import FunctionSpec
 
@@ -89,8 +89,8 @@ def _columns_for(spec: FunctionSpec):
 def build_decision_text(
     spec: FunctionSpec,
     manifest: dict,
-    report: Optional[dict],
-    displaced: Optional[str] = None,
+    report: dict | None,
+    displaced: str | None = None,
 ) -> str:
     """The complete decision summary shown before the acceptance prompt."""
     candidates = manifest.get("candidates") or {}

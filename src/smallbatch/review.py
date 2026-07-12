@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import datetime
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 from .labeling import (
     Row,
@@ -86,7 +86,7 @@ def format_row(spec: FunctionSpec, row: Row, pos: int, total: int) -> str:
 
 def apply_edit(
     spec: FunctionSpec, row: Row, ask: Callable[[str], str]
-) -> Optional[str]:
+) -> str | None:
     """Prompt for new value(s); returns an error message or None on success."""
     original = row_output(spec, row)
     if spec.output.is_scalar:

@@ -91,7 +91,7 @@ def test_build_dataset_end_to_end(tmp_path):
     assert first["teacher_model"] and first["origin"] == "real"
     assert first["id"] and first["split"] in ("train", "dev", "gate")
     # variants are train-only and carry the ids of the reals that seeded them
-    rows = [json.loads(l) for l in labeled]
+    rows = [json.loads(line) for line in labeled]
     real_ids = {r["id"] for r in rows if r["origin"] == "real"}
     train_real_ids = {r["id"] for r in rows if r["origin"] == "real" and r["split"] == "train"}
     for v in (r for r in rows if r["origin"] == "variant"):
@@ -252,7 +252,7 @@ def test_build_dataset_augment_block_replaces_legacy(tmp_path):
         tmp_path,
     )
     assert meta["variants"] == 0 and meta["dropout"] == 3
-    rows_all = [json.loads(l) for l in (tmp_path / "labeled.jsonl").read_text().splitlines()]
+    rows_all = [json.loads(line) for line in (tmp_path / "labeled.jsonl").read_text().splitlines()]
     dropped = [r for r in rows_all if r["origin"] == "dropout"]
     assert len(dropped) == 3
     for r in dropped:
@@ -301,9 +301,9 @@ def test_build_dataset_runs_probe_into_meta(tmp_path):
     assert meta["teacher_self_agreement"] == 1.0  # FakeTeacher always says 1
     assert meta["probe_n"] == 5
     probed = [
-        json.loads(l)
-        for l in (tmp_path / "labeled.jsonl").read_text().splitlines()
-        if "probe_output" in l
+        json.loads(line)
+        for line in (tmp_path / "labeled.jsonl").read_text().splitlines()
+        if "probe_output" in line
     ]
     assert len(probed) == 5
 
@@ -313,14 +313,14 @@ def test_append_keeps_gate_sticky_and_dedupes(tmp_path):
     items = [{"title": f"real{i}"} for i in range(10)]
     build_dataset(teacher, SPEC, items, tmp_path)
     gate_before = {
-        json.loads(l)["id"] for l in (tmp_path / "gate.jsonl").read_text().splitlines()
+        json.loads(line)["id"] for line in (tmp_path / "gate.jsonl").read_text().splitlines()
     }
 
     more = items[:5] + [{"title": f"new{i}"} for i in range(20)]  # 5 dupes + 20 new
     meta = build_dataset(teacher, SPEC, more, tmp_path, append=True, max_variants=0)
     assert meta["real"] == 30  # dupes skipped, not relabeled
     gate_after = {
-        json.loads(l)["id"] for l in (tmp_path / "gate.jsonl").read_text().splitlines()
+        json.loads(line)["id"] for line in (tmp_path / "gate.jsonl").read_text().splitlines()
     }
     assert gate_before <= gate_after  # sticky: nothing ever leaves the gate
     assert len(gate_after) == 6  # 0.2 of 30 reals
@@ -337,7 +337,7 @@ def test_legacy_dataset_migrates_holdout_to_gate(tmp_path):
         FakeTeacher(), SPEC, [{"title": "brand-new"}], tmp_path,
         append=True, max_variants=0,
     )
-    gate = [json.loads(l) for l in (tmp_path / "gate.jsonl").read_text().splitlines()]
+    gate = [json.loads(line) for line in (tmp_path / "gate.jsonl").read_text().splitlines()]
     old_titles = {r["input"]["title"] for r in holdout}
     assert old_titles <= {r["input"]["title"] for r in gate}
     assert meta["real"] == 21

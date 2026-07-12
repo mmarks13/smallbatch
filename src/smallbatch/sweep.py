@@ -43,7 +43,7 @@ class SweepSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
     @model_validator(mode="after")
-    def _nonempty(self) -> "SweepSpec":
+    def _nonempty(self) -> SweepSpec:
         if not self.models:
             raise ValueError("sweep needs at least one model")
         if not self.arms:

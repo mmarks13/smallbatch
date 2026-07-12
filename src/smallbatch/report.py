@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional
 
 from .labeling import Row, row_output
 from .metrics import DEFAULT_SEVERE_DELTA, spearman_rho
@@ -237,12 +236,12 @@ def build_report(
     spec: FunctionSpec,
     gate_rows: list[Row],
     adapter: dict,
-    zeroshot: Optional[dict],
+    zeroshot: dict | None,
     gate: dict,
     training: dict,
-    teacher_probe: Optional[dict] = None,
-    candidates: Optional[dict] = None,
-    selection: Optional[dict] = None,
+    teacher_probe: dict | None = None,
+    candidates: dict | None = None,
+    selection: dict | None = None,
 ) -> dict:
     """Assemble the full eval report from compile outputs. `adapter` is the
     WINNING candidate's gate metrics (name kept for report-shape stability);
@@ -374,8 +373,8 @@ def build_report(
 
 
 def _candidates_section(
-    candidates: Optional[dict], selection: Optional[dict]
-) -> Optional[dict]:
+    candidates: dict | None, selection: dict | None
+) -> dict | None:
     """Compact per-candidate comparison sourced from the candidate records —
     never recomputed. Values here are exactly what the manifest carries."""
     if not candidates:
@@ -401,7 +400,7 @@ def _candidates_section(
 
 def _gold_sections(
     spec: FunctionSpec, gate_rows: list[Row], preds: list
-) -> tuple[Optional[dict], list[str]]:
+) -> tuple[dict | None, list[str]]:
     """Three-way breakdown over the gate rows that carry a gold annotation:
     teacher-vs-gold (is the teacher even right?), student-vs-gold (is the
     compiled function right?), student-vs-teacher (imitation — the verdict's

@@ -1,6 +1,6 @@
 [project]
 name = "smallbatch"
-version = "0.1.0"
+version = "0.2.0"
 description = "Small-batch distillation: compile a frontier model's ability on one narrow task into a small local model."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,7 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 qlora = ["bitsandbytes>=0.46.1"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6", "build>=1.2"]
 
 [project.urls]
 Homepage = "https://github.com/mmarks13/smallbatch"
@@ -54,3 +54,21 @@ exclude = ["assets/"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/smallbatch"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "A"]
+ignore = [
+    "E501",  # long lines: prose-heavy strings/comments; length is advisory here
+    "A001",  # `compile` is the deliberate product verb (smallbatch.compile)
+    "A002",  # ...and appears as a parameter name in its CLI plumbing
+    "B023",  # closure-over-loop-var: reviewed case-by-case, noqa'd where real
+    "B905",  # zip strict=: aligned-list zips are pervasive and length-checked upstream
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E731"]  # tests bind small lambdas for brevity

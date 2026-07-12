@@ -23,7 +23,7 @@ Conventions, applied everywhere:
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from .spec import FieldSpec, FunctionSpec
 
@@ -31,7 +31,7 @@ from .spec import FieldSpec, FunctionSpec
 DEFAULT_SEVERE_DELTA = 3
 
 
-def wilson_ci(k: int, n: int, z: float = 1.96) -> Optional[tuple[float, float]]:
+def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
     """Wilson score interval for a proportion k/n — honest about small n,
     where a point verdict is otherwise statistical theater."""
     if n == 0:
@@ -43,7 +43,7 @@ def wilson_ci(k: int, n: int, z: float = 1.96) -> Optional[tuple[float, float]]:
     return (round(max(0.0, center - half), 4), round(min(1.0, center + half), 4))
 
 
-def pearson_r(xs: list[float], ys: list[float]) -> Optional[float]:
+def pearson_r(xs: list[float], ys: list[float]) -> float | None:
     n = len(xs)
     if n < 2:
         return None
@@ -72,13 +72,13 @@ def _ranks(xs: list[float]) -> list[float]:
     return ranks
 
 
-def spearman_rho(xs: list[float], ys: list[float]) -> Optional[float]:
+def spearman_rho(xs: list[float], ys: list[float]) -> float | None:
     if len(xs) < 2:
         return None
     return pearson_r(_ranks(xs), _ranks(ys))
 
 
-def nearest_rank_p90(values: list[float]) -> Optional[float]:
+def nearest_rank_p90(values: list[float]) -> float | None:
     """Nearest-rank 90th percentile: the ceil(0.9*n)-th smallest value.
     Deterministic by definition — no interpolation-mode ambiguity."""
     if not values:
@@ -208,7 +208,7 @@ def compare(
     spec: FunctionSpec,
     preds: list,
     refs: list,
-    severe_delta: Optional[int] = None,
+    severe_delta: int | None = None,
 ) -> dict[str, Any]:
     """The one comparison shape. Scalar contracts return the field's metric
     dict; structured contracts return joint agreement/exact/invalid plus the

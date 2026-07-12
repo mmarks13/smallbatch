@@ -29,7 +29,7 @@ gate:
   agreement: 0.85                   # acceptance bar (int: within +/-1; enum: exact)
   must_beat_zeroshot: true
 train:
-  base: LiquidAI/LFM2.5-350M-Base   # adapters inherit the base model's license
+  base: ibm-granite/granite-4.0-350m  # adapters inherit the base model's license (Apache-2.0)
   precision: auto
 """
 

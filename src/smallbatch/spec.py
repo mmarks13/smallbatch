@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -35,8 +35,8 @@ class FieldSpec(BaseModel):
     (a controlled reason code is just an enum). Type is inferred from which
     constraint is present — no free-text fields."""
 
-    range: Optional[tuple[int, int]] = None
-    labels: Optional[list[str]] = None
+    range: tuple[int, int] | None = None
+    labels: list[str] | None = None
 
     model_config = {"extra": "forbid"}
 
@@ -55,7 +55,7 @@ class FieldSpec(BaseModel):
         return data
 
     @model_validator(mode="after")
-    def _check(self) -> "FieldSpec":
+    def _check(self) -> FieldSpec:
         if (self.range is None) == (self.labels is None):
             raise ValueError("an output field needs exactly one of `range` or `labels`")
         if self.range is not None:
@@ -161,11 +161,11 @@ class OutputSpec(BaseModel):
         return self.scalar.type if self.is_scalar else "object"
 
     @property
-    def range(self) -> Optional[tuple[int, int]]:
+    def range(self) -> tuple[int, int] | None:
         return self.scalar.range if self.is_scalar else None
 
     @property
-    def labels(self) -> Optional[list[str]]:
+    def labels(self) -> list[str] | None:
         return self.scalar.labels if self.is_scalar else None
 
 
@@ -185,11 +185,11 @@ class TeacherSpec(BaseModel):
     # agrees with itself — the ceiling on any student's agreement. 0 = off.
     consistency: int = 0
     # openai-compatible only:
-    base_url: Optional[str] = None
+    base_url: str | None = None
     api_key_env: str = "OPENAI_API_KEY"
 
     @model_validator(mode="after")
-    def _check_splits(self) -> "TeacherSpec":
+    def _check_splits(self) -> TeacherSpec:
         for name in ("holdout", "dev"):
             v = getattr(self, name)
             if isinstance(v, float) and not 0 <= v < 1:
@@ -209,7 +209,7 @@ class GateSpec(BaseModel):
     # for int outputs: fraction of the gate split within +/-1 of the teacher
     # label; for enum outputs: exact-match fraction. `agreement` is the
     # preferred name; `agreement_pm1` is kept as the legacy alias.
-    agreement: Optional[float] = None
+    agreement: float | None = None
     agreement_pm1: float = 0.85
     must_beat_zeroshot: bool = True
     # the model must also beat the BEST constant predictor on the gate labels
@@ -227,7 +227,7 @@ class GateSpec(BaseModel):
     tie_margin: float = 0.02
 
     @model_validator(mode="after")
-    def _check_bounds(self) -> "GateSpec":
+    def _check_bounds(self) -> GateSpec:
         for label, v in [
             ("gate.agreement", self.agreement),
             ("gate.agreement_pm1", self.agreement_pm1),
@@ -249,13 +249,13 @@ class GateSpec(BaseModel):
 
 
 class TrainSpec(BaseModel):
-    # note: an adapter inherits its base model's license. LFM2.5 ships under
-    # the LFM Open License (commercial use conditioned above $10M revenue) —
-    # swap the base if that matters for you.
-    base: str = "LiquidAI/LFM2.5-350M-Base"
+    # note: an adapter inherits its base model's license. The default is
+    # Apache-2.0 (ibm-granite Granite 4.0 350M instruct, dense transformer —
+    # not the hybrid -h- variant, so GGUF export and older GPUs work).
+    base: str = "ibm-granite/granite-4.0-350m"
     precision: Literal["auto", "fp32", "bf16", "qlora"] = "auto"
     lora_r: int = 16
-    lora_alpha: Optional[int] = None  # defaults to 2*r
+    lora_alpha: int | None = None  # defaults to 2*r
     lora_dropout: float = 0.05
     use_dora: bool = False
     rationale_distillation: bool = False
@@ -263,8 +263,8 @@ class TrainSpec(BaseModel):
     # `patience` epochs (patience: null disables early stopping). `epochs` is
     # the legacy alias for max_epochs.
     max_epochs: int = 12
-    epochs: Optional[int] = None
-    patience: Optional[int] = 2
+    epochs: int | None = None
+    patience: int | None = 2
     min_delta: float = 0.0
     learning_rate: float = 2e-4
     batch_size: int = 8
@@ -274,20 +274,20 @@ class TrainSpec(BaseModel):
     # TRL's default "chunked_nll" loss casts the lm_head weight to fp32
     # (~3.8GB for Qwen's 151k vocab) and OOMs 12GB cards; "nll" materializes
     # plain logits instead, which is smaller for huge-vocab models
-    loss_type: Optional[Literal["nll", "chunked_nll"]] = None
+    loss_type: Literal["nll", "chunked_nll"] | None = None
 
     # reject unknown keys so a typo'd sweep override (e.g. bathc_size) fails
     # loudly at spec-load time instead of being silently ignored
     model_config = {"extra": "forbid"}
 
     @model_validator(mode="after")
-    def _epochs_alias(self) -> "TrainSpec":
+    def _epochs_alias(self) -> TrainSpec:
         if self.epochs is not None and "max_epochs" not in self.model_fields_set:
             self.max_epochs = self.epochs
         return self
 
     @model_validator(mode="after")
-    def _check_bounds(self) -> "TrainSpec":
+    def _check_bounds(self) -> TrainSpec:
         positive = {
             "lora_r": self.lora_r,
             "max_epochs": self.max_epochs,
@@ -344,9 +344,9 @@ class AugmentSpec(BaseModel):
     the legacy behavior (variants toward teacher.examples): only the kinds
     listed here run."""
 
-    paraphrase: Optional[ParaphraseSpec] = None
-    field_dropout: Optional[FieldDropoutSpec] = None
-    counterfactual: Optional[CounterfactualSpec] = None
+    paraphrase: ParaphraseSpec | None = None
+    field_dropout: FieldDropoutSpec | None = None
+    counterfactual: CounterfactualSpec | None = None
     model_config = {"extra": "forbid"}
 
 
@@ -360,22 +360,22 @@ class FunctionSpec(BaseModel):
     teacher: TeacherSpec
     gate: GateSpec = Field(default_factory=GateSpec)
     train: TrainSpec = Field(default_factory=TrainSpec)
-    augment: Optional[AugmentSpec] = None
+    augment: AugmentSpec | None = None
 
     # set by load_spec so spec_files resolve relative to the YAML's directory
     _base_dir: Path = Path(".")
     # set by load_spec; compile() copies the original YAML into the artifact
-    _source_path: Optional[Path] = None
+    _source_path: Path | None = None
 
     model_config = {"extra": "forbid"}
 
     @model_validator(mode="after")
-    def _check_name(self) -> "FunctionSpec":
+    def _check_name(self) -> FunctionSpec:
         validate_slug(self.name, "function name")
         return self
 
     @model_validator(mode="after")
-    def _check_reserved_input_fields(self) -> "FunctionSpec":
+    def _check_reserved_input_fields(self) -> FunctionSpec:
         # items carry trusted reference answers under a reserved `gold` key;
         # an input field with that name would be silently shadowed
         if "gold" in self.input_schema:
@@ -386,7 +386,7 @@ class FunctionSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_augment_fields(self) -> "FunctionSpec":
+    def _check_augment_fields(self) -> FunctionSpec:
         if self.augment and self.augment.field_dropout:
             unknown = [
                 f for f in self.augment.field_dropout.fields
@@ -399,7 +399,7 @@ class FunctionSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_rationale_name(self) -> "FunctionSpec":
+    def _check_rationale_name(self) -> FunctionSpec:
         # multi-field completions prefix the teacher rationale as `rationale:`
         if (
             self.train.rationale_distillation

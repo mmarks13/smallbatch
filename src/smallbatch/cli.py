@@ -15,7 +15,7 @@ from .spec import load_spec
 def _load_items(path: Path) -> list[dict]:
     text = path.read_text()
     if path.suffix == ".jsonl":
-        return [json.loads(l) for l in text.splitlines() if l.strip()]
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
     data = json.loads(text)
     if isinstance(data, dict):  # tolerate {"items": [...]}-shaped files
         for v in data.values():
