@@ -40,12 +40,45 @@ class FieldSpec(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    @model_validator(mode="before")
+    @classmethod
+    def _hint_yaml_booleans(cls, data):
+        # unquoted yes/no/true/false/on/off in YAML parse as booleans, which
+        # would otherwise surface as an opaque string-type pydantic error
+        if isinstance(data, dict) and any(
+            isinstance(v, bool) for v in (data.get("labels") or [])
+        ):
+            raise ValueError(
+                "labels contain YAML booleans — unquoted yes/no/true/false/on/off "
+                'parse as booleans; quote them: labels: ["yes", "no"]'
+            )
+        return data
+
     @model_validator(mode="after")
     def _check(self) -> "FieldSpec":
         if (self.range is None) == (self.labels is None):
             raise ValueError("an output field needs exactly one of `range` or `labels`")
-        if self.labels is not None and not self.labels:
-            raise ValueError("`labels` must be non-empty")
+        if self.range is not None:
+            lo, hi = self.range
+            if lo > hi:
+                raise ValueError(f"range [{lo}, {hi}] is reversed — no legal values")
+        if self.labels is not None:
+            if not self.labels:
+                raise ValueError("`labels` must be non-empty")
+            seen: dict[str, str] = {}
+            for lb in self.labels:
+                if "\n" in lb or "\r" in lb:
+                    raise ValueError(f"label {lb!r} contains a newline")
+                if not lb.strip():
+                    raise ValueError("labels must be non-blank")
+                key = lb.strip().casefold()
+                if key in seen:
+                    raise ValueError(
+                        f"labels {seen[key]!r} and {lb!r} collide "
+                        "(duplicate after trimming/case-folding — parsing is "
+                        "case-insensitive)"
+                    )
+                seen[key] = lb
         return self
 
     @property
@@ -165,6 +198,10 @@ class TeacherSpec(BaseModel):
                 raise ValueError(f"teacher.{name} count must be >= 0")
         if self.consistency < 0:
             raise ValueError("teacher.consistency must be >= 0")
+        if self.batch_size < 1:
+            raise ValueError("teacher.batch_size must be >= 1")
+        if self.examples < 0:
+            raise ValueError("teacher.examples must be >= 0")
         return self
 
 
@@ -184,6 +221,19 @@ class GateSpec(BaseModel):
     # int outputs: |pred - reference| >= severe_delta counts as a severe miss
     # in reports and decision tables
     severe_delta: int = 3
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> "GateSpec":
+        for label, v in [
+            ("gate.agreement", self.agreement),
+            ("gate.agreement_pm1", self.agreement_pm1),
+            *((f"gate.fields.{k}", t) for k, t in self.fields.items()),
+        ]:
+            if v is not None and not 0 <= v <= 1:
+                raise ValueError(f"{label} must be a fraction in [0, 1], got {v}")
+        if self.severe_delta < 1:
+            raise ValueError("gate.severe_delta must be >= 1")
+        return self
 
     @property
     def threshold(self) -> float:
@@ -229,6 +279,31 @@ class TrainSpec(BaseModel):
     def _epochs_alias(self) -> "TrainSpec":
         if self.epochs is not None and "max_epochs" not in self.model_fields_set:
             self.max_epochs = self.epochs
+        return self
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> "TrainSpec":
+        positive = {
+            "lora_r": self.lora_r,
+            "max_epochs": self.max_epochs,
+            "learning_rate": self.learning_rate,
+            "batch_size": self.batch_size,
+            "eval_batch_size": self.eval_batch_size,
+            "max_seq_len": self.max_seq_len,
+        }
+        if self.epochs is not None:
+            positive["epochs"] = self.epochs
+        if self.patience is not None:
+            positive["patience"] = self.patience
+        if self.lora_alpha is not None:
+            positive["lora_alpha"] = self.lora_alpha
+        for name, v in positive.items():
+            if v <= 0:
+                raise ValueError(f"train.{name} must be positive, got {v}")
+        if not 0 <= self.lora_dropout < 1:
+            raise ValueError(f"train.lora_dropout must be in [0, 1), got {self.lora_dropout}")
+        if self.min_delta < 0:
+            raise ValueError(f"train.min_delta must be >= 0, got {self.min_delta}")
         return self
 
     @property

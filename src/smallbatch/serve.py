@@ -42,8 +42,12 @@ def handle_call(
     except Exception as e:  # noqa: BLE001 - surface backend failures as 502
         return 502, {"error": f"generation backend failed: {e}"}
     output = prompts.parse_output(spec, raw)
-    if output is None:
-        return 422, {"error": "output failed contract validation", "raw": raw}
+    bad = prompts.incomplete_fields(spec, output)
+    if bad:  # a partially-parsed structured output is a violation, not a 200
+        return 422, {
+            "error": f"output failed contract validation (fields: {', '.join(bad)})",
+            "raw": raw,
+        }
     return 200, {"output": output, "raw": raw}
 
 

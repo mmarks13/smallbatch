@@ -184,3 +184,35 @@ def test_function_name_slug_validation(tmp_path):
             load_spec(write_spec(tmp_path, MINIMAL.replace("name: toy", f"name: {json.dumps(bad)}")))
     ok = load_spec(write_spec(tmp_path, MINIMAL.replace("name: toy", "name: Ticket-priority_2.1")))
     assert ok.name == "Ticket-priority_2.1"
+
+
+def test_reversed_range_rejected(tmp_path):
+    bad = MINIMAL.replace("range: [0, 10]", "range: [10, 0]")
+    with pytest.raises(ValueError, match="reversed"):
+        load_spec(write_spec(tmp_path, bad))
+
+
+def test_label_traps_rejected(tmp_path):
+    enum = MINIMAL.replace("{type: int, range: [0, 10]}", "{type: enum, labels: %s}")
+    with pytest.raises(ValueError, match="quote them"):
+        load_spec(write_spec(tmp_path, enum % "[yes, no]"))  # YAML booleans
+    with pytest.raises(ValueError, match="collide"):
+        load_spec(write_spec(tmp_path, enum % '["High", "high"]'))
+    with pytest.raises(ValueError, match="newline"):
+        load_spec(write_spec(tmp_path, enum % '["a\\nb", "c"]'))
+    ok = load_spec(write_spec(tmp_path, enum % '["High", "Low"]'))
+    assert ok.output.labels == ["High", "Low"]
+
+
+def test_gate_threshold_bounds(tmp_path):
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        load_spec(write_spec(tmp_path, MINIMAL + "gate: {agreement: 1.5}\n"))
+    with pytest.raises(ValueError, match="severe_delta"):
+        load_spec(write_spec(tmp_path, MINIMAL + "gate: {severe_delta: 0}\n"))
+
+
+def test_train_bounds(tmp_path):
+    for bad in ("{batch_size: 0}", "{learning_rate: -1}", "{lora_dropout: 1.0}",
+                "{max_epochs: 0}", "{lora_r: -8}"):
+        with pytest.raises(ValueError, match="train\\."):
+            load_spec(write_spec(tmp_path, MINIMAL + f"train: {bad}\n"))

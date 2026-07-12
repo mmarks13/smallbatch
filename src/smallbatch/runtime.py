@@ -19,9 +19,15 @@ class CompiledFunction:
         self._max_new = prompts.completion_budget(spec)
 
     def __call__(self, item: dict[str, Any]) -> Any:
-        return self.batch([item])[0]
+        out = self.batch([item])[0]
+        if out is None:
+            raise ValueError("model output failed contract validation")
+        return out
 
     def batch(self, items: list[dict[str, Any]]) -> list[Any]:
+        """Outputs aligned with `items`; an output that fails the contract
+        (including a partially-parsed structured output) is None, never a
+        partial object."""
         for it in items:
             missing = [k for k in self.spec.input_schema if k not in it]
             if missing:
@@ -32,7 +38,10 @@ class CompiledFunction:
             batch_size=self.spec.train.eval_batch_size,
             allowed_completions=prompts.allowed_completions(self.spec),
         )
-        return [prompts.parse_output(self.spec, t) for t in raw]
+        parsed = [prompts.parse_output(self.spec, t) for t in raw]
+        return [
+            None if prompts.incomplete_fields(self.spec, p) else p for p in parsed
+        ]
 
 
 def load_fn(

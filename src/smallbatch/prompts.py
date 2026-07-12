@@ -13,7 +13,7 @@ import json
 import re
 from typing import Any, Optional
 
-from .spec import FunctionSpec
+from .spec import SCALAR_FIELD, FunctionSpec
 
 PROMPT_VERSION = 1
 
@@ -240,6 +240,26 @@ def parse_output(spec: FunctionSpec, text: str) -> Optional[Any]:
         )
         out[name] = _parse_field(field, m.group(1)) if m else None
     return None if all(v is None for v in out.values()) else out
+
+
+def incomplete_fields(spec: FunctionSpec, output: Optional[Any]) -> list[str]:
+    """The contract fields `output` fails to satisfy — [] means fully valid.
+
+    The ONE completeness check for every runtime boundary (Python runtime,
+    HTTP serve): a multi-field output with any None/missing field is a
+    contract violation, not a partial success.
+    """
+    if output is None:
+        return list(spec.output.fields)
+    if spec.output.is_scalar:
+        return [] if output in spec.output.scalar.values() else [SCALAR_FIELD]
+    if not isinstance(output, dict):
+        return list(spec.output.fields)
+    return [
+        name
+        for name, field in spec.output.fields.items()
+        if output.get(name) not in field.values()
+    ]
 
 
 def completion_budget(spec: FunctionSpec) -> int:

@@ -61,3 +61,26 @@ def test_bundle_readme_mentions_all_runtimes():
     for needle in ("llama-cli", "llama-server", "ollama create", "smallbatch serve",
                    "PASS", "95% CI", "grammar"):
         assert needle in md, f"missing {needle!r}"
+
+
+def test_handle_call_rejects_partial_structured_output():
+    from smallbatch.serve import handle_call
+    from smallbatch.spec import FunctionSpec
+
+    spec = FunctionSpec(
+        name="toy",
+        description="-",
+        input_schema={"title": "str"},
+        output={"priority": {"labels": ["hi", "lo"]}, "score": {"range": [0, 5]}},
+        rubric="-",
+        teacher={"backend": "claude-cli", "model": "sonnet"},
+    )
+    # backend returns only one of the two fields -> 422, not a partial 200
+    status, payload = handle_call(spec, {"title": "t"}, lambda p: "priority: hi")
+    assert status == 422
+    assert "score" in payload["error"]
+    status, payload = handle_call(
+        spec, {"title": "t"}, lambda p: "priority: hi\nscore: 3"
+    )
+    assert status == 200
+    assert payload["output"] == {"priority": "hi", "score": 3}
