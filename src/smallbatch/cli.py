@@ -48,9 +48,10 @@ def cmd_label(args) -> int:
 def cmd_compile(args) -> int:
     from .api import compile as compile_fn
 
+    spec = load_spec(args.spec)
     try:
         result = compile_fn(
-            load_spec(args.spec),
+            spec,
             data_dir=args.data,
             artifacts_root=args.artifacts,
             base=args.base,
@@ -81,7 +82,58 @@ def cmd_compile(args) -> int:
     for w in (result.report or {}).get("warnings") or []:
         print(f"warning: {w}", file=sys.stderr)
     print(f"{'PASS' if result.passed else 'FAIL'}: {result.version_dir}")
+    if not result.passed:
+        _offer_acceptance(args, spec, result)
     return 0 if result.passed else 2
+
+
+def _offer_acceptance(args, spec, result) -> None:
+    """All-candidates-failed flow (CLI only): show the full decision summary
+    and let the user explicitly deploy the best candidate. Acceptance never
+    rewrites the gate; the exit code stays 2 either way. Never interactive
+    inside sweep subprocesses, the Python API, or non-TTY runs."""
+    from . import decision
+
+    manifest = result.manifest
+    if not decision.all_completed_failed(manifest):
+        return
+    if getattr(args, "sweep_name", None) is not None:
+        return  # sweeps stay non-interactive; cells are research results
+    winner = manifest["selection"]["winner"]
+    use_flag = getattr(args, "use_best_anyway", False)
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    if not use_flag and not interactive:
+        print(
+            f"hint: `smallbatch run {manifest['function']} --allow-failed` uses "
+            "the best candidate once; `compile --use-best-anyway` accepts it as "
+            "the default"
+        )
+        return
+
+    root = Path(args.artifacts)
+    current = artifacts.latest(root, manifest["function"])
+    displaced = (
+        current.name if current is not None and current != result.version_dir else None
+    )
+    print()
+    print(decision.build_decision_text(spec, manifest, result.report, displaced))
+    if result.report_path:
+        print(f"\nDetails: {result.report_path}")
+    if use_flag:
+        accept, via = True, "flag_use_best_anyway"
+        print(f"--use-best-anyway: accepting '{winner}' for deployment")
+    else:
+        reply = input(f"\nUse {winner} as the default despite the failed gate? [y/N] ")
+        accept, via = reply.strip().lower() in ("y", "yes"), "interactive_compile"
+    if accept:
+        artifacts.accept_candidate(result.version_dir, winner, via)
+        print(
+            f"{winner} accepted for use.\n"
+            "The quality result remains FAIL; run/load will show a warning.\n"
+            "Accepted for runtime; gate remains FAIL, so compile exits 2."
+        )
+    elif displaced:
+        print(f"declined — {displaced} remains the deployed default")
 
 
 def cmd_run(args) -> int:
@@ -230,7 +282,15 @@ def cmd_status(args) -> int:
         for v in artifacts.versions(root, fn_dir.name):
             m = artifacts.read_manifest(v)
             flags = []
-            flags.append("PASS" if m["gate"]["passed"] else "FAIL")
+            deployment = m.get("deployment") or {}
+            if m["gate"]["passed"]:
+                flags.append("PASS")
+            elif deployment.get("accepted_despite_gate"):
+                flags.append(
+                    f"IN USE - GATE FAIL (accepted: {deployment.get('accepted_candidate')})"
+                )
+            else:
+                flags.append("FAIL")
             broken = artifacts.artifact_integrity(v)
             drift = artifacts.source_drift(v)
             if broken:
@@ -239,13 +299,20 @@ def cmd_status(args) -> int:
                 pass  # immutable snapshot; missing source is not a problem
             elif drift:
                 flags.append(f"SOURCE DRIFT ({drift})")
-            agr = m["metrics"]["adapter"]["agreement"]
-            print(f"{fn_dir.name}/{v.name}  [{' '.join(flags)}]  agreement={agr:.2%}  base={m['base_model']}")
+            winner_rec = artifacts.candidate_record(m) or {}
+            agr = (winner_rec.get("metrics") or {}).get("agreement")
+            agr_txt = f"{agr:.2%}" if agr is not None else "-"
+            backend = winner_rec.get("backend", "lora")
+            print(
+                f"{fn_dir.name}/{v.name}  [{' '.join(flags)}]  "
+                f"agreement={agr_txt}  winner={backend}  base={m.get('base_model')}"
+            )
         for v in artifacts.sweep_runs(root, fn_dir.name):
             m = artifacts.read_manifest(v)
             gate = "PASS" if m["gate"]["passed"] else "FAIL"
-            agr = m["metrics"]["adapter"]["agreement"]
-            print(f"{fn_dir.name}/{m['version']}  [{gate}]  agreement={agr:.2%}  base={m['base_model']}")
+            agr = ((m.get("metrics") or {}).get("adapter") or {}).get("agreement")
+            agr_txt = f"{agr:.2%}" if agr is not None else "-"
+            print(f"{fn_dir.name}/{m['version']}  [{gate}]  agreement={agr_txt}  base={m.get('base_model')}")
     return 0
 
 
@@ -278,6 +345,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="train even though the dataset was labeled under a different "
         "rubric/contract/teacher (recorded in the artifact manifest)",
+    )
+    cp.add_argument(
+        "--use-best-anyway",
+        action="store_true",
+        help="if every candidate fails the gate, accept the best one as the "
+        "deployed default without prompting (gate stays FAIL, exit stays 2)",
     )
     cp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
     # sweep-internal: route the artifact into artifacts/<fn>/<sweep>/<tag> and

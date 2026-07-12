@@ -253,9 +253,17 @@ def run_sweep(
                 run_dir = artifacts_root / function / sweep.name / plan.tag
                 manifest = artifacts.read_manifest(run_dir)
                 rec["status"] = "pass" if proc.returncode == 0 else "fail"
-                adapter = manifest["metrics"]["adapter"]
-                rec["agreement"] = adapter["agreement"]
+                # sweep cells compare adapters; the winner's metrics are used
+                # when the lora candidate errored (rare inside a sweep). Full
+                # metric dicts stay in results.json via the manifest line.
+                adapter = (
+                    manifest["metrics"].get("adapter")
+                    or (artifacts.candidate_record(manifest) or {}).get("metrics")
+                    or {}
+                )
+                rec["agreement"] = adapter.get("agreement")
                 rec["agreement_ci"] = adapter.get("agreement_ci")
+                rec["metrics"] = {k: v for k, v in adapter.items() if k != "preds"}
                 rec["best_epoch"] = manifest.get("best_epoch")
                 rec["epochs_run"] = manifest.get("epochs_run")
                 rec["zeroshot"] = (manifest["metrics"].get("zeroshot") or {}).get(

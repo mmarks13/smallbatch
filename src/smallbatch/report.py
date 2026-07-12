@@ -313,6 +313,19 @@ def build_report(
     audit = shortcut_audit(spec, gate_rows, preds, golds)
     gold_section, gold_warnings = _gold_sections(spec, gate_rows, preds)
     candidates_section = _candidates_section(candidates, selection)
+    if gold_section and candidates_section:
+        # every candidate's own gold agreement, so decision tables can expose
+        # a teacher/gold ranking conflict instead of hiding it
+        from . import metrics as m
+
+        idx = [i for i, r in enumerate(gate_rows) if r.get("gold") is not None]
+        gold_refs = [gate_rows[i]["gold"] for i in idx]
+        for name, rec in (candidates or {}).items():
+            cpreds = (rec.get("metrics") or {}).get("preds")
+            if cpreds and len(cpreds) == len(gate_rows) and name in candidates_section:
+                candidates_section[name]["gold_agreement"] = m.compare(
+                    spec, [cpreds[i] for i in idx], gold_refs
+                )["agreement"]
 
     return {
         "function": spec.name,
