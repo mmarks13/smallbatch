@@ -175,3 +175,70 @@ def test_compile_resumes_completed_zero_shot_diagnostic(tmp_path, monkeypatch, c
     progress = capsys.readouterr().err
     assert "diagnostic 1/1" in progress
     assert "resumed complete" in progress
+
+
+def test_compile_retries_failed_zero_shot_diagnostic_in_new_revision(tmp_path, monkeypatch):
+    from smallbatch import api
+
+    spec = make_spec(candidates={"student": {"type": "lora", "model": "example/base"}})
+    data = tmp_path / "data"
+    root = tmp_path / "artifacts"
+    label(spec, imported_records(30), out_dir=data)
+    train_calls = 0
+
+    def train_candidate(*args, **kwargs):
+        nonlocal train_calls
+        train_calls += 1
+        return {
+            "candidate": "student",
+            "backend": "lora",
+            "status": "completed",
+            "artifact_path": "candidates/student/model",
+            "train_seconds": 1.0,
+            "base_model": "example/base",
+            "inference_precision": "fp32",
+            "eval_batch_size": 1,
+            "error": None,
+        }
+
+    monkeypatch.setattr(api, "_train_candidate", train_candidate)
+    profile = {
+        "batch_one_latency_ms": {"p50": 1.0, "p95": 2.0, "n": 6},
+        "peak_rss_bytes": 100,
+        "candidate_owned_bytes": 10,
+        "required_shared_bytes": 0,
+    }
+    predictions = ["normal", "urgent", "normal", "urgent", "normal", "urgent"]
+    monkeypatch.setattr(
+        "smallbatch.profiling.profile_candidate",
+        lambda *args, **kwargs: {"predictions": predictions, "profile": profile},
+    )
+    zero_calls = 0
+
+    def zero_profile(*args, **kwargs):
+        nonlocal zero_calls
+        zero_calls += 1
+        if zero_calls == 1:
+            raise RuntimeError("invalid generated output")
+        return {"predictions": predictions, "profile": profile}
+
+    monkeypatch.setattr("smallbatch.profiling.profile_zeroshot", zero_profile)
+
+    first = compile_fn(spec, data_dir=data, artifacts_root=root, cpu_threads=1)
+    failed = [
+        record
+        for name, record in first.report["diagnostics"].items()
+        if name.startswith("zero-shot-")
+    ]
+    assert len(failed) == 1 and failed[0]["status"] == "error"
+
+    second = compile_fn(spec, data_dir=data, artifacts_root=root, cpu_threads=1)
+
+    assert second.build_id == f"{first.build_id}-r2"
+    assert second.manifest["retry_of"] == first.build_id
+    assert train_calls == 1
+    assert zero_calls == 2
+    assert all(
+        record.get("status") != "error"
+        for record in second.report["diagnostics"].values()
+    )

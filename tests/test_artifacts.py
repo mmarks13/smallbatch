@@ -57,6 +57,28 @@ def test_damaged_complete_build_allocates_new_revision(tmp_path):
     assert replacement.name.endswith("-r2")
 
 
+def test_failed_diagnostic_allocates_immutable_retry_revision(tmp_path):
+    root, build, manifest = completed_build(tmp_path)
+    diagnostic = "zero-shot-test"
+    manifest["diagnostics"] = {diagnostic: {"status": "error", "error": "invalid"}}
+    (build / f"{diagnostic}.local.json").write_text(
+        json.dumps({"status": "error", "error": "invalid"})
+    )
+    manifest["artifact_files"] = artifacts.file_hashes(build)
+    artifacts.write_manifest(build, manifest)
+
+    retry = artifacts.build_dir(
+        root,
+        "ticket-priority",
+        manifest["build_hash"],
+        manifest["dataset_hash"],
+    )
+
+    assert retry.name.endswith("-r2")
+    assert artifacts.read_build_state(retry)["retry_of"] == build.name
+    assert (retry / f"{diagnostic}.local.json").exists()
+
+
 def test_partial_complete_build_seeds_immutable_retry_revision(tmp_path):
     root, build, manifest = completed_build(tmp_path)
     completed_dir = build / "candidates" / "tfidf"
@@ -136,3 +158,23 @@ def test_pre_v3_manifest_rejected(tmp_path):
         assert "unsupported pre-v0.2 artifact" in str(exc)
     else:
         raise AssertionError("old manifest was accepted")
+
+
+def test_setfit_deployable_artifact_excludes_training_checkpoints(tmp_path):
+    source = tmp_path / "source"
+    (source / "score" / "model").mkdir(parents=True)
+    (source / "score" / "model" / "weights.bin").write_bytes(b"model")
+    (source / "score" / "labels.json").write_bytes(b"labels")
+    (source / "score" / "checkpoints" / "checkpoint-1").mkdir(parents=True)
+    (source / "score" / "checkpoints" / "checkpoint-1" / "optimizer.pt").write_bytes(
+        b"optimizer"
+    )
+
+    assert artifacts.dir_size(source) == 20
+    assert artifacts.deployable_size(source, "setfit") == 11
+
+    destination = tmp_path / "destination"
+    artifacts.copy_deployable_model(source, destination, "setfit")
+    assert (destination / "score" / "model" / "weights.bin").read_bytes() == b"model"
+    assert (destination / "score" / "labels.json").read_bytes() == b"labels"
+    assert not (destination / "score" / "checkpoints").exists()

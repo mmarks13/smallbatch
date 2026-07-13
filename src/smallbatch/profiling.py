@@ -13,6 +13,95 @@ import time
 from pathlib import Path
 from typing import Any
 
+PROFILE_HEARTBEAT_SECONDS = 30
+
+
+def _profile_environment(threads: int) -> dict[str, str]:
+    return {
+        **os.environ,
+        "CUDA_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": str(threads),
+        "MKL_NUM_THREADS": str(threads),
+        "OPENBLAS_NUM_THREADS": str(threads),
+        "TOKENIZERS_PARALLELISM": "false",
+    }
+
+
+def _read_progress(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _wait_for_profile(process: subprocess.Popen, progress: Path, label: str) -> tuple[str, str]:
+    started = time.perf_counter()
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=PROFILE_HEARTBEAT_SECONDS)
+            return stdout, stderr
+        except subprocess.TimeoutExpired:
+            state = _read_progress(progress)
+            completed = state.get("completed", 0)
+            total = state.get("total", "?")
+            elapsed = time.perf_counter() - started
+            print(
+                f"[smallbatch] CPU evaluation progress {label}: "
+                f"rows={completed}/{total} elapsed={elapsed:.1f}s",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+def _run_profile(
+    build: Path,
+    profile_id: str,
+    request_value: dict[str, Any],
+    *,
+    threads: int,
+    error_prefix: str,
+) -> dict[str, Any]:
+    request = build / f".profile-{profile_id}.json"
+    result = build / f".profile-{profile_id}-result.json"
+    progress = build / f".profile-{profile_id}-progress.json"
+    request.write_text(
+        json.dumps(
+            {
+                **request_value,
+                "threads": threads,
+                "progress_path": str(progress),
+            }
+        )
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "smallbatch.profiling",
+        "--worker",
+        str(build),
+        profile_id,
+        str(request),
+        str(result),
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            env=_profile_environment(threads),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, stderr = _wait_for_profile(process, progress, profile_id)
+        if process.returncode:
+            detail = stderr.strip() or stdout.strip()
+            raise RuntimeError(f"{error_prefix}: {detail}")
+        return json.loads(result.read_text())
+    finally:
+        request.unlink(missing_ok=True)
+        result.unlink(missing_ok=True)
+        progress.unlink(missing_ok=True)
+        progress.with_suffix(progress.suffix + ".tmp").unlink(missing_ok=True)
+
 
 def profile_candidate(
     build: Path,
@@ -22,36 +111,13 @@ def profile_candidate(
     threads: int | None = None,
 ) -> dict[str, Any]:
     threads = max(1, threads or min(4, os.cpu_count() or 1))
-    request = build / f".profile-{candidate}.json"
-    result = build / f".profile-{candidate}-result.json"
-    request.write_text(json.dumps({"items": items, "threads": threads}))
-    env = {
-        **os.environ,
-        "CUDA_VISIBLE_DEVICES": "",
-        "OMP_NUM_THREADS": str(threads),
-        "MKL_NUM_THREADS": str(threads),
-        "OPENBLAS_NUM_THREADS": str(threads),
-        "TOKENIZERS_PARALLELISM": "false",
-    }
-    command = [
-        sys.executable,
-        "-m",
-        "smallbatch.profiling",
-        "--worker",
-        str(build),
+    return _run_profile(
+        build,
         candidate,
-        str(request),
-        str(result),
-    ]
-    try:
-        completed = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
-        if completed.returncode:
-            detail = completed.stderr.strip() or completed.stdout.strip()
-            raise RuntimeError(f"CPU profile failed for {candidate}: {detail}")
-        return json.loads(result.read_text())
-    finally:
-        request.unlink(missing_ok=True)
-        result.unlink(missing_ok=True)
+        {"items": items},
+        threads=threads,
+        error_prefix=f"CPU profile failed for {candidate}",
+    )
 
 
 def profile_zeroshot(
@@ -63,45 +129,19 @@ def profile_zeroshot(
     threads: int | None = None,
 ) -> dict[str, Any]:
     threads = max(1, threads or min(4, os.cpu_count() or 1))
-    request = build / f".profile-{diagnostic_id}.json"
-    result = build / f".profile-{diagnostic_id}-result.json"
-    request.write_text(
-        json.dumps(
-            {
-                "mode": "zeroshot",
-                "items": items,
-                "threads": threads,
-                "base_model": base_model,
-            }
-        )
-    )
-    env = {
-        **os.environ,
-        "CUDA_VISIBLE_DEVICES": "",
-        "OMP_NUM_THREADS": str(threads),
-        "MKL_NUM_THREADS": str(threads),
-        "OPENBLAS_NUM_THREADS": str(threads),
-        "TOKENIZERS_PARALLELISM": "false",
-    }
-    command = [
-        sys.executable,
-        "-m",
-        "smallbatch.profiling",
-        "--worker",
-        str(build),
+    return _run_profile(
+        build,
         diagnostic_id,
-        str(request),
-        str(result),
-    ]
-    try:
-        completed = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
-        if completed.returncode:
-            detail = completed.stderr.strip() or completed.stdout.strip()
-            raise RuntimeError(f"CPU zero-shot profile failed: {detail}")
-        return json.loads(result.read_text())
-    finally:
-        request.unlink(missing_ok=True)
-        result.unlink(missing_ok=True)
+        {"mode": "zeroshot", "items": items, "base_model": base_model},
+        threads=threads,
+        error_prefix="CPU zero-shot profile failed",
+    )
+
+
+def _write_progress(path: Path, completed: int, total: int) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps({"completed": completed, "total": total}))
+    tmp.replace(path)
 
 
 def _worker(build: Path, candidate: str, request_path: Path, result_path: Path) -> None:
@@ -111,6 +151,9 @@ def _worker(build: Path, candidate: str, request_path: Path, result_path: Path) 
     request = json.loads(request_path.read_text())
     items = request["items"]
     threads = int(request["threads"])
+    progress_path = Path(request["progress_path"]) if request.get("progress_path") else None
+    if progress_path:
+        _write_progress(progress_path, 0, len(items))
     try:
         import torch
 
@@ -134,10 +177,15 @@ def _worker(build: Path, candidate: str, request_path: Path, result_path: Path) 
         function(item)
     latencies: list[float] = []
     outputs: list[Any] = []
-    for item in items:
+    progress_written = time.perf_counter()
+    for index, item in enumerate(items, 1):
         started = time.perf_counter()
         outputs.append(function(item))
         latencies.append((time.perf_counter() - started) * 1000)
+        now = time.perf_counter()
+        if progress_path and (index == len(items) or now - progress_written >= 1):
+            _write_progress(progress_path, index, len(items))
+            progress_written = now
 
     dependencies = _runtime_dependencies(record["backend"])
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -154,7 +202,9 @@ def _worker(build: Path, candidate: str, request_path: Path, result_path: Path) 
                 "n": len(latencies),
             },
             "peak_rss_bytes": int(peak),
-            "candidate_owned_bytes": artifacts.dir_size(model_dir) if model_dir else 0,
+            "candidate_owned_bytes": (
+                artifacts.deployable_size(model_dir, record["backend"]) if model_dir else 0
+            ),
             "required_shared_bytes": _shared_bytes(record),
             "required_base_model": record.get("base_model"),
             "dependencies": dependencies,
@@ -171,7 +221,7 @@ def _worker(build: Path, candidate: str, request_path: Path, result_path: Path) 
 def _load_zeroshot(build: Path, base_model: str):
     from . import prompts
     from .evaluate import generate_batch
-    from .spec import load_spec, validate_input, validate_output
+    from .spec import load_spec, validate_input
     from .training import load_base_model
 
     spec = load_spec(build / "spec.yaml")
@@ -188,7 +238,7 @@ def _load_zeroshot(build: Path, base_model: str):
             batch_size=1,
             allowed_completions=prompts.allowed_completions(spec),
         )
-        return validate_output(spec, prompts.parse_output(spec, raw[0]))
+        return prompts.parse_output(spec, raw[0])
 
     return call
 

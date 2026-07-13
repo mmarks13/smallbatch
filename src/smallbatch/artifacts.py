@@ -28,6 +28,20 @@ def dir_size(path: Path) -> int:
     return sum(file.stat().st_size for file in path.rglob("*") if file.is_file())
 
 
+def deployable_size(path: Path, backend: str) -> int:
+    return sum(
+        file.stat().st_size
+        for file in path.rglob("*")
+        if file.is_file()
+        and not (backend == "setfit" and "checkpoints" in file.relative_to(path).parts)
+    )
+
+
+def copy_deployable_model(source: Path, destination: Path, backend: str) -> None:
+    ignore = shutil.ignore_patterns("checkpoints") if backend == "setfit" else None
+    shutil.copytree(source, destination, ignore=ignore)
+
+
 def _version_key(path: Path) -> tuple[str, int]:
     match = re.fullmatch(r"(.*?)(?:-r(\d+))?", path.name)
     return match.group(1), int(match.group(2) or 1)
@@ -131,8 +145,14 @@ def build_dir(root: Path, name: str, build_hash: str, dataset_hash: str) -> Path
     intact = [path for path in matching if artifact_integrity(path) is None]
     if intact:
         source = intact[-1]
-        records = list((read_manifest(source).get("candidates") or {}).values())
-        if records and all(record.get("status") == "completed" for record in records):
+        manifest = read_manifest(source)
+        records = list((manifest.get("candidates") or {}).values())
+        diagnostics = list((manifest.get("diagnostics") or {}).values())
+        if (
+            records
+            and all(record.get("status") == "completed" for record in records)
+            and not any(record.get("status") == "error" for record in diagnostics)
+        ):
             return source
         retry = _allocate_build(
             base, build_hash, dataset_hash, stem=_version_key(source)[0]

@@ -20,6 +20,10 @@
   drift acceptance.
 - Stage-by-stage labeling and compile progress with immediate quality and
   operating summaries for each completed CPU evaluation.
+- Thirty-second row and elapsed-time heartbeats during long isolated CPU
+  evaluations, shared by selectable candidates and zero-shot diagnostics.
+- A release case-study protocol with 600 hash-verified public CFPB inputs,
+  aggregate-only publication boundaries, and an all-candidate completion gate.
 
 ### Changed
 
@@ -34,10 +38,12 @@
   and artifacts must be regenerated.
 - Completed zero-shot diagnostics now resume from their durable local records
   after an interrupted build.
-- Completed builds with candidate errors now retry in a new immutable revision
-  while reusing successful candidate artifacts and diagnostics.
+- Completed builds with candidate or zero-shot diagnostic errors now retry in
+  a new immutable revision while reusing successful artifacts and diagnostics.
 - Bounded SetFit's embedding phase with deterministic per-class sampling and a
   recorded contrastive-pair budget while fitting its classifier on all rows.
+- SetFit artifacts now discard trainer checkpoints and optimizer state; reported
+  and packaged footprint counts only files required for inference.
 - Added compatibility for tokenizer.json-only model repositories that use the
   Transformers 5 `TokenizersBackend` name and for models that reject generated
   `token_type_ids`.

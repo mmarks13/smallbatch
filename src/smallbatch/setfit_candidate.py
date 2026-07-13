@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import shutil
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -48,6 +49,7 @@ def _resolved_args(
     values = {
         "output_dir": str(output_dir),
         "report_to": "none",
+        "save_strategy": "no",
         "show_progress_bar": False,
     }
     if not {"num_iterations", "sampling_strategy"} & set(config.training_args):
@@ -108,9 +110,8 @@ def train_setfit(
             config.model,
             labels=[str(index) for index in range(len(values))],
         )
-        args = _resolved_args(
-            config, field_dir / "checkpoints", max(1, len(embedding_train))
-        )
+        checkpoint_dir = field_dir / "checkpoints"
+        args = _resolved_args(config, checkpoint_dir, max(1, len(embedding_train)))
         resolved = json.loads(json.dumps(args.to_dict(), default=str))
         embedding_status = "trained" if embedding_train else "skipped-no-positive-pair"
         print(
@@ -136,6 +137,7 @@ def train_setfit(
                 args=args,
             )
         trainer.train_classifier(train_texts, train_labels, args=args)
+        shutil.rmtree(checkpoint_dir, ignore_errors=True)
         model.save_pretrained(field_dir / "model")
         (field_dir / "labels.json").write_text(
             json.dumps(values, indent=2, ensure_ascii=False)

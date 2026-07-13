@@ -1,3 +1,4 @@
+import zipfile
 from importlib.metadata import version
 from pathlib import Path
 
@@ -34,6 +35,9 @@ def test_real_setfit_compile_and_standalone_wheel(tmp_path):
     assert record["status"] == "completed"
     assert record["setfit_version"] == version("setfit")
     assert record["profile"]["runtime"] == "setfit"
+    model_dir = compiled.version_dir / record["artifact_path"]
+    assert not list(model_dir.rglob("checkpoints"))
+    assert not list(model_dir.rglob("optimizer.pt"))
 
     selected = select(
         spec.name,
@@ -46,3 +50,5 @@ def test_real_setfit_compile_and_standalone_wheel(tmp_path):
     assert selected.evidence["parity"]["exact"] == 1
     assert selected.evidence["package_profile"]["runtime"] == "setfit"
     assert selected.evidence["package_profile"]["offline_after_install"] is True
+    with zipfile.ZipFile(selected.wheel) as archive:
+        assert not any("/checkpoints/" in name for name in archive.namelist())

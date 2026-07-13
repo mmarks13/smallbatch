@@ -65,3 +65,13 @@ def test_setfit_managed_training_args_rejected():
                 }
             }
         )
+    with pytest.raises(ValueError, match="managed by smallbatch"):
+        make_spec(
+            candidates={
+                "bge-small": {
+                    "type": "setfit",
+                    "model": "BAAI/bge-small-en-v1.5",
+                    "training_args": {"save_strategy": "steps"},
+                }
+            }
+        )

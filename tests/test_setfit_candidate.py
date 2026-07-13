@@ -43,6 +43,10 @@ class Trainer:
 
     def train_embeddings(self, *args, **kwargs):
         self.embedding_args = args
+        output_dir = Path(kwargs["args"].kwargs["output_dir"])
+        checkpoint = output_dir / "checkpoint-1"
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "optimizer.pt").write_text("training only")
 
     def train_classifier(self, *args, **kwargs):
         self.classifier_args = args
@@ -82,6 +86,7 @@ def test_setfit_trains_and_predicts_each_field(tmp_path, monkeypatch):
     )
     assert metadata["field_training"]["score"]["classifier_train_rows"] == 2
     assert metadata["field_training"]["score"]["resolved_args"]["num_iterations"] == 20
+    assert metadata["field_training"]["score"]["resolved_args"]["save_strategy"] == "no"
     predictions = predict_setfit(
         tmp_path,
         spec,
@@ -117,3 +122,5 @@ def test_setfit_bounds_embedding_rows_but_trains_head_on_all_rows(tmp_path, monk
     assert training["embedding_eval_rows"] == 6
     assert training["classifier_train_rows"] == 24
     assert training["resolved_args"]["num_iterations"] == 2
+    assert training["resolved_args"]["save_strategy"] == "no"
+    assert not (tmp_path / "score" / "checkpoints").exists()

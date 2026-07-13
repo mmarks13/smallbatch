@@ -108,14 +108,14 @@ runtime before atomically changing `active.json`.
 3. Calibration never edits decisions; it approves, declines, or reviews more.
 4. Evaluation rows remain sticky on append and never feed training or
    augmentation.
-5. Candidate errors are recorded and isolated. One failed candidate must not
-   discard completed candidates.
+5. Candidate and diagnostic errors are recorded and isolated. One failed stage
+   must not discard completed work.
 6. Every selectable candidate has completed full CPU evaluation.
 7. Build manifests are immutable evidence. Selection is a separate atomic
    pointer and history.
-   Re-running a completed build that contains candidate errors creates a new
-   retry revision, reuses completed candidates, and never repairs the prior
-   build in place.
+   Re-running a completed build that contains candidate or diagnostic errors
+   creates a new retry revision, reuses completed work, and never repairs the
+   prior build in place.
 8. Generated wheels must not import or depend on `smallbatch` and must reproduce
    the evaluated candidate or disclose and explicitly accept package drift.
 9. Public evidence contains no inputs, rationales, or raw disagreements.

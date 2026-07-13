@@ -51,12 +51,14 @@ one TF-IDF or SetFit head per field and return one validated object.
 
 Completed stages are durable. An interrupted build resumes in place, including
 LoRA trainer checkpoints and completed zero-shot diagnostics. Re-running a
-completed build with candidate errors creates a new `-rN` revision: completed
-candidate files and diagnostics are reused, failed candidates run again, and
-the prior manifest remains unchanged. During a run, progress identifies the
-current candidate and stage and prints a compact evidence summary as each CPU
-evaluation completes. An error remains visible without discarding other
-candidates.
+completed build with candidate or diagnostic errors creates a new `-rN`
+revision: completed candidate files and diagnostics are reused, failed stages
+run again, and the prior manifest remains unchanged. During a run, progress
+identifies the current candidate and stage and prints a compact evidence
+summary as each CPU evaluation completes. An error remains visible without
+discarding other candidates. A profile that runs longer than 30 seconds also
+reports completed rows and elapsed time every 30 seconds. Progress writes occur
+between timed calls and are excluded from batch-one latency measurements.
 
 ## 4. Evaluate On CPU
 
@@ -66,7 +68,9 @@ and records the exact CPU, OS, Python, dependencies, and thread count.
 
 Quality predictions come from that CPU runtime. Operating evidence includes
 cold load, p50/p95 batch-one latency, peak RSS, candidate-owned bytes, required
-shared/base bytes, and offline requirements.
+shared/base bytes, and offline requirements. Candidate-owned bytes count only
+files required for inference; transient trainer checkpoints and optimizer state
+are excluded from both the reported footprint and standalone package.
 
 Integer evidence includes exact, within-one, MAE, the absolute-error
 histogram, p90/max error, mean signed error, Pearson, Spearman, and invalid

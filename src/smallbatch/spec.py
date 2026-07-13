@@ -176,6 +176,10 @@ class SetFitCandidateSpec(BaseModel):
             "run_name",
             "loss",
             "distance_metric",
+            "save_strategy",
+            "save_steps",
+            "save_total_limit",
+            "load_best_model_at_end",
         }
         bad = reserved & set(args)
         if bad:

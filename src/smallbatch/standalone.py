@@ -57,7 +57,9 @@ def package_selection(
     module_dir = source / "src" / "smallbatch_functions" / module
     module_dir.mkdir(parents=True)
     dist.mkdir(parents=True)
-    shutil.copytree(build / record["artifact_path"], module_dir / "model")
+    artifacts.copy_deployable_model(
+        build / record["artifact_path"], module_dir / "model", record["backend"]
+    )
     shutil.copy(_TEMPLATES / "common.py.tmpl", module_dir / "_common.py")
     shutil.copy(_TEMPLATES / f"{record['backend']}.py.tmpl", module_dir / "__init__.py")
 
