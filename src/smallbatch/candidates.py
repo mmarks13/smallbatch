@@ -20,9 +20,7 @@ def _texts(spec: FunctionSpec, rows: list[Row]) -> list[str]:
 
 
 def _check_class_coverage(spec: FunctionSpec, train_rows: list[Row]) -> None:
-    """A data problem must read as one: logistic regression needs at least two
-    observed classes per field, and silent single-class fits would be
-    meaningless anyway."""
+    """Reject single-class candidate training and disclose missing classes."""
     for name, field in spec.output.fields.items():
         observed = set()
         for r in train_rows:
@@ -31,14 +29,14 @@ def _check_class_coverage(spec: FunctionSpec, train_rows: list[Row]) -> None:
         if len(observed) < 2:
             raise ValueError(
                 f"train split has a single observed class for '{name}' "
-                f"({observed or '{}'}) — the tfidf candidate needs at least two; "
+                f"({observed or '{}'}) — candidate training needs at least two; "
                 "label more varied data"
             )
         missing = set(field.values()) - observed
         if missing:
             print(
                 f"note: contract classes never observed in train for '{name}': "
-                f"{sorted(map(str, missing))} — the tfidf candidate cannot "
+                f"{sorted(map(str, missing))} — trained candidates cannot "
                 "predict them"
             )
 

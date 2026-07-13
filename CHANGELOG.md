@@ -34,6 +34,8 @@
   and artifacts must be regenerated.
 - Completed zero-shot diagnostics now resume from their durable local records
   after an interrupted build.
+- Bounded SetFit's embedding phase with deterministic per-class sampling and a
+  recorded contrastive-pair budget while fitting its classifier on all rows.
 
 ### Removed
 

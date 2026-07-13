@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
+import random
+import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -11,20 +15,47 @@ from .candidates import _check_class_coverage
 from .labeling import Row, row_output
 from .spec import FunctionSpec, SetFitCandidateSpec
 
+TARGET_CONTRASTIVE_PAIRS = 1024
+MAX_PAIR_ITERATIONS = 20
+
 
 def _labels(spec: FunctionSpec, field_name: str) -> list[Any]:
     return spec.output.fields[field_name].values()
 
 
-def _resolved_args(config: SetFitCandidateSpec, output_dir: Path):
+def _embedding_indices(labels: list[int], per_class: int, seed: int) -> list[int]:
+    grouped: dict[int, list[int]] = defaultdict(list)
+    for index, label in enumerate(labels):
+        grouped[label].append(index)
+    rng = random.Random(seed)
+    selected: list[int] = []
+    for label in sorted(grouped):
+        indices = grouped[label].copy()
+        rng.shuffle(indices)
+        selected.extend(indices[:per_class])
+    return sorted(selected)
+
+
+def _has_positive_pair(labels: list[int], indices: list[int]) -> bool:
+    return any(count >= 2 for count in Counter(labels[index] for index in indices).values())
+
+
+def _resolved_args(
+    config: SetFitCandidateSpec, output_dir: Path, embedding_rows: int
+):
     from setfit import TrainingArguments
 
     values = {
         "output_dir": str(output_dir),
         "report_to": "none",
         "show_progress_bar": False,
-        **config.training_args,
     }
+    if not {"num_iterations", "sampling_strategy"} & set(config.training_args):
+        values["num_iterations"] = min(
+            MAX_PAIR_ITERATIONS,
+            max(1, math.ceil(TARGET_CONTRASTIVE_PAIRS / (2 * embedding_rows))),
+        )
+    values.update(config.training_args)
     try:
         return TrainingArguments(**values)
     except TypeError as exc:
@@ -47,7 +78,7 @@ def train_setfit(
     train_texts = [prompts.render_input(row["input"], spec.input_schema) for row in train_rows]
     dev_texts = [prompts.render_input(row["input"], spec.input_schema) for row in dev_rows]
     out_dir.mkdir(parents=True, exist_ok=True)
-    resolved: dict[str, Any] | None = None
+    field_training: dict[str, dict[str, Any]] = {}
     for field_name in spec.output.fields:
         field_dir = out_dir / field_name
         values = _labels(spec, field_name)
@@ -58,36 +89,71 @@ def train_setfit(
             value = output[field_name] if isinstance(output, dict) else output
             return value_to_index[json.dumps(value)]
 
-        train_dataset = Dataset.from_dict(
-            {"text": train_texts, "label": [encode(row) for row in train_rows]}
+        train_labels = [encode(row) for row in train_rows]
+        dev_labels = [encode(row) for row in dev_rows]
+        train_dataset = Dataset.from_dict({"text": train_texts, "label": train_labels})
+        eval_dataset = Dataset.from_dict({"text": dev_texts, "label": dev_labels})
+        default_seed = int(config.training_args.get("seed", 42))
+        embedding_train = _embedding_indices(
+            train_labels, config.embedding_samples_per_class, default_seed
         )
-        eval_dataset = Dataset.from_dict(
-            {"text": dev_texts, "label": [encode(row) for row in dev_rows]}
+        embedding_eval = _embedding_indices(
+            dev_labels, config.embedding_samples_per_class, default_seed
         )
+        if not _has_positive_pair(train_labels, embedding_train):
+            embedding_train = []
+        if not _has_positive_pair(dev_labels, embedding_eval):
+            embedding_eval = []
         model = SetFitModel.from_pretrained(
             config.model,
             labels=[str(index) for index in range(len(values))],
         )
-        args = _resolved_args(config, field_dir / "checkpoints")
+        args = _resolved_args(
+            config, field_dir / "checkpoints", max(1, len(embedding_train))
+        )
+        resolved = json.loads(json.dumps(args.to_dict(), default=str))
+        embedding_status = "trained" if embedding_train else "skipped-no-positive-pair"
+        print(
+            f"[smallbatch] SetFit field={field_name} "
+            f"embedding_train={len(embedding_train)} "
+            f"embedding_eval={len(embedding_eval)} classifier_train={len(train_rows)} "
+            f"pair_iterations={resolved.get('num_iterations')} status={embedding_status}",
+            file=sys.stderr,
+            flush=True,
+        )
         trainer = Trainer(
             model=model,
             args=args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset if dev_rows else None,
         )
-        trainer.train()
+        if embedding_train:
+            trainer.train_embeddings(
+                [train_texts[index] for index in embedding_train],
+                [train_labels[index] for index in embedding_train],
+                [dev_texts[index] for index in embedding_eval] if embedding_eval else None,
+                [dev_labels[index] for index in embedding_eval] if embedding_eval else None,
+                args=args,
+            )
+        trainer.train_classifier(train_texts, train_labels, args=args)
         model.save_pretrained(field_dir / "model")
         (field_dir / "labels.json").write_text(
             json.dumps(values, indent=2, ensure_ascii=False)
         )
-        if resolved is None:
-            resolved = json.loads(json.dumps(args.to_dict(), default=str))
+        field_training[field_name] = {
+            "embedding_train_rows": len(embedding_train),
+            "embedding_eval_rows": len(embedding_eval),
+            "embedding_status": embedding_status,
+            "classifier_train_rows": len(train_rows),
+            "resolved_args": resolved,
+        }
     return {
         "format": "setfit",
         "setfit_version": setfit.__version__,
         "model": config.model,
         "fields": list(spec.output.fields),
-        "training_args": resolved or {},
+        "embedding_samples_per_class": config.embedding_samples_per_class,
+        "field_training": field_training,
     }
 
 

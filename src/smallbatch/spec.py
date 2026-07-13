@@ -162,6 +162,7 @@ class TfidfCandidateSpec(BaseModel):
 class SetFitCandidateSpec(BaseModel):
     type: Literal["setfit"]
     model: str
+    embedding_samples_per_class: int = Field(default=8, ge=1)
     training_args: dict[str, Any] = Field(default_factory=dict)
     model_config = {"extra": "forbid"}
 

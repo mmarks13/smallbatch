@@ -38,6 +38,10 @@ augmentation uses training rows only and requires a callable teacher.
   a small word-and-phrase baseline persisted with `skops`.
 - SetFit using a Sentence Transformer body and classifier head per field, the
   semantic middle tier between sparse text features and a language model.
+  Smallbatch deterministically caps the embedding-tuning examples per class
+  and samples a bounded number of contrastive pairs, then fits the classifier
+  head on every training decision. The report records those row counts and the
+  resolved SetFit arguments.
 - LoRA (low-rank adaptation) over each configured foundation model. LoRA is a
   parameter-efficient fine-tuning method: it trains a small adapter while the
   base model remains frozen.
