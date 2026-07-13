@@ -1,78 +1,47 @@
-# Responsible use
+# Responsible Use
 
-smallbatch trains small models on labels produced by another model (the
-"teacher"). Whether that is allowed depends on **your agreement with the
-teacher's provider**, and it is your responsibility to check before labeling.
-This page summarizes the landscape as of mid-2026; it is not legal advice, and
-provider terms change — read the current documents yourself.
+Smallbatch reproduces decisions; it does not validate them.
 
-## The short version
+Before compiling a function, the user remains responsible for deciding that:
 
-- smallbatch functions are **narrow, constrained classifiers/scorers**: the
-  output type is an integer in a fixed range or one label from a fixed list.
-  The library cannot produce a chatbot or an open-ended text generator, and
-  the trained adapter's only contract is score-in-range or label-from-list.
-- Major providers generally distinguish between using outputs to build
-  **competing, general-purpose models** (prohibited) and building
-  **non-competing specialized tools** (often expressly allowed).
-- Self-hosted and open-license teachers (e.g. a local model served by Ollama
-  or vLLM) avoid the question entirely for the labeling step, subject to the
-  model's own license.
+- The prompt expresses an appropriate and lawful decision.
+- Imported decisions or teacher behavior are acceptable for the intended use.
+- Representative inputs cover the production distribution and important
+  failure cases.
+- The constrained output is sufficient for downstream handling.
+- Human review, appeal, monitoring, and fallback paths are appropriate.
 
-## Anthropic
+Calibration lets a user inspect repeated teacher decisions before paying for a
+full labeling run. It is not a correctness, fairness, safety, or policy audit.
+Smallbatch intentionally provides no gold-label subsystem or acceptance gate.
 
-Anthropic's [Usage Policy](https://www.anthropic.com/legal/aup) prohibits
-using inputs and outputs to train an AI model ("model scraping" or "model
-distillation") **without prior authorization**. Anthropic's Help Center
-article [“Can I use my Outputs to train an AI
-model?”](https://support.claude.com/en/articles/12326764-can-i-use-my-outputs-to-train-an-ai-model)
-clarifies what that means in practice:
+Reports measure agreement and error against supplied decisions. A highly
+faithful candidate can reproduce a bad teacher, biased historical decisions,
+or an ambiguous prompt. Candidate selection on the same evaluation data makes
+the chosen result optimistic; v0.2 discloses this and provides no confirmation
+set.
 
-- **Allowed** (non-competing specialized tools): sentiment analysis tools,
-  content categorization systems, summarization, information extraction,
-  semantic search, anomaly detection.
-- **Prohibited**: general-purpose chatbots, models designed for open-ended
-  text generation, training competitive models, reverse-engineering training
-  methods.
+Do not use a generated function as the sole decision-maker for high-impact
+medical, legal, employment, credit, housing, insurance, policing, or similar
+decisions without the domain controls those uses require.
 
-A smallbatch function — a fixed-rubric scorer or categorizer — is shaped like
-the allowed examples, but the judgment about *your* use case is yours to make
-against the current policy, and asking Anthropic for authorization is the
-unambiguous path.
+## Data And Model Privacy
 
-Note on the `claude-cli` teacher backend: it drives Claude Code's supported
-headless mode (`claude -p`). Using it does not change any of the above — the
-training-use question depends on what you build, not how you call the model.
+Teacher calls send prompt and input content to the configured provider. Review
+provider authorization, retention, and output-use terms before labeling.
 
-## OpenAI (and OpenAI-compatible hosted providers)
+Aggregate reports omit inputs and rationales; local detail reports retain them.
+Standalone functions include the prompt and trained model state. TF-IDF
+vocabularies can contain source tokens, embedding models may memorize, and
+LoRA adapters can retain training information. Treat trained state as derived
+data, not as redacted data.
 
-OpenAI's [Services Agreement](https://openai.com/policies/services-agreement/)
-prohibits using output to develop competing AI models, with a defined
-exception for models "primarily intended to categorize, classify, or organize
-data" that are **not distributed or commercially made available to third
-parties**, and for fine-tuning within OpenAI's own services. If you plan to
-distribute or sell an adapter labeled with OpenAI outputs, read that clause
-carefully first.
+Review generated source, dependency versions, model licenses, base-model
+requirements, and every file in the package before sharing it.
 
-Other hosted providers reachable through the `openai-compatible` backend
-(Gemini, etc.) have their own terms — check them.
+## Operating Claims
 
-Note on the `codex-cli` teacher backend: it drives the Codex CLI's supported
-non-interactive mode (`codex exec`) using the account authenticated by
-`codex login`. The implementation removes an inherited `OPENAI_API_KEY` so a
-parent shell cannot silently change which account is used. As with
-`claude-cli`, the training-use question depends on what you build, not how the
-teacher is invoked.
-
-## Practical guidance
-
-1. **Prefer a teacher you unambiguously may use**: a self-hosted open-weights
-   model, a provider that permits your use case in writing, or explicit
-   authorization from the provider.
-2. **Keep functions narrow.** That's also where small students actually match
-   their teachers — see [how-it-works.md](how-it-works.md).
-3. **Mind distribution.** Training an internal tool and publishing/selling an
-   adapter are different acts under most terms.
-4. Every labeled row records its teacher model and backend in provenance
-   (`data/<fn>/meta.json`, artifact manifests), so you can always answer
-   "what produced this training data?"
+Smallbatch records CPU latency, memory, and footprint. These can inform cost
+and resource decisions but do not constitute direct energy or emissions
+measurements. Do not convert them into energy claims without a separate,
+documented measurement protocol.

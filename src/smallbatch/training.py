@@ -7,7 +7,7 @@ from pathlib import Path
 from . import prompts
 from .hardware import pick_precision
 from .labeling import Row
-from .spec import FunctionSpec
+from .spec import FunctionSpec, LoraCandidateSpec
 
 
 def load_base_model(base: str, precision: str):
@@ -59,7 +59,21 @@ def _last_logged_loss(log_history: list[dict]) -> float | None:
     return None
 
 
-def _make_dev_callback(spec: FunctionSpec, tokenizer, dev_rows: list[Row], adapter_dir: Path):
+def _quality_value(spec: FunctionSpec, metrics: dict) -> float:
+    if not spec.output.is_scalar:
+        return metrics["joint_decision_agreement"]
+    if spec.output.scalar.type == "int":
+        return metrics["within_one"]
+    return metrics["decision_agreement"]
+
+
+def _make_dev_callback(
+    spec: FunctionSpec,
+    config: LoraCandidateSpec,
+    tokenizer,
+    dev_rows: list[Row],
+    adapter_dir: Path,
+):
     """TrainerCallback: score the dev split each epoch (constrained decode,
     task agreement), snapshot the adapter whenever it improves, and stop after
     `patience` epochs without improvement. The saved adapter is always the
@@ -73,8 +87,8 @@ def _make_dev_callback(spec: FunctionSpec, tokenizer, dev_rows: list[Row], adapt
 
     dev_texts = [prompts.student_prompt(spec, r["input"]) for r in dev_rows]
     golds = [row_output(spec, r) for r in dev_rows]
-    allowed = prompts.allowed_completions(spec)
-    max_new = prompts.completion_budget(spec)
+    allowed = prompts.allowed_completions(spec, config.rationale_distillation)
+    max_new = prompts.completion_budget(spec, config.rationale_distillation)
 
     class DevEval(TrainerCallback):
         def __init__(self):
@@ -96,14 +110,14 @@ def _make_dev_callback(spec: FunctionSpec, tokenizer, dev_rows: list[Row], adapt
                 # final eval re-derives its own effective size for the report
                 raw, _ = generate_batch(
                     model, tokenizer, dev_texts, max_new,
-                    batch_size=spec.train.eval_batch_size,
+                    batch_size=config.eval_batch_size,
                     allowed_completions=allowed,
                 )
             tokenizer.padding_side = pad_side
             if was_training:
                 model.train()
             preds = [prompts.parse_output(spec, t) for t in raw]
-            agreement = compute_metrics(spec, preds, golds)["agreement"]
+            agreement = _quality_value(spec, compute_metrics(spec, preds, golds))
             self.curve.append({
                 "epoch": epoch,
                 "train_loss": _last_logged_loss(state.log_history),
@@ -111,15 +125,15 @@ def _make_dev_callback(spec: FunctionSpec, tokenizer, dev_rows: list[Row], adapt
             })
             print(f"epoch {epoch}: dev_agreement={agreement:.4f}", flush=True)
 
-            if self.best is None or agreement > self.best + spec.train.min_delta:
+            if self.best is None or agreement > self.best + config.min_delta:
                 self.best = agreement
                 self.best_epoch = epoch
                 self.stale = 0
                 model.save_pretrained(str(adapter_dir))
             else:
                 self.stale += 1
-                if spec.train.patience is not None and self.stale >= spec.train.patience:
-                    self.stopped_reason = f"early_stop(patience={spec.train.patience})"
+                if config.patience is not None and self.stale >= config.patience:
+                    self.stopped_reason = f"early_stop(patience={config.patience})"
                     control.should_training_stop = True
             return control
 
@@ -128,6 +142,7 @@ def _make_dev_callback(spec: FunctionSpec, tokenizer, dev_rows: list[Row], adapt
 
 def train(
     spec: FunctionSpec,
+    config: LoraCandidateSpec,
     train_rows: list[Row],
     out_dir: Path,
     dev_rows: list[Row] | None = None,
@@ -141,8 +156,8 @@ def train(
     from peft import LoraConfig, prepare_model_for_kbit_training
     from trl import SFTConfig, SFTTrainer
 
-    precision = pick_precision(spec.train.precision)
-    tokenizer, model = load_base_model(spec.train.base, precision)
+    precision = pick_precision(config.precision)
+    tokenizer, model = load_base_model(config.model, precision)
     if precision == "qlora":
         # prepare_model_for_kbit_training upcasts every non-quantized module
         # to fp32; for huge-vocab models the tied embedding alone can be a
@@ -163,7 +178,10 @@ def train(
             {
                 "prompt": prompts.student_prompt(spec, r["input"]),
                 "completion": prompts.student_completion(
-                    spec, row_output(spec, r), r.get("reason", "")
+                    spec,
+                    row_output(spec, r),
+                    r.get("reason", ""),
+                    config.rationale_distillation,
                 )
                 + tokenizer.eos_token,
             }
@@ -172,44 +190,50 @@ def train(
     )
 
     lora = LoraConfig(
-        r=spec.train.lora_r,
-        lora_alpha=spec.train.alpha,
-        lora_dropout=spec.train.lora_dropout,
-        use_dora=spec.train.use_dora,
+        r=config.lora_r,
+        lora_alpha=config.alpha,
+        lora_dropout=config.lora_dropout,
+        use_dora=config.use_dora,
         target_modules="all-linear",
         task_type="CAUSAL_LM",
     )
     cfg = SFTConfig(
         output_dir=str(out_dir / "trainer"),
-        num_train_epochs=spec.train.max_epochs,
-        learning_rate=spec.train.learning_rate,
-        per_device_train_batch_size=spec.train.batch_size,
-        max_length=spec.train.max_seq_len,
+        num_train_epochs=config.max_epochs,
+        learning_rate=config.learning_rate,
+        per_device_train_batch_size=config.batch_size,
+        max_length=config.max_seq_len,
         bf16=(precision == "bf16"),
         fp16=False,
-        seed=spec.train.seed,
+        seed=config.seed,
         logging_steps=20,
-        save_strategy="no",
+        save_strategy="epoch",
+        save_total_limit=1,
         report_to=[],
         # MoE load-balancing aux loss is meaningless for a frozen-base LoRA
         # student, and TRL's nonzero default crashes dense models whose config
         # merely carries the router attribute (e.g. Granite 4.0 hybrids)
         router_aux_loss_coef=0.0,
-        **({"loss_type": spec.train.loss_type} if spec.train.loss_type else {}),
+        **({"loss_type": config.loss_type} if config.loss_type else {}),
     )
-    adapter_dir = out_dir / "adapter"
-    dev_cb = _make_dev_callback(spec, tokenizer, dev_rows, adapter_dir) if dev_rows else None
+    adapter_dir = out_dir / "model"
+    dev_cb = (
+        _make_dev_callback(spec, config, tokenizer, dev_rows, adapter_dir)
+        if dev_rows
+        else None
+    )
     trainer = SFTTrainer(
         model=model, args=cfg, train_dataset=ds, processing_class=tokenizer,
         peft_config=lora, callbacks=[dev_cb] if dev_cb else None,
     )
-    result = trainer.train()
+    checkpoints = sorted((out_dir / "trainer").glob("checkpoint-*"))
+    result = trainer.train(resume_from_checkpoint=str(checkpoints[-1]) if checkpoints else None)
 
     if dev_cb is None or dev_cb.best_epoch is None:
         # no dev split (or it never scored): fall back to the final adapter
         trainer.model.save_pretrained(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
-    epochs_run = int(round(trainer.state.epoch or spec.train.max_epochs))
+    epochs_run = int(round(trainer.state.epoch or config.max_epochs))
     return {
         "precision": precision,
         "train_rows": len(train_rows),

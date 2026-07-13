@@ -1,4 +1,4 @@
-"""Holdout evaluation and the compile gate."""
+"""Constrained generation and backend-neutral evaluation."""
 
 from __future__ import annotations
 
@@ -7,8 +7,11 @@ from typing import Any
 
 from . import prompts
 from .labeling import Row
-from .metrics import agrees as _agrees
-from .metrics import pearson_r, wilson_ci  # noqa: F401 (legacy import sites)
+from .metrics import (  # noqa: F401 (public compatibility)
+    field_decision_matches,
+    pearson_r,
+    wilson_ci,
+)
 from .spec import FunctionSpec
 
 
@@ -101,23 +104,47 @@ def generate_batch(
             eos_id = tokenizer.pad_token_id
         constrain = (trie, terminals, eos_id)
 
+    # some architectures (e.g. granite-4.0's GraniteMoeHybrid class with
+    # all-attention layers, transformers 5.13) crash generate() with any KV
+    # cache; completions here are tiny, so falling back to cache-free
+    # generation is cheap. Sticky once tripped.
+    gen_extra: dict = {}
+
     def process(batch: list[str]) -> list[str]:
         enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=2048)
         enc = {k: v.to(model.device) for k, v in enc.items()}
-        extra = {}
+        extra = dict(gen_extra)
         if constrain:
             # left padding makes the prompt length uniform within the batch
             extra["prefix_allowed_tokens_fn"] = _prefix_allowed_fn(
                 *constrain[:2], enc["input_ids"].shape[1], constrain[2]
             )
-        with torch.no_grad():
-            gen = model.generate(
-                **enc,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id,
-                **extra,
+
+        def _generate():
+            with torch.no_grad():
+                gen = model.generate(
+                    **enc,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                    **extra,
+                )
+            return gen
+
+        try:
+            gen = _generate()
+        except ValueError as e:
+            if "has_previous_state" not in str(e):
+                raise
+            print(
+                "note: this architecture's KV cache is incompatible with "
+                "generate() on this transformers version — continuing without "
+                "a cache (fine for short constrained completions)",
+                flush=True,
             )
+            gen_extra["use_cache"] = False
+            extra["use_cache"] = False
+            gen = _generate()
         new_tokens = gen[:, enc["input_ids"].shape[1] :]
         return tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
 
@@ -144,104 +171,49 @@ def score_holdout(
     holdout: list[Row],
     prompt_fn: Callable[[dict], str],
     max_new_tokens: int,
+    batch_size: int = 16,
+    rationale: bool = False,
 ) -> dict[str, Any]:
     texts = [prompt_fn(r["input"]) for r in holdout]
-    # both the adapter and the zero-shot baseline decode under the same
-    # output-contract constraint (None in rationale mode), so the gate
-    # comparison stays apples-to-apples and invalid outputs are impossible
+    # Candidate and zero-shot paths use the same output constraint so their
+    # decision-fidelity metrics remain comparable.
     raw, effective_batch = generate_batch(
         model, tokenizer, texts, max_new_tokens,
-        batch_size=spec.train.eval_batch_size,
-        allowed_completions=prompts.allowed_completions(spec),
+        batch_size=batch_size,
+        allowed_completions=prompts.allowed_completions(spec, rationale),
     )
     from .labeling import row_output
 
     preds = [prompts.parse_output(spec, t) for t in raw]
     metrics = compute_metrics(spec, preds, [row_output(spec, r) for r in holdout])
     metrics["preds"] = preds  # per-item, aligned with the holdout file order
-    if effective_batch != spec.train.eval_batch_size:
+    if effective_batch != batch_size:
         metrics["eval_batch_size_effective"] = effective_batch
     return metrics
 
 
 
 
-def constant_baseline(field, golds: list) -> dict[str, Any] | None:
-    """The ORACLE constant on this split: the single constant prediction that
-    scores best on these exact labels under the field's agreement rule. It is
-    a conservative gate hurdle, not a deployable train-fitted model — a model
-    that can't beat it has learned the label prior, not the task."""
-    if not golds:
-        return None
-    candidates = field.values()
-    best_v, best_k = None, -1
-    for v in candidates:
-        k = sum(1 for g in golds if _agrees(field, v, g))
-        if k > best_k:
-            best_v, best_k = v, k
-    return {"value": best_v, "agreement": round(best_k / len(golds), 4)}
+def train_fitted_constant(spec: FunctionSpec, train_rows: list[Row]) -> Any:
+    """Fit a diagnostic constant using only training decisions."""
+    from .labeling import row_output
+
+    outputs = [row_output(spec, row) for row in train_rows]
+    values: dict[str, Any] = {}
+    for name, field in spec.output.fields.items():
+        references = [output[name] if isinstance(output, dict) else output for output in outputs]
+        values[name] = max(
+            field.values(),
+            key=lambda candidate: sum(
+                field_decision_matches(field, candidate, reference)
+                for reference in references
+            ),
+        )
+    return values[next(iter(values))] if spec.output.is_scalar else values
 
 
 def compute_metrics(spec: FunctionSpec, preds: list, golds: list) -> dict[str, Any]:
-    """The full shared metric set (see metrics.compare) plus the gate's
-    constant-baseline comparison attached per field. Multi-field contracts
-    report per-field metrics under `fields` with the headline `agreement`
-    being the JOINT rate (every field agreeing)."""
+    """Compute the complete shared metric set."""
     from . import metrics as m
 
-    out = m.compare(spec, preds, golds)
-    if spec.output.is_scalar:
-        out["constant_baseline"] = constant_baseline(spec.output.scalar, golds)
-        return out
-    for name, field in spec.output.fields.items():
-        out["fields"][name]["constant_baseline"] = constant_baseline(
-            field, [g[name] for g in golds]
-        )
-    return out
-
-
-def run_gate(spec: FunctionSpec, adapter: dict, zeroshot: dict | None) -> dict[str, Any]:
-    """Scalar: agreement vs threshold (+ must beat zero-shot). Multi-field:
-    every field must clear its own threshold (gate.fields overrides
-    gate.agreement) and beat zero-shot per field; joint is reported, not gated."""
-    reasons = []
-    if spec.output.is_scalar:
-        if adapter["agreement"] < spec.gate.threshold:
-            reasons.append(
-                f"agreement {adapter['agreement']:.2%} < required {spec.gate.threshold:.0%}"
-            )
-        if spec.gate.must_beat_zeroshot and zeroshot is not None:
-            if adapter["agreement"] <= zeroshot["agreement"]:
-                reasons.append(
-                    f"adapter agreement {adapter['agreement']:.2%} does not beat "
-                    f"zero-shot base {zeroshot['agreement']:.2%}"
-                )
-        const = adapter.get("constant_baseline")
-        if spec.gate.must_beat_constant and const is not None:
-            if adapter["agreement"] <= const["agreement"]:
-                reasons.append(
-                    f"adapter agreement {adapter['agreement']:.2%} does not beat the "
-                    f"oracle constant \"{const['value']}\" on this split "
-                    f"({const['agreement']:.2%})"
-                )
-        return {"passed": not reasons, "reasons": reasons}
-
-    for name in spec.output.fields:
-        a = adapter["fields"][name]["agreement"]
-        threshold = spec.gate.field_threshold(name)
-        if a < threshold:
-            reasons.append(f"{name}: agreement {a:.2%} < required {threshold:.0%}")
-        if spec.gate.must_beat_zeroshot and zeroshot is not None:
-            z = zeroshot["fields"][name]["agreement"]
-            if a <= z:
-                reasons.append(
-                    f"{name}: adapter agreement {a:.2%} does not beat zero-shot {z:.2%}"
-                )
-        const = adapter["fields"][name].get("constant_baseline")
-        if spec.gate.must_beat_constant and const is not None:
-            if a <= const["agreement"]:
-                reasons.append(
-                    f"{name}: adapter agreement {a:.2%} does not beat the oracle "
-                    f"constant \"{const['value']}\" on this split ({const['agreement']:.2%})"
-                )
-    return {"passed": not reasons, "reasons": reasons}
+    return m.compare(spec, preds, golds)

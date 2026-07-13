@@ -9,12 +9,14 @@ artifacts/
 
 # labeled datasets (regenerable from teacher; may be large)
 data/
+case-study/*/work/
 .env
 
 # machine-/user-specific layers (see CLAUDE.md): never published
 CLAUDE.local.md
 local/
 .claude/
+.smallbatch-plans/
 
 # internal review documents — never ship these
 PROJECT_EVALUATION.md

@@ -1,7 +1,7 @@
 name: release
 
 # PyPI trusted publishing: fires on a version tag, but only after the full
-# test + build + wheel-smoke gauntlet passes. The `pypi` environment should
+# test + build + wheel-smoke checks pass. The `pypi` environment should
 # be protected in the repo settings (required reviewers optional).
 on:
   push:

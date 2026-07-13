@@ -1,47 +1,41 @@
-# A minimal, self-contained smallbatch function: classify a support ticket's
-# priority. Run it end-to-end with the bundled items.json — see README.md in
-# this directory.
 name: ticket-priority
-description: >
-  Assign a triage priority to an inbound customer support ticket for a small
-  B2B SaaS product (a web dashboard with an API, billing, and integrations).
-input_schema: # fields serialized into the prompt, in this order
-  subject: str
-  body: str
-  product_area: str
-  customer_tier: str
+description: Assign a triage priority to an inbound B2B SaaS support ticket.
+input_schema:
+  subject: string
+  body: string
+  product_area: string
+  customer_tier: string
 output:
   type: enum
   labels: [urgent, normal, low]
-rubric: |
-  urgent — the customer is blocked from doing their job right now, or damage
-  is ongoing: production outage or errors for all/most of their users, data
-  loss or corruption, a security concern, failed payment runs on live
-  invoices, or an enterprise customer hard-blocked during a launch.
-  normal — something is wrong or confusing but there is a workaround or the
-  impact is contained: a bug affecting some users or one feature, degraded
-  performance, an integration failing intermittently, billing questions with
-  a real deadline, or setup problems blocking a rollout that hasn't started.
-  low — nothing is broken: feature requests, cosmetic issues, documentation
-  gaps, questions answerable from docs, or "nice to have" configuration asks.
-  When torn between two labels, ask: "if this waits until tomorrow, does the
-  customer lose money or data?" Yes → urgent. "Is the customer currently
-  unable to complete a task with no workaround?" Yes → at least normal.
+prompt: |
+  Choose exactly one priority.
+
+  urgent: The customer is blocked now or damage is ongoing, including a
+  production outage, widespread errors, data loss or corruption, a security
+  concern, failed live payment runs, or a launch-blocking enterprise failure.
+
+  normal: Something is wrong or confusing but impact is contained or a
+  workaround exists, including a limited bug, degraded performance,
+  intermittent integration failure, time-sensitive billing issue, or setup
+  problem blocking a rollout that has not started.
+
+  low: Nothing is broken, including feature requests, cosmetic issues,
+  documentation gaps, general questions, and optional configuration changes.
+
+  If waiting until tomorrow risks money or data, choose urgent. If a current
+  task has no workaround, choose at least normal. Otherwise choose low.
 teacher:
-  # Any /chat/completions endpoint works. This default targets a local Ollama
-  # server so the example runs with no API key; swap base_url/model/api_key_env
-  # for a hosted provider you are authorized to use (docs/responsible-use.md).
   backend: openai-compatible
   base_url: http://localhost:11434/v1
   model: qwen3:8b
-  examples: 150 # augment the ~70 real items with teacher-generated variants
-  holdout: 0.15
-gate:
-  agreement_pm1: 0.85 # exact-match fraction for enum outputs
-  must_beat_zeroshot: true
-train:
-  # any open-weights causal LM works here; your adapter inherits the base
-  # model's license (LFM Open License conditions commercial use above $10M
-  # revenue — swap the base if that matters for you)
-  base: ibm-granite/granite-4.0-350m
-  precision: auto # fp32 on pre-Ampere, bf16 on Ampere+; qlora for bigger bases
+candidates:
+  tfidf:
+    type: tfidf
+  bge-small:
+    type: setfit
+    model: BAAI/bge-small-en-v1.5
+  granite-350m:
+    type: lora
+    model: ibm-granite/granite-4.0-350m
+    precision: auto

@@ -1,152 +1,111 @@
-"""One shared, backend-neutral metric layer.
-
-Every comparison in the product — candidate vs teacher, candidate vs gold,
-zero-shot, constant baseline, sweep cells, the all-failure decision prompt,
-and benchmark outputs — computes its numbers here, so no consumer ever
-recomputes (or disagrees about) a metric.
-
-Conventions, applied everywhere:
-- `n` is all compared rows; `valid_n` counts rows whose prediction parsed to a
-  legal value. Invalid predictions count as failures for `agreement`/`exact`
-  but are excluded from numeric-error and correlation calculations (which is
-  why `valid_n` is always reported beside them).
-- Correlations are JSON `null` (Python None) when undefined (< 2 valid pairs
-  or a constant series) — never NaN.
-- Metrics that don't apply to a field type are omitted, never rendered as 0.
-- Enum per-class metrics cover the complete contract label set with a
-  zero-division policy of 0.0; contract labels absent from the reference
-  labels are listed in `classes_absent` (support 0) and excluded from
-  macro/balanced averages so an unexercised label can't halve a score. A
-  `None` prediction is "no prediction": it misses recall but enters no
-  precision denominator.
-"""
+"""Backend-neutral evidence metrics for constrained decisions."""
 
 from __future__ import annotations
 
+import math
+from collections import Counter
 from typing import Any
 
 from .spec import FieldSpec, FunctionSpec
 
-# int outputs: |pred - reference| >= spec.gate.severe_delta is a severe miss
-DEFAULT_SEVERE_DELTA = 3
 
-
-def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
-    """Wilson score interval for a proportion k/n — honest about small n,
-    where a point verdict is otherwise statistical theater."""
-    if n == 0:
+def wilson_ci(k: int, n: int, z: float = 1.96) -> list[float] | None:
+    if not n:
         return None
     p = k / n
-    denom = 1 + z**2 / n
-    center = (p + z**2 / (2 * n)) / denom
-    half = (z / denom) * ((p * (1 - p) / n + z**2 / (4 * n**2)) ** 0.5)
-    return (round(max(0.0, center - half), 4), round(min(1.0, center + half), 4))
+    denominator = 1 + z**2 / n
+    center = (p + z**2 / (2 * n)) / denominator
+    half = z / denominator * math.sqrt(p * (1 - p) / n + z**2 / (4 * n**2))
+    return [round(max(0.0, center - half), 4), round(min(1.0, center + half), 4)]
 
 
 def pearson_r(xs: list[float], ys: list[float]) -> float | None:
-    n = len(xs)
-    if n < 2:
+    if len(xs) < 2:
         return None
-    mx, my = sum(xs) / n, sum(ys) / n
-    vx = sum((x - mx) ** 2 for x in xs)
-    vy = sum((y - my) ** 2 for y in ys)
-    if vx == 0 or vy == 0:
-        return None  # constant series: correlation undefined
-    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-    return cov / (vx**0.5 * vy**0.5)
+    mean_x, mean_y = sum(xs) / len(xs), sum(ys) / len(ys)
+    var_x = sum((value - mean_x) ** 2 for value in xs)
+    var_y = sum((value - mean_y) ** 2 for value in ys)
+    if not var_x or not var_y:
+        return None
+    covariance = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    return covariance / math.sqrt(var_x * var_y)
 
 
-def _ranks(xs: list[float]) -> list[float]:
-    """Average ranks (ties share their mean rank), 1-based."""
-    order = sorted(range(len(xs)), key=lambda i: xs[i])
-    ranks = [0.0] * len(xs)
-    i = 0
-    while i < len(order):
-        j = i
-        while j + 1 < len(order) and xs[order[j + 1]] == xs[order[i]]:
-            j += 1
-        mean_rank = (i + j) / 2 + 1
-        for k in range(i, j + 1):
-            ranks[order[k]] = mean_rank
-        i = j + 1
+def _ranks(values: list[float]) -> list[float]:
+    order = sorted(range(len(values)), key=values.__getitem__)
+    ranks = [0.0] * len(values)
+    index = 0
+    while index < len(order):
+        end = index
+        while end + 1 < len(order) and values[order[end + 1]] == values[order[index]]:
+            end += 1
+        rank = (index + end) / 2 + 1
+        for position in range(index, end + 1):
+            ranks[order[position]] = rank
+        index = end + 1
     return ranks
 
 
 def spearman_rho(xs: list[float], ys: list[float]) -> float | None:
-    if len(xs) < 2:
-        return None
-    return pearson_r(_ranks(xs), _ranks(ys))
+    return pearson_r(_ranks(xs), _ranks(ys)) if len(xs) >= 2 else None
 
 
 def nearest_rank_p90(values: list[float]) -> float | None:
-    """Nearest-rank 90th percentile: the ceil(0.9*n)-th smallest value.
-    Deterministic by definition — no interpolation-mode ambiguity."""
     if not values:
         return None
     ordered = sorted(values)
-    import math
-
     return ordered[math.ceil(0.9 * len(ordered)) - 1]
 
 
-def agrees(field: FieldSpec, pred: Any, ref: Any) -> bool:
-    """Field-level agreement: ±1 for int fields, exact for enum fields.
-    An invalid (None) prediction never agrees."""
-    if pred is None:
+def field_decision_matches(field: FieldSpec, prediction: Any, reference: Any) -> bool:
+    if prediction is None:
         return False
-    return abs(pred - ref) <= 1 if field.type == "int" else pred == ref
+    return abs(prediction - reference) <= 1 if field.type == "int" else prediction == reference
 
 
-def int_field_metrics(
-    field: FieldSpec, preds: list, refs: list, severe_delta: int = DEFAULT_SEVERE_DELTA
-) -> dict[str, Any]:
-    n = len(refs)
-    valid = [(p, r) for p, r in zip(preds, refs) if p is not None]
-    valid_n = len(valid)
-    agree_k = sum(1 for p, r in zip(preds, refs) if agrees(field, p, r))
-    exact_k = sum(1 for p, r in zip(preds, refs) if p == r)
-    abs_errs = [abs(p - r) for p, r in valid]
-    # a severe miss is a large error OR no legal prediction at all
-    severe_k = sum(1 for p, r in zip(preds, refs) if p is None or abs(p - r) >= severe_delta)
-    pr = pearson_r([p for p, _ in valid], [r for _, r in valid])
-    rho = spearman_rho([p for p, _ in valid], [r for _, r in valid])
-    ci = wilson_ci(agree_k, n)
-    p90 = nearest_rank_p90(abs_errs)
+def int_field_metrics(field: FieldSpec, predictions: list, references: list) -> dict[str, Any]:
+    n = len(references)
+    valid = [(p, r) for p, r in zip(predictions, references) if p is not None]
+    errors = [abs(p - r) for p, r in valid]
+    signed = [p - r for p, r in valid]
+    exact_count = sum(p == r for p, r in zip(predictions, references))
+    within_count = sum(
+        field_decision_matches(field, p, r) for p, r in zip(predictions, references)
+    )
+    pearson = pearson_r([p for p, _ in valid], [r for _, r in valid])
+    spearman = spearman_rho([p for p, _ in valid], [r for _, r in valid])
     return {
         "n": n,
-        "valid_n": valid_n,
-        "invalid_rate": round((n - valid_n) / n, 4) if n else 0.0,
-        "agreement": round(agree_k / n, 4) if n else 0.0,
-        "agreement_ci": list(ci) if ci else None,
-        "exact": round(exact_k / n, 4) if n else 0.0,
-        "mae": round(sum(abs_errs) / valid_n, 4) if valid_n else None,
-        "p90_absolute_error": p90,
-        "max_absolute_error": max(abs_errs) if abs_errs else None,
-        "mean_signed_error": (
-            round(sum(p - r for p, r in valid) / valid_n, 4) if valid_n else None
-        ),
-        "pearson_r": round(pr, 4) if pr is not None else None,
-        "spearman_rho": round(rho, 4) if rho is not None else None,
-        "severe": {
-            "threshold": severe_delta,
-            "count": severe_k,
-            "rate": round(severe_k / n, 4) if n else 0.0,
+        "valid_n": len(valid),
+        "invalid_rate": round((n - len(valid)) / n, 4) if n else 0.0,
+        "exact": round(exact_count / n, 4) if n else 0.0,
+        "exact_ci": wilson_ci(exact_count, n),
+        "within_one": round(within_count / n, 4) if n else 0.0,
+        "within_one_ci": wilson_ci(within_count, n),
+        "mae": round(sum(errors) / len(errors), 4) if errors else None,
+        "absolute_error_histogram": {
+            str(key): value for key, value in sorted(Counter(errors).items())
         },
+        "p90_absolute_error": nearest_rank_p90(errors),
+        "max_absolute_error": max(errors) if errors else None,
+        "mean_signed_error": round(sum(signed) / len(signed), 4) if signed else None,
+        "pearson_r": round(pearson, 4) if pearson is not None else None,
+        "spearman_rho": round(spearman, 4) if spearman is not None else None,
     }
 
 
-def enum_field_metrics(field: FieldSpec, preds: list, refs: list) -> dict[str, Any]:
-    n = len(refs)
+def enum_field_metrics(field: FieldSpec, predictions: list, references: list) -> dict[str, Any]:
     labels = field.values()
-    valid_n = sum(1 for p in preds if p is not None)
-    agree_k = sum(1 for p, r in zip(preds, refs) if agrees(field, p, r))
+    n = len(references)
+    valid_n = sum(prediction is not None for prediction in predictions)
+    exact_count = sum(p == r for p, r in zip(predictions, references))
     per_class: dict[str, dict[str, Any]] = {}
     for label in labels:
-        tp = sum(1 for p, r in zip(preds, refs) if p == label and r == label)
-        pred_k = sum(1 for p in preds if p == label)
-        support = sum(1 for r in refs if r == label)
-        precision = tp / pred_k if pred_k else 0.0
-        recall = tp / support if support else 0.0
+        true_positive = sum(p == label and r == label for p, r in zip(predictions, references))
+        predicted = sum(p == label for p in predictions)
+        support = sum(r == label for r in references)
+        precision = true_positive / predicted if predicted else 0.0
+        recall = true_positive / support if support else 0.0
         f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
         per_class[str(label)] = {
             "precision": round(precision, 4),
@@ -154,102 +113,93 @@ def enum_field_metrics(field: FieldSpec, preds: list, refs: list) -> dict[str, A
             "f1": round(f1, 4),
             "support": support,
         }
-    observed = {
-        str(label)
-        for label in labels
-        if per_class[str(label)]["support"] or any(p == label for p in preds)
-    }
-    absent = [str(label) for label in labels if str(label) not in observed]
-    scored = [c for c in observed if per_class[c]["support"]]
+    observed = [str(label) for label in labels if per_class[str(label)]["support"]]
     macro_f1 = (
-        round(sum(per_class[c]["f1"] for c in observed) / len(observed), 4)
+        round(sum(per_class[label]["f1"] for label in observed) / len(observed), 4)
         if observed
         else None
     )
     weighted_f1 = (
-        round(sum(per_class[c]["f1"] * per_class[c]["support"] for c in scored) / n, 4)
-        if n and scored
+        round(
+            sum(per_class[label]["f1"] * per_class[label]["support"] for label in observed)
+            / n,
+            4,
+        )
+        if n
         else None
     )
-    balanced_accuracy = (
-        round(sum(per_class[c]["recall"] for c in scored) / len(scored), 4)
-        if scored
+    balanced = (
+        round(sum(per_class[label]["recall"] for label in observed) / len(observed), 4)
+        if observed
         else None
     )
-    worst = min(scored, key=lambda c: per_class[c]["recall"]) if scored else None
-    ci = wilson_ci(agree_k, n)
+    worst = min(observed, key=lambda label: per_class[label]["recall"]) if observed else None
+    confusion = {
+        "labels": [str(label) for label in labels],
+        "matrix": [
+            [sum(r == actual and p == predicted for p, r in zip(predictions, references)) for predicted in labels]
+            for actual in labels
+        ],
+    }
     return {
         "n": n,
         "valid_n": valid_n,
         "invalid_rate": round((n - valid_n) / n, 4) if n else 0.0,
-        "agreement": round(agree_k / n, 4) if n else 0.0,
-        "agreement_ci": list(ci) if ci else None,
-        "exact": round(agree_k / n, 4) if n else 0.0,  # enum: agreement is exact
-        "macro_f1": macro_f1,  # point estimate; no interval in v0.2
+        "decision_agreement": round(exact_count / n, 4) if n else 0.0,
+        "decision_agreement_ci": wilson_ci(exact_count, n),
+        "macro_f1": macro_f1,
         "weighted_f1": weighted_f1,
-        "balanced_accuracy": balanced_accuracy,
+        "balanced_accuracy": balanced,
         "per_class": per_class,
         "worst_class_recall": (
             {"label": worst, "recall": per_class[worst]["recall"]} if worst else None
         ),
-        "classes_absent": absent,
+        "classes_absent": [str(label) for label in labels if str(label) not in observed],
+        "confusion": confusion,
     }
 
 
-def field_metrics(
-    field: FieldSpec, preds: list, refs: list, severe_delta: int = DEFAULT_SEVERE_DELTA
-) -> dict[str, Any]:
+def field_metrics(field: FieldSpec, predictions: list, references: list) -> dict[str, Any]:
     if field.type == "int":
-        return int_field_metrics(field, preds, refs, severe_delta)
-    return enum_field_metrics(field, preds, refs)
+        return int_field_metrics(field, predictions, references)
+    return enum_field_metrics(field, predictions, references)
 
 
-def compare(
-    spec: FunctionSpec,
-    preds: list,
-    refs: list,
-    severe_delta: int | None = None,
-) -> dict[str, Any]:
-    """The one comparison shape. Scalar contracts return the field's metric
-    dict; structured contracts return joint agreement/exact/invalid plus the
-    full per-field set under `fields` and the worst required field by gate
-    margin under `worst_field`."""
-    delta = severe_delta if severe_delta is not None else spec.gate.severe_delta
+def compare(spec: FunctionSpec, predictions: list, references: list) -> dict[str, Any]:
+    if len(predictions) != len(references):
+        raise ValueError("predictions and references must have equal length")
     if spec.output.is_scalar:
-        return field_metrics(spec.output.scalar, preds, refs, delta)
+        return field_metrics(spec.output.scalar, predictions, references)
 
-    n = len(refs)
-    fields = spec.output.fields
-    dicts = [p if isinstance(p, dict) else {} for p in preds]
-    per_field = {
-        name: field_metrics(field, [d.get(name) for d in dicts], [g[name] for g in refs], delta)
-        for name, field in fields.items()
+    n = len(references)
+    normalized = [prediction if isinstance(prediction, dict) else {} for prediction in predictions]
+    fields = {
+        name: field_metrics(
+            field,
+            [prediction.get(name) for prediction in normalized],
+            [reference[name] for reference in references],
+        )
+        for name, field in spec.output.fields.items()
     }
-    joint_k = sum(
-        1
-        for d, g in zip(dicts, refs)
-        if all(agrees(f, d.get(name), g[name]) for name, f in fields.items())
+    joint = sum(
+        all(
+            field_decision_matches(field, prediction.get(name), reference[name])
+            for name, field in spec.output.fields.items()
+        )
+        for prediction, reference in zip(normalized, references)
     )
-    exact_k = sum(
-        1 for d, g in zip(dicts, refs) if all(d.get(name) == g[name] for name in fields)
+    exact = sum(prediction == reference for prediction, reference in zip(normalized, references))
+    invalid = sum(
+        any(prediction.get(name) not in field.values() for name, field in spec.output.fields.items())
+        for prediction in normalized
     )
-    invalid = sum(1 for d in dicts if any(d.get(name) is None for name in fields))
-    worst_name = min(
-        per_field,
-        key=lambda name: per_field[name]["agreement"] - spec.gate.field_threshold(name),
-    )
-    ci = wilson_ci(joint_k, n)
     return {
         "n": n,
         "valid_n": n - invalid,
         "invalid_rate": round(invalid / n, 4) if n else 0.0,
-        "agreement": round(joint_k / n, 4) if n else 0.0,  # joint: all fields
-        "agreement_ci": list(ci) if ci else None,
-        "exact": round(exact_k / n, 4) if n else 0.0,
-        "fields": per_field,
-        "worst_field": {
-            "name": worst_name,
-            "agreement": per_field[worst_name]["agreement"],
-            "threshold": spec.gate.field_threshold(worst_name),
-        },
+        "joint_decision_agreement": round(joint / n, 4) if n else 0.0,
+        "joint_decision_agreement_ci": wilson_ci(joint, n),
+        "joint_exact": round(exact / n, 4) if n else 0.0,
+        "joint_exact_ci": wilson_ci(exact, n),
+        "fields": fields,
     }

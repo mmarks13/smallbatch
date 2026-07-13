@@ -1,13 +1,4 @@
-"""Conventional classifier candidates (torch-free).
-
-The compiler is a method selector, not a LoRA wrapper: every compile also
-fits a TF-IDF + logistic-regression candidate on the same teacher labels and
-scores it on the same gate. When the linear model wins, that's the artifact —
-~KBs, CPU-only, no base model.
-
-Persistence is skops (audited loading, no pickle code execution). Loading
-refuses any type outside the expected sklearn pipeline before construction.
-"""
+"""TF-IDF candidate training and safe persistence."""
 
 from __future__ import annotations
 
@@ -54,8 +45,8 @@ def _check_class_coverage(spec: FunctionSpec, train_rows: list[Row]) -> None:
 
 def train_tfidf(spec: FunctionSpec, train_rows: list[Row], out_dir: Path) -> dict[str, Any]:
     """Fit one TfidfVectorizer+LogisticRegression pipeline per output field
-    (int ranges are classification over the discrete values, matching the
-    gate's agreement rules) and persist with skops. Returns format metadata
+    (int ranges are classification over the discrete values) and persist with
+    skops. Returns format metadata
     for the candidate record."""
     import sklearn
     import skops
@@ -111,7 +102,13 @@ def predict_tfidf(
 ) -> list[Any]:
     """Outputs aligned with `items`, in the contract's shape (bare value for
     scalar specs, {field: value} for structured). Never imports torch."""
-    pipelines = _load_pipelines(model_dir)
+    return predict_tfidf_pipelines(_load_pipelines(model_dir), spec, items)
+
+
+def predict_tfidf_pipelines(
+    pipelines: dict[str, Any], spec: FunctionSpec, items: list[dict]
+) -> list[Any]:
+    """Predict with already-loaded pipelines for honest batch-one timing."""
     texts = [prompts.render_input(it, spec.input_schema) for it in items]
     if not texts:
         return []

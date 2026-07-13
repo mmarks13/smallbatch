@@ -1,0 +1,43 @@
+from ._common import FUNCTION, ROOT, metadata, render_input, validate_input, validate_output
+
+_PIPELINES = None
+
+
+def _load():
+    global _PIPELINES
+    if _PIPELINES is None:
+        import skops.io as sio
+
+        path = ROOT / "model" / "model.skops"
+        unknown = sio.get_untrusted_types(file=path)
+        if unknown:
+            raise ValueError(f"standalone TF-IDF model contains unexpected types: {unknown}")
+        _PIPELINES = sio.load(path, trusted=[])
+    return _PIPELINES
+
+
+def _native(value):
+    return value.item() if hasattr(value, "item") else value
+
+
+def classify_batch(items):
+    normalized = [validate_input(item) for item in items]
+    if not normalized:
+        return []
+    texts = [render_input(item) for item in normalized]
+    per_field = {
+        name: [_native(value) for value in pipeline.predict(texts)]
+        for name, pipeline in _load().items()
+    }
+    if list(FUNCTION["output"]["fields"]) == ["score"]:
+        outputs = per_field["score"]
+    else:
+        outputs = [
+            {name: per_field[name][index] for name in per_field}
+            for index in range(len(normalized))
+        ]
+    return [validate_output(output) for output in outputs]
+
+
+def classify(item):
+    return classify_batch([item])[0]

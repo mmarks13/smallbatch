@@ -1,12 +1,12 @@
 [project]
 name = "smallbatch"
 version = "0.2.0"
-description = "Small-batch distillation: compile a frontier model's ability on one narrow task into a small local model."
+description = "Distill prompt-driven LLM decisions into tested local CPU functions."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "Michael Marks" }]
-keywords = ["lora", "fine-tuning", "distillation", "classification", "peft", "small-models"]
+keywords = ["distillation", "classification", "setfit", "lora", "local-inference", "cpu"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -23,7 +23,8 @@ dependencies = [
     # Pascal cards need a <2.7/cu124 build (see README hardware notes);
     # Blackwell (RTX 50xx) needs >=2.7/cu128 — so no upper bound here
     "torch>=2.4",
-    "transformers>=4.51",
+    # SetFit 1.1.3 imports Transformers 4.x APIs removed in 5.x
+    "transformers>=4.56,<5",
     "peft>=0.14",
     "trl>=0.13",
     "datasets>=2.19",
@@ -31,6 +32,9 @@ dependencies = [
     # the conventional tfidf candidate (torch-free path)
     "scikit-learn>=1.4",
     "skops>=0.10",
+    # intermediary few-shot sentence-transformer candidate
+    "setfit>=1.1.3,<1.2",
+    "sentence-transformers>=3,<6",
 ]
 
 [project.optional-dependencies]

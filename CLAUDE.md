@@ -1,131 +1,153 @@
-# CLAUDE.md
+# Smallbatch Contributor Guide
 
-smallbatch is a classifier compiler: YAML spec → teacher labels → two
-candidates trained on the same data (tfidf+logreg and a LoRA adapter) →
-eval gate against the teacher's holdout (+ gold labels when provided) →
-winner selected → callable local function.
+## Product Contract
 
-If a `CLAUDE.local.md` exists in this checkout, it describes THIS machine's
-hardware constraints — read it before running any training command; it
-overrides the general guidance here.
+This is the authoritative, exact product contract. `README.md` is its concise
+public-facing expression. Product and implementation decisions must remain
+consistent with this section.
 
-## Which doc answers what
+### Tagline
 
-| You need to... | Read |
-|---|---|
-| Understand the pipeline, spec fields, identities, gold, gate semantics, artifacts | `docs/how-it-works.md` |
-| Run a compile on a local GPU (precision, VRAM, old-GPU pins, OOM knobs) | `docs/local-gpu.md` |
-| Run a compile on a rented cloud GPU | `docs/cloud.md` |
-| Judge whether a teacher provider may be used | `docs/responsible-use.md` |
-| See a complete working spec + walkthrough | `examples/ticket-priority/README.md` |
-| The operational release gate | `RELEASE_CHECKLIST.md` |
+**Smallbatch distills prompt-driven LLM decisions into small, tested local
+functions that run on a CPU.**
+
+### Value Proposition
+
+**Replace repeated LLM inference with a local CPU function you control, with
+clear evidence about the quality and operating tradeoffs.**
+
+### Contract
+
+**You provide:** A constrained decision prompt and representative inputs,
+either with existing decisions or with a callable LLM teacher whose behavior
+you approve on a sample.
+
+**Smallbatch provides:** CPU-runnable candidates compared on decision
+agreement, error profile, speed, resource use, and portability. You select one
+or none; Smallbatch packages your selection as a shareable Python function
+that does not require Smallbatch at runtime.
+
+**Smallbatch does not:** Validate whether the prompt, imported decisions, or
+teacher behavior is correct.
+
+### Suitability
+
+Smallbatch is for repeated decisions whose prompt, output meaning, and input
+distribution remain consistent long enough to justify compilation.
+
+### Feature Test
+
+A feature belongs in Smallbatch only when it directly helps a user:
+
+1. Define a constrained prompt-driven decision.
+2. Obtain decisions from an approved teacher or reuse existing decisions.
+3. Build and compare CPU-runnable candidates.
+4. Understand behavioral and operating tradeoffs.
+5. Explicitly select one candidate or none.
+6. Package and run the selected local function.
+
+### Explicit Non-Goals
+
+- Gold-label or ground-truth infrastructure.
+- Rubric, policy, prompt, or teacher correctness validation.
+- General-purpose data annotation.
+- Universal acceptance gates or automatic winners.
+- Open-ended text generation.
+- GPU-only runtime artifacts.
+- A general AutoML, experiment-tracking, serving, or deployment platform.
+
+## Product Flow
+
+```text
+prompt + typed inputs
+  -> imported decisions OR calibrated teacher decisions
+  -> deterministic train/dev/eval data
+  -> TF-IDF + SetFit + LoRA candidates
+  -> full CPU evaluation and operating profiles
+  -> user selects one or none
+  -> standalone source package + wheel
+```
+
+The evaluation reference is a supplied decision, not ground truth. There are
+no gold labels, acceptance gates, PASS/FAIL verdicts, or automatic winners.
 
 ## Commands
 
 ```bash
-pytest -q                                   # unit tests: CPU-only, no network, ~5s (sklearn import)
-ruff check src tests                        # must be clean before any commit
-smallbatch init <template> <name>           # starter spec.yaml + items.json (instant)
-smallbatch doctor <spec> [--items X]        # preflight; 1 live teacher probe unless --no-probe
-                                            #   plan-stage gate/dev of 0 = FAIL, not warn
-smallbatch label <spec> --items items.json  # teacher-label a dataset (network, no GPU)
-                                            #   journaled: crashes resume without re-spending;
-                                            #   --append keeps rows + sticky gate; --max-variants N
-                                            #   = GLOBAL synthetic budget (0 = none); items may
-                                            #   carry "gold": routed to gate, never to the teacher
-smallbatch review <spec>                    # step through labels: accept/reject/edit (interactive)
-smallbatch compile <spec>                   # tfidf + LoRA candidates + eval + gate (GPU, minutes)
-                                            #   fails closed on stale labels (--allow-stale-labels);
-                                            #   all-fail -> interactive accept prompt (TTY only) or
-                                            #   --use-best-anyway; exit stays 2 either way
-smallbatch sweep <sweep.yaml>               # grid of model x arm compiles (GPU, long; experimental)
-smallbatch run <fn> --json '{...}'          # call a compiled function
-                                            #   --version <dir> --candidate lora|tfidf
-smallbatch export <fn>                      # GGUF for the LoRA candidate only (experimental)
-smallbatch serve <fn> [--port 8080]         # HTTP endpoint; tfidf winners serve CPU-only,
-                                            #   LoRA needs export + llama-server (experimental)
-smallbatch push <fn> --repo you/name        # whitelist upload to HF Hub; --dry-run previews
-                                            #   (NEVER run a real push without the user asking)
-smallbatch status                           # functions, verdicts, winners, integrity/drift (instant)
+smallbatch init <classifier|scorer|structured> <name>
+smallbatch doctor <spec> [--items items.json]
+smallbatch label <spec> --items items.json [--append] [--skip-calibration]
+smallbatch compile <spec> [--cpu-threads N]
+smallbatch select <function> <candidate> [--version BUILD]
+smallbatch select <function> --clear
+smallbatch run <function> --json '{...}'
+smallbatch run <function> --version BUILD --candidate ID --json '{...}'
+smallbatch status
 ```
 
-Python API mirrors the CLI: `smallbatch.label(...)`, `smallbatch.compile(...)`,
-`smallbatch.load_fn(name, version=..., candidate=...)` (see `src/smallbatch/api.py`).
+Compile exits `0` when at least one candidate completes and `1` on operational
+failure. It never selects. Selection packages and validates the standalone
+runtime before atomically changing `active.json`.
 
-## Exit codes (load-bearing — sweeps and CI depend on them)
+## Module Ownership
 
-`smallbatch compile` returns **0** = gate PASS, **2** = honest gate FAIL, **1**
-= real error (including every-candidate-errored). The sweep runner treats 0/2
-as honest results and records anything else as an error, continuing. A user
-ACCEPTING a failed candidate never changes the gate result or the exit code —
-it only sets `deployment.accepted_candidate` in the manifest. Never "fix" a 2
-by weakening the gate.
+- `spec.py`: prompt-first schema, strict input/output validation, identities.
+- `labeling.py`, `calibration.py`, `journal.py`: decision acquisition and data.
+- `candidates.py`, `setfit_candidate.py`, `training.py`: candidate training.
+- `evaluate.py`, `metrics.py`, `profiling.py`, `report.py`: evidence.
+- `artifacts.py`, `runtime.py`: immutable builds and internal candidate loading.
+- `standalone.py`, `standalone_templates/`: generated no-Smallbatch packages.
+- `api.py`, `cli.py`, `doctor.py`, `init_cmd.py`: public orchestration.
+- `teacher/`: callable LLM backends; keep provider imports lazy.
 
-## Module map
+## Invariants
 
-Torch-free (import-cheap, unit-tested on CPU): `spec.py` (pydantic
-`FunctionSpec`/`TrainSpec`, `extra="forbid"`; `labeling_hash` = label-meaning
-identity vs `spec_hash` = build identity; `validate_slug` for path-safe
-names), `metrics.py` (THE shared metric layer — every comparison everywhere
-computes here; stdlib-only), `artifacts.py` (versioned dirs, manifest v2 with
-per-candidate records, `candidate_is_usable` — the ONE usability predicate,
-`select_winner`, integrity vs source-drift), `candidates.py` (tfidf+logreg
-via sklearn/skops; strict skops trust policy), `journal.py` (durable labeling
-journal + lock), `decision.py` (all-fail decision tables — values from
-manifest/report, never recomputed), `sweep.py`, `hardware.py`, `prompts.py`
-(incl. `incomplete_fields` — the one output-completeness check), `labeling.py`
-(three-way sticky splits, gold routing, global variant budget, atomic writes),
-`report.py` (build/render + `redact_report`; `report_details.json` is
-local-only), `doctor.py`, `review.py`, `init_cmd.py`, `serve.py`'s handlers,
-`hub.py` (whitelist `ship_list`), `cli.py`, `api.py` (heavy imports live
-*inside* the functions — keep them lazy so `label`/`status`/`sweep` never
-import torch; sklearn imports stay inside `candidates.py` functions too).
+1. Specs, items, datasets, manifests, and old artifacts fail closed across the
+   v0.2 schema break. Do not restore legacy aliases.
+2. A file contains either imported decisions for every item or no decisions.
+3. Calibration never edits decisions; it approves, declines, or reviews more.
+4. Evaluation rows remain sticky on append and never feed training or
+   augmentation.
+5. Candidate errors are recorded and isolated. One failed candidate must not
+   discard completed candidates.
+6. Every selectable candidate has completed full CPU evaluation.
+7. Build manifests are immutable evidence. Selection is a separate atomic
+   pointer and history.
+8. Generated wheels must not import or depend on `smallbatch` and must reproduce
+   the evaluated candidate or disclose and explicitly accept package drift.
+9. Public evidence contains no inputs, rationales, or raw disagreements.
+10. CPU time, memory, and bytes are proxies; never describe them as measured
+    energy use.
 
-Torch-heavy (imported only when a compile actually runs): `training.py`
-(LoRA/qlora fine-tune), `evaluate.py` (holdout scoring + gate + OOM-backoff
-eval batching), `runtime.py`'s LoRA path (`TfidfFunction` is torch-free),
-`export.py`'s merge step. `teacher/` holds the labeling backends.
+## Artifact Layout
 
-**Subprocess isolation invariant:** `sweep.py` runs each cell as its own
-`smallbatch compile` process. This is deliberate — it guarantees VRAM is
-released between runs and isolates crashes/OOMs. Do not in-process the loop.
+```text
+data/<function>/
+  train.jsonl dev.jsonl eval.jsonl labeled.jsonl meta.json calibration.json
+  journal/
 
-**Candidate isolation invariant:** each compile candidate's failure is
-captured into its manifest record; a crash in one candidate must never
-discard another's completed work. All-error = exit 1.
-
-**Privacy invariant:** anything that leaves the machine (push/export) ships
-the redacted report only, via a positive whitelist (`hub.SHIP_PATTERNS`).
-`report_details.json` and `provenance.local.json` never ship. Trained model
-state is NOT redacted (tfidf vocabularies contain raw training tokens) — the
-push preflight says so.
-
-## Artifact layout
-
-```
-artifacts/<fn>/<date>[-rN]/          # a compile version: tfidf/ + adapter/ +
-                                     #   spec.yaml (resolved) + spec_files/ +
-                                     #   manifest.json + report.md/json +
-                                     #   report_details.json (local-only) +
-                                     #   provenance.local.json (local-only)
-artifacts/<fn>/<sweep>/<tag>/        # a sweep run (never the deployed version)
-data/<fn>/                           # labeled train/dev/gate JSONL + journal/
-                                     #   (gitignored)
+artifacts/<function>/
+  builds/<build-id>/
+    spec.yaml manifest.json build_state.json report.json report.md
+    report_details.local.json evaluation.local.jsonl candidates/<candidate>/
+  packages/<build-id>--<candidate>/
+    source/ dist/*.whl package.json
+  active.json selection-history.jsonl
 ```
 
-`versions()`/`latest()` only look one level under `<fn>` (numeric-aware -rN
-sort), so sweep runs never get deployed by `smallbatch run`. Usability is
-candidate-scoped: an accepted winner never unlocks an unaccepted secondary.
+Files suffixed `.local` never enter standalone packages.
 
-## Conventions
+## Verification
 
-- Defaults must stay generic: no personal paths, no machine-specific pins in
-  tracked files (that's what `CLAUDE.local.md`/`local/` are for — both
-  gitignored).
-- The default base model is `ibm-granite/granite-4.0-350m` (Apache-2.0, dense
-  transformer — deliberately NOT the hybrid `-h-` variant); adapters inherit
-  the base model's license.
-- `pytest -q` and `ruff check src tests` must pass on CPU with no network
-  before any commit.
-- The three plan-review documents (PROJECT_EVALUATION.md, V0.2_RELEASE_PLAN_*)
-  are gitignored working papers — never track or ship them.
+```bash
+pytest -q
+ruff check src tests case-study
+python -m build
+```
+
+CPU-only, offline unit tests are the default. Real SetFit and LoRA release
+checks use cached models; do not make the normal test suite download models or
+call a teacher.
+
+The repository may be dirty. Preserve user changes and work with compatible
+in-progress edits rather than reverting them.

@@ -1,10 +1,9 @@
-"""smallbatch CLI: label, compile, run, status."""
+"""Smallbatch command-line interface."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -16,233 +15,24 @@ def _load_items(path: Path) -> list[dict]:
     text = path.read_text()
     if path.suffix == ".jsonl":
         return [json.loads(line) for line in text.splitlines() if line.strip()]
-    data = json.loads(text)
-    if isinstance(data, dict):  # tolerate {"items": [...]}-shaped files
-        for v in data.values():
-            if isinstance(v, list):
-                return v
-        raise ValueError(f"no item list found in {path}")
-    return data
-
-
-def cmd_label(args) -> int:
-    from .api import label
-
-    spec = load_spec(args.spec)
-    items = _load_items(Path(args.items))
-    result = label(
-        spec, items, out_dir=args.out,
-        append=args.append, max_variants=args.max_variants,
-    )
-    print(json.dumps(result.meta, indent=2))
-    if result.compressed:
-        hist = result.meta["label_histogram"]
-        top_share = max(hist.values()) / sum(hist.values())
-        print(
-            f"note: labels are compressed ({top_share:.0%} in one bin) — "
-            "consider sharpening the rubric anchors and relabeling"
-        )
-    return 0
-
-
-def cmd_compile(args) -> int:
-    from .api import compile as compile_fn
-
-    spec = load_spec(args.spec)
-    try:
-        result = compile_fn(
-            spec,
-            data_dir=args.data,
-            artifacts_root=args.artifacts,
-            base=args.base,
-            precision=args.precision,
-            sweep_name=getattr(args, "sweep_name", None),
-            tag=getattr(args, "tag", None),
-            arm=getattr(args, "arm", None),
-            allow_stale_labels=getattr(args, "allow_stale_labels", False),
-        )
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-
-    # report first: the metrics are the result; the verdict is one line
-    h = (result.report or {}).get("headline", {})
-    ci = h.get("agreement_ci")
-    ci_txt = f" (95% CI {ci[0]:.0%}-{ci[1]:.0%})" if ci else ""
-    print(f"agreement {h.get('agreement', 0):.1%}{ci_txt} on {h.get('n', 0)} gate items")
-    tr = (result.report or {}).get("training", {})
-    if tr.get("best_epoch") is not None:
-        print(
-            f"best epoch {tr['best_epoch']}/{tr.get('epochs_run')} "
-            f"({tr.get('stopped_reason')})"
-        )
-    if result.report_path:
-        print(f"report: {result.report_path}")
-    print(json.dumps({"metrics": result.metrics, "gate": result.gate}, indent=2))
-    for w in (result.report or {}).get("warnings") or []:
-        print(f"warning: {w}", file=sys.stderr)
-    print(f"{'PASS' if result.passed else 'FAIL'}: {result.version_dir}")
-    if not result.passed:
-        _offer_acceptance(args, spec, result)
-    return 0 if result.passed else 2
-
-
-def _offer_acceptance(args, spec, result) -> None:
-    """All-candidates-failed flow (CLI only): show the full decision summary
-    and let the user explicitly deploy the best candidate. Acceptance never
-    rewrites the gate; the exit code stays 2 either way. Never interactive
-    inside sweep subprocesses, the Python API, or non-TTY runs."""
-    from . import decision
-
-    manifest = result.manifest
-    if not decision.all_completed_failed(manifest):
-        return
-    if getattr(args, "sweep_name", None) is not None:
-        return  # sweeps stay non-interactive; cells are research results
-    winner = manifest["selection"]["winner"]
-    use_flag = getattr(args, "use_best_anyway", False)
-    interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    if not use_flag and not interactive:
-        print(
-            f"hint: `smallbatch run {manifest['function']} --allow-failed` uses "
-            "the best candidate once; `compile --use-best-anyway` accepts it as "
-            "the default"
-        )
-        return
-
-    root = Path(args.artifacts)
-    current = artifacts.latest(root, manifest["function"])
-    displaced = (
-        current.name if current is not None and current != result.version_dir else None
-    )
-    print()
-    print(decision.build_decision_text(spec, manifest, result.report, displaced))
-    if result.report_path:
-        print(f"\nDetails: {result.report_path}")
-    if use_flag:
-        accept, via = True, "flag_use_best_anyway"
-        print(f"--use-best-anyway: accepting '{winner}' for deployment")
-    else:
-        reply = input(f"\nUse {winner} as the default despite the failed gate? [y/N] ")
-        accept, via = reply.strip().lower() in ("y", "yes"), "interactive_compile"
-    if accept:
-        artifacts.accept_candidate(result.version_dir, winner, via)
-        print(
-            f"{winner} accepted for use.\n"
-            "The quality result remains FAIL; run/load will show a warning.\n"
-            "Accepted for runtime; gate remains FAIL, so compile exits 2."
-        )
-    elif displaced:
-        print(f"declined — {displaced} remains the deployed default")
-
-
-def cmd_run(args) -> int:
-    from .runtime import load_fn
-
-    try:
-        fn = load_fn(
-            args.name,
-            artifacts_root=args.artifacts,
-            allow_failed=args.allow_failed,
-            version=args.version,
-            candidate=args.candidate,
-        )
-    except (FileNotFoundError, ValueError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    if args.json:
-        print(fn(json.loads(args.json)))
-    else:
-        items = _load_items(Path(args.input_file))
-        for item, out in zip(items, fn.batch(items)):
-            print(json.dumps({"output": out, "input": item}, ensure_ascii=False))
-    return 0
-
-
-def cmd_export(args) -> int:
-    from .export import export
-
-    try:
-        export(
-            args.name,
-            artifacts_root=args.artifacts,
-            version=args.version,
-            quant=args.quant,
-            adapter_only=args.adapter_only,
-            allow_failed=args.allow_failed,
-            llama_cpp=args.llama_cpp,
-            keep_merged=args.keep_merged,
-        )
-    except (FileNotFoundError, ValueError, RuntimeError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    return 0
-
-
-def cmd_push(args) -> int:
-    from .hub import push
-
-    try:
-        push(
-            args.name,
-            repo_id=args.repo,
-            artifacts_root=args.artifacts,
-            version=args.version,
-            private=not args.public,
-            allow_failed=args.allow_failed,
-            dry_run=args.dry_run,
-        )
-    except (FileNotFoundError, ValueError, RuntimeError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    return 0
-
-
-def cmd_sweep(args) -> int:
-    import shlex
-
-    from .sweep import load_sweep, run_sweep
-
-    sweep = load_sweep(args.sweep_yaml)
-    override = os.environ.get("SMALLBATCH_COMPILE")
-    compile_prefix = shlex.split(override) if override else None
-    return run_sweep(
-        sweep,
-        data_dir=args.data,
-        artifacts_root=args.artifacts,
-        compile_prefix=compile_prefix,
-    )
+    value = json.loads(text)
+    if isinstance(value, dict) and isinstance(value.get("items"), list):
+        return value["items"]
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must contain a JSON list or JSONL records")
+    return value
 
 
 def cmd_init(args) -> int:
     from .init_cmd import init
 
     try:
-        out = init(args.template, args.name, directory=args.dir)
-    except (ValueError, FileExistsError) as e:
-        print(f"error: {e}", file=sys.stderr)
+        directory = init(args.template, args.name, directory=args.dir)
+    except (ValueError, FileExistsError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(f"created {out}/spec.yaml and {out}/items.json")
-    print(f"next: fill in the TODOs, then `smallbatch doctor {out}/spec.yaml --items {out}/items.json`")
+    print(f"created {directory}/spec.yaml and {directory}/items.json")
     return 0
-
-
-def cmd_serve(args) -> int:
-    from .serve import serve
-
-    try:
-        return serve(
-            args.name,
-            artifacts_root=args.artifacts,
-            version=args.version,
-            port=args.port,
-            llama_server=args.llama_server,
-            allow_failed=args.allow_failed,
-            candidate=args.candidate,
-        )
-    except (FileNotFoundError, ValueError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
 
 
 def cmd_doctor(args) -> int:
@@ -250,28 +40,117 @@ def cmd_doctor(args) -> int:
 
     try:
         spec = load_spec(args.spec)
-    except ValueError as e:
-        print(f"FAIL  spec did not validate:\n{e}", file=sys.stderr)
+        items = _load_items(Path(args.items)) if args.items else None
+        return run_doctor(
+            spec,
+            items=items,
+            data_dir=Path(args.data or f"data/{spec.name}"),
+            probe=not args.no_probe,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    items = _load_items(Path(args.items)) if args.items else None
-    data = Path(args.data) if args.data else Path(f"data/{spec.name}")
-    return run_doctor(
-        spec,
-        items=items,
-        data_dir=data if data.is_dir() else None,
-        probe=not args.no_probe,
+
+
+def cmd_label(args) -> int:
+    from .api import label
+    from .calibration import CalibrationDeclined
+
+    try:
+        result = label(
+            args.spec,
+            _load_items(Path(args.items)),
+            out_dir=args.out,
+            append=args.append,
+            max_variants=args.max_variants,
+            skip_calibration=args.skip_calibration,
+        )
+    except CalibrationDeclined as exc:
+        print(str(exc))
+        return 0
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result.meta, indent=2))
+    return 0
+
+
+def cmd_compile(args) -> int:
+    from .api import compile as compile_fn
+
+    try:
+        result = compile_fn(
+            args.spec,
+            data_dir=args.data,
+            artifacts_root=args.artifacts,
+            cpu_threads=args.cpu_threads,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for name, record in result.candidates.items():
+        if record.get("status") == "completed":
+            print(f"{name}: completed")
+        else:
+            print(f"{name}: ERROR - {record.get('error')}")
+    print(f"report: {result.report_path}")
+    print("No candidate was selected. Use `smallbatch select` after reviewing the report.")
+    return 0
+
+
+def cmd_select(args) -> int:
+    root = Path(args.artifacts)
+    if args.clear:
+        event = artifacts.clear_active(root, args.name)
+        print(json.dumps(event, indent=2))
+        return 0
+    if not args.candidate:
+        print("error: select requires a candidate or --clear", file=sys.stderr)
+        return 1
+    from .api import select
+
+    try:
+        result = select(
+            args.name,
+            args.candidate,
+            version=args.version,
+            artifacts_root=root,
+            accept_package_drift=args.accept_package_drift,
+        )
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"selected {result.candidate} from {result.build_id}")
+    print(f"source: {result.package_dir / 'source'}")
+    print(f"wheel: {result.wheel}")
+    print(
+        f"import: from smallbatch_functions.{args.name.replace('-', '_')} "
+        "import classify"
     )
+    return 0
 
 
-def cmd_review(args) -> int:
-    from .review import run_review
+def cmd_run(args) -> int:
+    from .runtime import load_fn
 
-    spec = load_spec(args.spec)
-    data = Path(args.data or f"data/{spec.name}")
-    if not (data / "labeled.jsonl").exists():
-        print(f"error: no labeled dataset under {data}", file=sys.stderr)
+    try:
+        function = load_fn(
+            args.name,
+            artifacts_root=args.artifacts,
+            version=args.version,
+            candidate=args.candidate,
+        )
+        if args.json:
+            print(json.dumps(function(json.loads(args.json)), ensure_ascii=False))
+        else:
+            records = _load_items(Path(args.input_file))
+            inputs = [record["input"] if "input" in record else record for record in records]
+            for item, output in zip(inputs, function.batch(inputs)):
+                print(json.dumps({"input": item, "output": output}, ensure_ascii=False))
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    return run_review(spec, data, args)
+    return 0
 
 
 def cmd_status(args) -> int:
@@ -279,197 +158,91 @@ def cmd_status(args) -> int:
     if not root.is_dir():
         print(f"no artifacts under {root}")
         return 0
-    for fn_dir in sorted(root.iterdir()):
-        for v in artifacts.versions(root, fn_dir.name):
-            m = artifacts.read_manifest(v)
-            flags = []
-            deployment = m.get("deployment") or {}
-            if m["gate"]["passed"]:
-                flags.append("PASS")
-            elif deployment.get("accepted_despite_gate"):
-                flags.append(
-                    f"IN USE - GATE FAIL (accepted: {deployment.get('accepted_candidate')})"
+    for function_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        active = artifacts.read_active(root, function_dir.name)
+        print(f"{function_dir.name}: active={active['candidate'] if active else 'none'}")
+        for build in artifacts.versions(root, function_dir.name):
+            try:
+                manifest = artifacts.read_manifest(build)
+                broken = artifacts.artifact_integrity(build)
+                drift = artifacts.source_drift(build)
+                flags = []
+                if broken:
+                    flags.append(f"INTEGRITY: {broken}")
+                if drift and drift != artifacts.SOURCE_UNAVAILABLE:
+                    flags.append(f"SOURCE DRIFT: {drift}")
+                summary = ", ".join(
+                    f"{name}={record.get('status')}"
+                    for name, record in manifest["candidates"].items()
                 )
-            else:
-                flags.append("FAIL")
-            broken = artifacts.artifact_integrity(v)
-            drift = artifacts.source_drift(v)
-            if broken:
-                flags.append(f"INTEGRITY ({broken})")
-            elif drift == artifacts.SOURCE_UNAVAILABLE:
-                pass  # immutable snapshot; missing source is not a problem
-            elif drift:
-                flags.append(f"SOURCE DRIFT ({drift})")
-            winner_rec = artifacts.candidate_record(m) or {}
-            agr = (winner_rec.get("metrics") or {}).get("agreement")
-            agr_txt = f"{agr:.2%}" if agr is not None else "-"
-            backend = winner_rec.get("backend", "lora")
-            print(
-                f"{fn_dir.name}/{v.name}  [{' '.join(flags)}]  "
-                f"agreement={agr_txt}  winner={backend}  base={m.get('base_model')}"
-            )
-        for v in artifacts.sweep_runs(root, fn_dir.name):
-            m = artifacts.read_manifest(v)
-            gate = "PASS" if m["gate"]["passed"] else "FAIL"
-            agr = ((m.get("metrics") or {}).get("adapter") or {}).get("agreement")
-            agr_txt = f"{agr:.2%}" if agr is not None else "-"
-            print(f"{fn_dir.name}/{m['version']}  [{gate}]  agreement={agr_txt}  base={m.get('base_model')}")
+                print(f"  {build.name}: {summary}" + (f" [{'; '.join(flags)}]" if flags else ""))
+            except (ValueError, FileNotFoundError) as exc:
+                print(f"  {build.name}: ERROR {exc}")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="smallbatch")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    parser = argparse.ArgumentParser(prog="smallbatch")
+    sub = parser.add_subparsers(dest="cmd", required=True)
 
-    lp = sub.add_parser("label", help="generate a teacher-labeled dataset for a spec")
-    lp.add_argument("spec")
-    lp.add_argument("--items", required=True, help="JSON/JSONL file of real input items")
-    lp.add_argument("--out", help="output dir (default data/<name>)")
-    lp.add_argument(
-        "--append", action="store_true",
-        help="keep existing rows + split assignments (sticky gate); only label unseen items",
-    )
-    lp.add_argument(
-        "--max-variants", type=int,
-        help="global budget: max total new synthetic rows this run across "
-        "paraphrase/field-dropout/counterfactual (0 = no synthetic work)",
-    )
-    lp.set_defaults(fn=cmd_label)
+    init_parser = sub.add_parser("init", help="create a prompt-first function project")
+    init_parser.add_argument("template", choices=["classifier", "scorer", "structured"])
+    init_parser.add_argument("name")
+    init_parser.add_argument("--dir")
+    init_parser.set_defaults(fn=cmd_init)
 
-    cp = sub.add_parser("compile", help="train + evaluate + gate an adapter")
-    cp.add_argument("spec")
-    cp.add_argument("--data", help="labeled data dir (default data/<name>)")
-    cp.add_argument("--base", help="override train.base model id")
-    cp.add_argument("--precision", choices=["auto", "fp32", "bf16", "qlora"])
-    cp.add_argument(
-        "--allow-stale-labels",
-        action="store_true",
-        help="train even though the dataset was labeled under a different "
-        "rubric/contract/teacher (recorded in the artifact manifest)",
-    )
-    cp.add_argument(
-        "--use-best-anyway",
-        action="store_true",
-        help="if every candidate fails the gate, accept the best one as the "
-        "deployed default without prompting (gate stays FAIL, exit stays 2)",
-    )
-    cp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
-    # sweep-internal: route the artifact into artifacts/<fn>/<sweep>/<tag> and
-    # stamp the manifest, instead of a dated version dir (see cmd_sweep)
-    cp.add_argument("--sweep-name", help=argparse.SUPPRESS)
-    cp.add_argument("--tag", help=argparse.SUPPRESS)
-    cp.add_argument("--arm", help=argparse.SUPPRESS)
-    cp.set_defaults(fn=cmd_compile)
+    doctor = sub.add_parser("doctor", help="validate a spec, data, teacher, and hardware")
+    doctor.add_argument("spec")
+    doctor.add_argument("--items")
+    doctor.add_argument("--data")
+    doctor.add_argument("--no-probe", action="store_true")
+    doctor.set_defaults(fn=cmd_doctor)
 
-    rp = sub.add_parser("run", help="call a compiled function")
-    rp.add_argument("name")
-    rp.add_argument("--json", help="single input item as JSON")
-    rp.add_argument("--input-file", help="JSON/JSONL file of items")
-    rp.add_argument("--allow-failed", action="store_true")
-    rp.add_argument("--version", help="artifact version dir name (default: latest usable)")
-    rp.add_argument(
-        "--candidate", help="run a specific retained candidate (e.g. lora, tfidf)"
-    )
-    rp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
-    rp.set_defaults(fn=cmd_run)
+    label_parser = sub.add_parser("label", help="import or generate decisions")
+    label_parser.add_argument("spec")
+    label_parser.add_argument("--items", required=True)
+    label_parser.add_argument("--out")
+    label_parser.add_argument("--append", action="store_true")
+    label_parser.add_argument("--max-variants", type=int)
+    label_parser.add_argument("--skip-calibration", action="store_true")
+    label_parser.set_defaults(fn=cmd_label)
 
-    ep = sub.add_parser(
-        "export", help="export a compiled function to GGUF (+ grammar + Modelfile)"
-    )
-    ep.add_argument("name")
-    ep.add_argument("--version", help="artifact version dir name (default: latest passing)")
-    ep.add_argument("--quant", default="q4_k_m", choices=["f16", "q8_0", "q4_k_m"])
-    ep.add_argument(
-        "--adapter-only", action="store_true",
-        help="convert just the LoRA for llama-server --lora over a shared base",
-    )
-    ep.add_argument("--allow-failed", action="store_true")
-    ep.add_argument("--llama-cpp", help="llama.cpp checkout dir (or set LLAMA_CPP_DIR)")
-    ep.add_argument("--keep-merged", action="store_true", help=argparse.SUPPRESS)
-    ep.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
-    ep.set_defaults(fn=cmd_export)
+    compile_parser = sub.add_parser("compile", help="build and compare CPU candidates")
+    compile_parser.add_argument("spec")
+    compile_parser.add_argument("--data")
+    compile_parser.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    compile_parser.add_argument("--cpu-threads", type=int)
+    compile_parser.set_defaults(fn=cmd_compile)
 
-    pp = sub.add_parser(
-        "push", help="upload an artifact to the Hugging Face Hub (private by default)"
-    )
-    pp.add_argument("name")
-    pp.add_argument("--repo", required=True, help="Hub repo id, e.g. you/fn-name")
-    pp.add_argument("--version", help="artifact version dir name (default: latest passing)")
-    pp.add_argument("--public", action="store_true", help="create the repo public")
-    pp.add_argument(
-        "--dry-run", action="store_true",
-        help="print the exact upload list + privacy preflight; no network",
-    )
-    pp.add_argument("--allow-failed", action="store_true")
-    pp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
-    pp.set_defaults(fn=cmd_push)
+    select_parser = sub.add_parser("select", help="package and activate one candidate")
+    select_parser.add_argument("name")
+    select_parser.add_argument("candidate", nargs="?")
+    select_parser.add_argument("--version")
+    select_parser.add_argument("--clear", action="store_true")
+    select_parser.add_argument("--accept-package-drift", action="store_true")
+    select_parser.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    select_parser.set_defaults(fn=cmd_select)
 
-    wp = sub.add_parser("sweep", help="run a grid of model x arm compiles")
-    wp.add_argument("sweep_yaml")
-    wp.add_argument("--data", help="labeled data dir (default data/<name>)")
-    wp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
-    wp.set_defaults(fn=cmd_sweep)
+    run_parser = sub.add_parser("run", help="call an active or explicit candidate")
+    run_parser.add_argument("name")
+    run_parser.add_argument("--json")
+    run_parser.add_argument("--input-file")
+    run_parser.add_argument("--version")
+    run_parser.add_argument("--candidate")
+    run_parser.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    run_parser.set_defaults(fn=cmd_run)
 
-    ip = sub.add_parser("init", help="create a starter spec.yaml + items.json from a template")
-    ip.add_argument("template", choices=["classifier", "scorer", "structured"])
-    ip.add_argument("name", help="function name (also the output directory)")
-    ip.add_argument("--dir", help="output directory (default: ./<name>)")
-    ip.set_defaults(fn=cmd_init)
+    status = sub.add_parser("status", help="show builds, candidates, and active selections")
+    status.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
+    status.set_defaults(fn=cmd_status)
 
-    vs = sub.add_parser(
-        "serve", help="serve a compiled function over HTTP (llama-server + validation)"
-    )
-    vs.add_argument("name")
-    vs.add_argument("--port", type=int, default=8080)
-    vs.add_argument("--version", help="artifact version dir name (default: latest passing)")
-    vs.add_argument("--llama-server", help="path to the llama-server binary")
-    vs.add_argument(
-        "--candidate", help="serve a specific retained candidate (e.g. lora, tfidf)"
-    )
-    vs.add_argument("--allow-failed", action="store_true")
-    vs.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
-    vs.set_defaults(fn=cmd_serve)
-
-    dp = sub.add_parser(
-        "doctor", help="preflight a spec: contract, teacher, data, hardware, disk, export"
-    )
-    dp.add_argument("spec")
-    dp.add_argument("--items", help="JSON/JSONL items file to check against the spec")
-    dp.add_argument("--data", help="labeled data dir (default data/<name>)")
-    dp.add_argument(
-        "--no-probe", action="store_true",
-        help="skip the single live teacher call (reachability/parse check)",
-    )
-    dp.set_defaults(fn=cmd_doctor)
-
-    vp = sub.add_parser(
-        "review", help="step through teacher labels: accept/reject/edit before training"
-    )
-    vp.add_argument("spec")
-    vp.add_argument("--data", help="labeled data dir (default data/<name>)")
-    vp.add_argument("--split", choices=["train", "dev", "gate"])
-    vp.add_argument(
-        "--origin", choices=["real", "variant", "dropout", "counterfactual"]
-    )
-    vp.add_argument("--label", help="filter by (primary) label/score value")
-    vp.add_argument("--field", help="structured outputs: filter by field, e.g. reason or reason=outage")
-    vp.add_argument(
-        "--unstable", action="store_true",
-        help="only rows where the teacher's self-consistency probe disagreed",
-    )
-    vp.add_argument(
-        "--status", default="unreviewed",
-        choices=["unreviewed", "accepted", "rejected", "edited", "all"],
-    )
-    vp.set_defaults(fn=cmd_review)
-
-    sp = sub.add_parser("status", help="list compiled functions and staleness")
-    sp.add_argument("--artifacts", default=str(artifacts.DEFAULT_ROOT))
-    sp.set_defaults(fn=cmd_status)
-
-    args = p.parse_args(argv)
+    args = parser.parse_args(argv)
     if args.cmd == "run" and not (args.json or args.input_file):
-        p.error("run requires --json or --input-file")
+        parser.error("run requires --json or --input-file")
+    if args.cmd == "run" and bool(args.version) != bool(args.candidate):
+        parser.error("explicit run requires both --version and --candidate")
+    if args.cmd == "select" and args.clear and args.candidate:
+        parser.error("select accepts either a candidate or --clear")
     return args.fn(args)
 
 

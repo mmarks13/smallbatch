@@ -1,0 +1,46 @@
+name: complaint-review-priority
+description: Assign an illustrative manual-review priority to a public consumer complaint.
+input_schema:
+  product: string
+  issue: string
+  narrative: string
+output:
+  type: int
+  range: [0, 4]
+prompt: |
+  Assign review_priority using only facts explicitly stated in the complaint.
+  Do not infer legal violations, protected status, intent, or facts not given.
+  Choose the highest level directly supported by the text.
+
+  0: No actionable consumer harm is described, or the text is an informational
+  or status request without an unresolved problem.
+
+  1: Limited or already resolved harm, inconvenience, or delay with no stated
+  continuing material impact.
+
+  2: Material unresolved harm requiring normal review, such as a disputed
+  charge or fee, withheld funds, access problem, or repeated unsuccessful
+  resolution, without a stated severe or imminent consequence.
+
+  3: Severe or ongoing harm requiring expedited review, such as substantial
+  loss, prolonged loss of essential account or credit access, active
+  collections or damaging credit reporting, repeated fraud, or threatened
+  loss of housing, a vehicle, or another essential service.
+
+  4: Immediate and time-sensitive risk of irreversible harm, such as imminent
+  foreclosure, eviction, repossession, active identity theft causing continuing
+  loss, a near irreversible deadline, or frozen essential funds creating an
+  immediate basic-needs risk.
+teacher:
+  backend: codex-cli
+  model: gpt-5.6-terra
+candidates:
+  tfidf:
+    type: tfidf
+  bge-small:
+    type: setfit
+    model: BAAI/bge-small-en-v1.5
+  granite-350m:
+    type: lora
+    model: ibm-granite/granite-4.0-350m
+    precision: auto

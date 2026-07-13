@@ -1,0 +1,164 @@
+import itertools
+import re
+
+from ._common import FUNCTION, ROOT, metadata, render_input, validate_input, validate_output
+
+_MODEL = None
+_TOKENIZER = None
+_INT_RE = re.compile(r"-?\d+")
+_SCORE_RE = re.compile(r"score:\s*(-?\d+)", re.I)
+_SCORE_VALUE_RE = re.compile(r"^\s*score\s*:\s*(.+)$", re.I | re.M)
+
+
+def _load():
+    global _MODEL, _TOKENIZER
+    if _MODEL is not None:
+        return _TOKENIZER, _MODEL
+    import torch
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    runtime = FUNCTION["runtime"]
+    _TOKENIZER = AutoTokenizer.from_pretrained(runtime["base_model"])
+    if _TOKENIZER.pad_token is None:
+        _TOKENIZER.pad_token = _TOKENIZER.eos_token
+    precision = runtime.get("inference_precision", "fp32")
+    kwargs = {"torch_dtype": torch.bfloat16 if precision == "bf16" else torch.float32}
+    try:
+        base = AutoModelForCausalLM.from_pretrained(runtime["base_model"], **kwargs)
+    except ValueError:
+        from transformers import AutoModelForImageTextToText
+
+        base = AutoModelForImageTextToText.from_pretrained(runtime["base_model"], **kwargs)
+    _MODEL = PeftModel.from_pretrained(base, ROOT / "model")
+    _MODEL.eval()
+    return _TOKENIZER, _MODEL
+
+
+def _parse_field(field, text):
+    if field.get("range") is not None:
+        match = _INT_RE.search(text)
+        if not match:
+            return None
+        value = int(match.group())
+        return value if field["range"][0] <= value <= field["range"][1] else None
+    lowered = text.casefold()
+    hits = [
+        (lowered.find(label.casefold()), -len(label), label)
+        for label in sorted(field["labels"], key=len, reverse=True)
+        if label.casefold() in lowered
+    ]
+    return min(hits)[2] if hits else None
+
+
+def _parse(text):
+    fields = FUNCTION["output"]["fields"]
+    if list(fields) == ["score"]:
+        if fields["score"].get("range") is not None:
+            match = _SCORE_RE.search(text)
+            if match:
+                value = int(match.group(1))
+                if fields["score"]["range"][0] <= value <= fields["score"]["range"][1]:
+                    return value
+        else:
+            match = _SCORE_VALUE_RE.search(text)
+            if match:
+                return _parse_field(fields["score"], match.group(1))
+        return _parse_field(fields["score"], text)
+    output = {}
+    for name, field in fields.items():
+        match = re.search(rf"^\s*{re.escape(name)}\s*:\s*(.+)$", text, re.I | re.M)
+        output[name] = _parse_field(field, match.group(1)) if match else None
+    return output
+
+
+def _completion_strings():
+    if FUNCTION["runtime"].get("rationale_distillation"):
+        return None
+    fields = FUNCTION["output"]["fields"]
+    choices = []
+    for field in fields.values():
+        if field.get("range") is not None:
+            choices.append(list(range(field["range"][0], field["range"][1] + 1)))
+        else:
+            choices.append(field["labels"])
+    total = 1
+    for values in choices:
+        total *= len(values)
+        if total > 5000:
+            return None
+    if list(fields) == ["score"]:
+        return [f" {value}" for value in choices[0]]
+    names = list(fields)
+    return [
+        " " + "\n".join(f"{name}: {value}" for name, value in zip(names, values))
+        for values in itertools.product(*choices)
+    ]
+
+
+def _constraint(tokenizer, completions, prompt_length):
+    trie, terminals = {}, set()
+    for completion in completions:
+        ids = tuple(tokenizer(completion, add_special_tokens=False)["input_ids"])
+        for index in range(len(ids)):
+            trie.setdefault(ids[:index], set()).add(ids[index])
+        trie.setdefault(ids, set())
+        terminals.add(ids)
+    eos = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else tokenizer.pad_token_id
+
+    def allowed(batch_id, input_ids):
+        generated = tuple(input_ids[prompt_length:].tolist())
+        values = set(trie.get(generated, set()))
+        if generated in terminals or not values:
+            values.add(eos)
+        return list(values)
+
+    return allowed
+
+
+def classify_batch(items):
+    normalized = [validate_input(item) for item in items]
+    if not normalized:
+        return []
+    tokenizer, model = _load()
+    prompts = [
+        f"[{FUNCTION['name']}]\n{render_input(item)}\noutput:" for item in normalized
+    ]
+    tokenizer.padding_side = "left"
+    encoded = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=2048)
+    completions = _completion_strings()
+    extra = {}
+    if completions:
+        extra["prefix_allowed_tokens_fn"] = _constraint(
+            tokenizer, completions, encoded["input_ids"].shape[1]
+        )
+    max_new = 8 + 8 * len(FUNCTION["output"]["fields"])
+    if FUNCTION["runtime"].get("rationale_distillation"):
+        max_new += 72
+    with __import__("torch").no_grad():
+        try:
+            generated = model.generate(
+                **encoded,
+                max_new_tokens=max_new,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                **extra,
+            )
+        except ValueError as exc:
+            if "has_previous_state" not in str(exc):
+                raise
+            generated = model.generate(
+                **encoded,
+                max_new_tokens=max_new,
+                do_sample=False,
+                use_cache=False,
+                pad_token_id=tokenizer.pad_token_id,
+                **extra,
+            )
+    new = generated[:, encoded["input_ids"].shape[1]:]
+    raw = tokenizer.batch_decode(new, skip_special_tokens=True)
+    return [validate_output(_parse(text)) for text in raw]
+
+
+def classify(item):
+    return classify_batch([item])[0]

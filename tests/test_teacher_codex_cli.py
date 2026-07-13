@@ -96,3 +96,14 @@ def test_usage_parses_codex_token_report(monkeypatch):
         "successful_calls": 1,
         "reported_tokens": 2115,
     }
+
+
+def test_reasoning_effort_flag_in_command():
+    from smallbatch.teacher.codex_cli import CodexCLITeacher
+
+    plain = CodexCLITeacher(model="gpt-5.6-terra")._command()
+    assert "-c" not in plain
+    low = CodexCLITeacher(model="gpt-5.6-terra", reasoning_effort="low")._command()
+    i = low.index("-c")
+    assert low[i + 1] == 'model_reasoning_effort="low"'
+    assert low[-1] == "-"  # prompt still arrives on stdin

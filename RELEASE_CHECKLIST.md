@@ -1,65 +1,48 @@
-# Release checklist
+# v0.2 Release Checklist
 
-The operational gate for tagging a release. Every box must be checked in the
-release PR; a clean clone must be able to verify each item. (Consolidated
-from the v0.2 external plan reviews; narrative review documents are not
-tracked.)
+This is an operational publication checklist, not a model-quality gate.
 
-## Correctness & integrity
+## Product And Documentation
 
-- [ ] `pytest -q` green and `ruff check src tests` clean on every supported
-      Python (CI matrix).
-- [ ] Labeling, build, and dataset identities are separate and tested:
-      `--base`/`--precision`/gate-threshold changes do NOT invalidate labels;
-      rubric/contract/teacher/spec_file changes fail compile closed.
-- [ ] Archived specs are self-contained and hash-consistent from a foreign
-      cwd with the source project deleted.
-- [ ] Candidate failure isolation: a completed candidate survives the other
-      candidate's crash; all-error compiles exit 1 and never offer acceptance.
-- [ ] The manifest is versioned (manifest_schema_version) and backend-neutral;
-      old LoRA-only manifests still read.
-- [ ] Both TF-IDF and LoRA runtime paths pass an end-to-end call
-      (`run --candidate tfidf` / `--candidate lora`).
-- [ ] Gold cannot leak into teacher prompts or training rows (sentinel tests).
-- [ ] Journal crash recovery covers real labels, generated variants (with
-      provenance), and probe results; a truncated final line is tolerated;
-      the dataset fold is atomic.
+- [ ] `CLAUDE.md` contains the exact product contract and README presents its
+      public-facing version.
+- [ ] README, contributor guide, docs, examples, metadata, and CLI help agree.
+- [ ] No public gold, gate, PASS/FAIL, automatic-winner, review, sweep, export,
+      serve, or push behavior remains.
+- [ ] Limitations distinguish decision fidelity from correctness and operating
+      proxies from energy measurement.
 
-## Metrics & honesty
+## Behavior And Evidence
 
-- [ ] Every completed candidate and sweep cell records the complete
-      type-appropriate metric set (integers: MAE/p90/max/signed error/
-      correlations/severe/invalid with valid_n; enums: macro+weighted F1/
-      balanced accuracy/per-class/worst-class recall/invalid).
-- [ ] All-failure acceptance preserves FAIL + exit 2 while making explicit
-      acceptance persistent, candidate-scoped, and visible in `status`.
-- [ ] The benchmark used a locked external gold test scored exactly once
-      after candidate selection; all seeds/candidates/baselines published.
-- [ ] README claims are limited to measured results and tested paths;
-      experimental commands labeled.
+- [ ] Imported and calibrated-teacher workflows pass end to end.
+- [ ] TF-IDF, real SetFit, and LoRA candidate paths have been exercised.
+- [ ] Every selectable candidate completes full CPU evaluation.
+- [ ] Reports contain every required metric and no private examples.
+- [ ] Candidate errors remain visible and do not discard survivors.
+- [ ] No candidate becomes active during compile.
 
-## Privacy & rights
+## Standalone Package
 
-- [ ] Public artifacts (push/export) contain no source examples, teacher
-      rationales, or absolute local paths by default (sentinel scan over the
-      exact ship list).
-- [ ] `push --dry-run` prints the exact upload list + TF-IDF vocabulary
-      preflight.
-- [ ] Teacher-output distribution rights are resolved and dated for anything
-      published (see the benchmark's TERMS file); aggregate-only fallback
-      applied if ambiguous.
+- [ ] Generated source is inspectable and excludes decision data and journals.
+- [ ] Wheel metadata has no Smallbatch runtime dependency.
+- [ ] Wheel installs/imports outside the repository and exposes
+      `classify`, `classify_batch`, and `metadata`.
+- [ ] Full package parity, valid-drift confirmation, invalid-output refusal,
+      integrity, and atomic selection rollback are tested.
 
-## Packaging & release mechanics
+## Case Study
 
-- [ ] pyproject version == `smallbatch.__version__` == the tag.
-- [ ] Clean-venv wheel install passes the smoke (CLI --help, init,
-      torch-free tfidf train/predict).
-- [ ] Local GPU e2e smoke on the ticket example (label with a forced crash +
-      resume, review, compile both candidates, run both via --candidate,
-      status, export LoRA, serve tfidf, push --dry-run).
-- [ ] PTY all-failure smoke: decline path, accept path, exit 2 both ways,
-      default resolution after acceptance, unaccepted-secondary refusal,
-      older-PASS displacement message.
-- [ ] Tag pushed only after CI is green on the release commit; PyPI publish
-      via the protected trusted-publishing workflow; `pip install smallbatch`
-      verified from a clean venv afterward, PyPI page renders (banner, links).
+- [ ] CFPB IDs, inputs, hashes, extraction date, prompt, teacher, and scripts
+      are frozen before full labeling.
+- [ ] The first-draft priority prompt was not revised after teacher access.
+- [ ] Results are described as decision-distillation evidence, not correctness.
+- [ ] Rights review is dated before publishing teacher decisions or packages.
+
+## Packaging And Publication
+
+- [ ] `pytest -q` and `ruff check src tests case-study` pass.
+- [ ] Smallbatch sdist/wheel and generated-function wheel smoke tests pass.
+- [ ] CI passes on every supported Python version.
+- [ ] Clean-environment install from the built Smallbatch wheel succeeds.
+- [ ] Version, changelog, package metadata, tag, and PyPI page agree.
+- [ ] Trusted publishing runs only after explicit maintainer approval.

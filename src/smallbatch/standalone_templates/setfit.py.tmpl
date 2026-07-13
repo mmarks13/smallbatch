@@ -1,0 +1,42 @@
+import json
+
+from ._common import FUNCTION, ROOT, metadata, render_input, validate_input, validate_output
+
+_MODELS = None
+
+
+def _load():
+    global _MODELS
+    if _MODELS is None:
+        from setfit import SetFitModel
+
+        _MODELS = {}
+        for name in FUNCTION["output"]["fields"]:
+            field = ROOT / "model" / name
+            labels = json.loads((field / "labels.json").read_text())
+            _MODELS[name] = (SetFitModel.from_pretrained(field / "model", device="cpu"), labels)
+    return _MODELS
+
+
+def classify_batch(items):
+    normalized = [validate_input(item) for item in items]
+    if not normalized:
+        return []
+    texts = [render_input(item) for item in normalized]
+    per_field = {}
+    for name, (model, labels) in _load().items():
+        raw = model.predict(texts, use_labels=False)
+        indices = raw.tolist() if hasattr(raw, "tolist") else list(raw)
+        per_field[name] = [labels[int(index)] for index in indices]
+    if list(FUNCTION["output"]["fields"]) == ["score"]:
+        outputs = per_field["score"]
+    else:
+        outputs = [
+            {name: per_field[name][index] for name in per_field}
+            for index in range(len(normalized))
+        ]
+    return [validate_output(output) for output in outputs]
+
+
+def classify(item):
+    return classify_batch([item])[0]

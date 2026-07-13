@@ -7,8 +7,8 @@ the in-flight batch. Rerunning the same `smallbatch label` command replays the
 journal instead of re-spending teacher calls, then folds everything into the
 dataset files and archives itself.
 
-Events are keyed by the spec's labeling fingerprint (labeling_hash): a journal
-written under a different rubric/contract/teacher/prompt version is ignored,
+Events are keyed by the spec's decision fingerprint: a journal written under
+a different prompt/contract/teacher version is ignored,
 never replayed.
 """
 
@@ -118,7 +118,7 @@ class LabelJournal:
             self._fh = None
         events = self.dir / EVENTS_FILE
         if events.exists():
-            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             os.replace(events, self.dir / f"archived-{stamp}.jsonl")
         self._release_lock()
 

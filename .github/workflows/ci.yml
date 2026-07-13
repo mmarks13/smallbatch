@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_call:  # the release workflow reuses this as its gate
+  workflow_call:  # the release workflow reuses these operational checks
 
 jobs:
   test:
@@ -12,22 +12,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      # the unit suite is deliberately torch-free at runtime, but the package
-      # imports must resolve; install CPU torch to keep the job small
+      # The normal suite is CPU-only and offline after installation.
       - name: Install
         run: |
           python -m pip install -U pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
       - name: Lint
-        run: ruff check src tests
+        run: ruff check src tests case-study
       - name: Unit tests (CPU-only, no network)
         run: pytest -q
 
@@ -42,7 +41,7 @@ jobs:
         run: |
           python -m pip install -U pip build
           python -m build
-      - name: Wheel smoke (install + CLI + torch-free tfidf path)
+      - name: Wheel smoke (CLI + compile + standalone function wheel)
         run: |
           python -m venv /tmp/smoke
           /tmp/smoke/bin/pip install -q dist/*.whl --extra-index-url https://download.pytorch.org/whl/cpu
@@ -52,27 +51,28 @@ jobs:
           import importlib.metadata
           import smallbatch
           assert importlib.metadata.version("smallbatch") == smallbatch.__version__
-          # the tfidf candidate trains + predicts without touching torch
-          import sys
+          import json, zipfile
           from pathlib import Path
-          from smallbatch.candidates import TFIDF_DIR, predict_tfidf, train_tfidf
+          from smallbatch.api import compile, label, select
           from smallbatch.spec import FunctionSpec
           spec = FunctionSpec(
-              name="smoke", description="-", input_schema={"t": "str"},
-              output={"type": "enum", "labels": ["a", "b"]}, rubric="-",
-              teacher={"backend": "claude-cli", "model": "sonnet"},
+              name="smoke", input_schema={"text": "string"},
+              output={"type": "enum", "labels": ["a", "b"]},
+              prompt="a for fruit, b for bread",
+              candidates={"tfidf": {"type": "tfidf"}},
           )
-          rows = [
-              {"id": str(i), "input": {"t": w}, "score": s, "origin": "real", "split": "train"}
-              for i, (w, s) in enumerate(
-                  [("apple fruit", "a"), ("apricot fruit", "a"), ("banana loaf", "b"), ("bread loaf", "b")]
-              )
+          items = [
+              {"input": {"text": f"apple fruit {i}"}, "output": "a"} if i % 2 == 0
+              else {"input": {"text": f"bread loaf {i}"}, "output": "b"}
+              for i in range(30)
           ]
-          out = Path("/tmp/smoke-artifact") / TFIDF_DIR
-          train_tfidf(spec, rows, out)
-          assert predict_tfidf(out, spec, [{"t": "fruit apple"}]) == ["a"]
-          assert "torch" not in sys.modules
-          print("wheel smoke ok")
+          label(spec, items, out_dir="/tmp/smoke-data")
+          built = compile(spec, data_dir="/tmp/smoke-data", artifacts_root="/tmp/smoke-artifacts", cpu_threads=1)
+          selected = select("smoke", "tfidf", version=built.build_id, artifacts_root="/tmp/smoke-artifacts", interactive=False)
+          with zipfile.ZipFile(selected.wheel) as archive:
+              metadata = archive.read(next(n for n in archive.namelist() if n.endswith(".dist-info/METADATA"))).decode()
+              assert "Requires-Dist: smallbatch\n" not in metadata
+          print("smallbatch and standalone wheel smoke ok")
           PY
       - uses: actions/upload-artifact@v4
         with:

@@ -23,11 +23,13 @@ class CodexCLITeacher:
         timeout: int = 600,
         retries: int = 2,
         binary: str = "codex",
+        reasoning_effort: str | None = None,
     ):
         self.model = model
         self.timeout = timeout
         self.retries = retries
         self.binary = binary
+        self.reasoning_effort = reasoning_effort
         self.attempts = 0
         self.successful_calls = 0
         self.reported_tokens = 0
@@ -46,7 +48,7 @@ class CodexCLITeacher:
         return {k: v for k, v in os.environ.items() if k not in transient}
 
     def _command(self) -> list[str]:
-        return [
+        cmd = [
             self.binary,
             "exec",
             "--ephemeral",
@@ -58,8 +60,10 @@ class CodexCLITeacher:
             "never",
             "--model",
             self.model,
-            "-",
         ]
+        if self.reasoning_effort:
+            cmd += ["-c", f'model_reasoning_effort="{self.reasoning_effort}"']
+        return [*cmd, "-"]
 
     def complete(self, prompt: str) -> str:
         last_err: Exception | None = None

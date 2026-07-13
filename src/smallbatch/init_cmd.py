@@ -1,113 +1,107 @@
-"""`smallbatch init <template> [name]`: start a new function from a working
-skeleton instead of a blank page. Writes <name>/spec.yaml + items.json with
-TODOs where judgment is needed."""
+"""Prompt-first project templates."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-_TEACHER_BLOCK = """\
-# Pick the teacher you are authorized to use (docs/responsible-use.md):
+_TEACHER = """\
 teacher:
-  backend: openai-compatible        # any /chat/completions endpoint
-  model: qwen3:8b                   # TODO: your labeling model
+  backend: openai-compatible
+  model: qwen3:8b
   base_url: http://localhost:11434/v1
-  # backend: claude-cli             # or: logged-in Claude Code CLI
-  # model: sonnet
-  # backend: codex-cli              # or: logged-in OpenAI Codex CLI
-  # model: gpt-5.6-terra
-  examples: 150                     # target dataset size (variants fill the gap)
-  holdout: 0.15                     # gate split (fraction of reals, or an int count)
-  dev: 0.1                          # checkpoint-selection split
-  consistency: 30                   # self-consistency probe: re-label this many
-                                    # rows to measure the teacher's own ceiling
 """
 
-_TAIL = """\
-gate:
-  agreement: 0.85                   # acceptance bar (int: within +/-1; enum: exact)
-  must_beat_zeroshot: true
-train:
-  base: ibm-granite/granite-4.0-350m  # adapters inherit the base model's license (Apache-2.0)
-  precision: auto
+_CANDIDATES = """\
+candidates:
+  tfidf:
+    type: tfidf
+  bge-small:
+    type: setfit
+    model: BAAI/bge-small-en-v1.5
+  granite-350m:
+    type: lora
+    model: ibm-granite/granite-4.0-350m
+    precision: auto
 """
-
-
-def _spec(name: str, description: str, input_schema: dict, output: str, rubric: str) -> str:
-    fields = "\n".join(f"  {k}: {v}" for k, v in input_schema.items())
-    return (
-        f"name: {name}\n"
-        f"description: >\n  {description}\n"
-        f"input_schema:\n{fields}\n"
-        f"{output}"
-        f"rubric: |\n{rubric}"
-        f"{_TEACHER_BLOCK}{_TAIL}"
-    )
-
-
-def _items(input_schema: dict, n: int = 3) -> str:
-    return json.dumps(
-        [{k: f"TODO example {i + 1}" for k in input_schema} for i in range(n)],
-        indent=1,
-    )
 
 
 TEMPLATES = {
-    "classifier": dict(
-        description="TODO: one sentence on what this function decides.",
-        input_schema={"title": "str", "body": "str"},
-        output=(
+    "classifier": {
+        "description": "TODO: what repeated decision this function makes.",
+        "input_schema": {"title": "string", "body": "string"},
+        "output": "output:\n  type: enum\n  labels: [urgent, normal, low]\n",
+        "prompt": (
+            "Choose urgent, normal, or low.\n"
+            "urgent: TODO concrete criteria and tie-breakers\n"
+            "normal: TODO\nlow: TODO\n"
+        ),
+    },
+    "scorer": {
+        "description": "TODO: what repeated decision this function makes.",
+        "input_schema": {"title": "string", "summary": "string"},
+        "output": "output:\n  type: int\n  range: [0, 10]\n",
+        "prompt": (
+            "Assign an integer from 0 to 10.\n"
+            "9-10: TODO\n7-8: TODO\n5-6: TODO\n3-4: TODO\n0-2: TODO\n"
+        ),
+    },
+    "structured": {
+        "description": "TODO: what repeated decision this function makes.",
+        "input_schema": {"title": "string", "body": "string"},
+        "output": (
             "output:\n"
-            "  type: enum\n"
-            "  labels: [urgent, normal, low]   # TODO: your classes\n"
+            "  priority:\n    labels: [urgent, normal, low]\n"
+            "  reason:\n    labels: [outage, billing, question]\n"
+            "  confidence:\n    range: [1, 5]\n"
         ),
-        rubric=(
-            "  TODO: when does each label apply? Write it like instructions to a\n"
-            "  careful new hire — concrete criteria and tie-breakers, not vibes.\n"
-            "  urgent = ...\n  normal = ...\n  low = ...\n"
-        ),
-    ),
-    "scorer": dict(
-        description="TODO: one sentence on what this function scores.",
-        input_schema={"title": "str", "summary": "str"},
-        output="output:\n  type: int\n  range: [0, 10]\n",
-        rubric=(
-            "  Score 0-10.\n"
-            "  9-10 — TODO: what makes a top score\n"
-            "  7-8  — TODO\n  5-6  — TODO\n  3-4  — TODO\n"
-            "  0-2  — TODO: what makes a bottom score\n"
-        ),
-    ),
-    "structured": dict(
-        description="TODO: one sentence on what this function extracts/decides.",
-        input_schema={"title": "str", "body": "str"},
-        output=(
-            "# Each field is independently constrained; every field gates.\n"
-            "output:\n"
-            "  priority:\n"
-            "    labels: [urgent, normal, low]        # TODO: your classes\n"
-            "  reason:\n"
-            "    labels: [outage, billing, question]  # TODO: controlled reason codes\n"
-            "  confidence:\n"
-            "    range: [1, 5]\n"
-        ),
-        rubric=(
-            "  TODO: criteria for every field, including how the fields relate\n"
-            "  (e.g. which reason codes justify which priorities).\n"
-        ),
-    ),
+        "prompt": "Decide every output field using these criteria:\nTODO\n",
+    },
 }
 
 
+def _spec(name: str, template: dict) -> str:
+    fields = "\n".join(
+        f"  {field}: {kind}" for field, kind in template["input_schema"].items()
+    )
+    prompt = "\n".join(f"  {line}" for line in template["prompt"].splitlines())
+    return (
+        f"name: {name}\n"
+        f"description: {template['description']}\n"
+        f"input_schema:\n{fields}\n"
+        f"{template['output']}"
+        f"prompt: |\n{prompt}\n"
+        f"{_TEACHER}"
+        f"{_CANDIDATES}"
+    )
+
+
+def _items(schema: dict[str, str], count: int = 20) -> str:
+    def value(kind: str, index: int):
+        return {
+            "string": f"TODO representative value {index + 1}",
+            "integer": index,
+            "number": float(index),
+            "boolean": bool(index % 2),
+        }[kind]
+
+    return json.dumps(
+        [
+            {"input": {field: value(kind, index) for field, kind in schema.items()}}
+            for index in range(count)
+        ],
+        indent=2,
+    )
+
+
 def init(template: str, name: str, directory: str | None = None) -> Path:
+    from .spec import validate_id
+
     if template not in TEMPLATES:
         raise ValueError(f"template must be one of {sorted(TEMPLATES)}")
-    t = TEMPLATES[template]
+    validate_id(name, "function name")
     out = Path(directory or name)
     out.mkdir(parents=True, exist_ok=False)
-    (out / "spec.yaml").write_text(
-        _spec(name, t["description"], t["input_schema"], t["output"], t["rubric"])
-    )
-    (out / "items.json").write_text(_items(t["input_schema"]))
+    (out / "spec.yaml").write_text(_spec(name, TEMPLATES[template]))
+    (out / "items.json").write_text(_items(TEMPLATES[template]["input_schema"]))
     return out

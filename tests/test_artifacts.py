@@ -1,266 +1,93 @@
-import textwrap
+import json
 
+import yaml
+
+from conftest import make_spec
 from smallbatch import artifacts
 
 
-def make_artifact(tmp_path, name, passed=True, spec_files_content="likes: cats"):
-    ref = tmp_path / "prefs.yaml"
-    ref.write_text(spec_files_content)
-    spec_yaml = textwrap.dedent(
-        f"""
-        name: {name}
-        description: Score.
-        input_schema: {{title: str}}
-        output: {{type: int, range: [0, 10]}}
-        rubric: "-"
-        teacher: {{backend: claude-cli, model: sonnet}}
-        spec_files: ["{ref}"]
-        """
-    )
-    from smallbatch.spec import load_spec
-
-    v = artifacts.new_version_dir(tmp_path / "artifacts", name)
-    (v / "spec.yaml").write_text(spec_yaml)
-    spec = load_spec(v / "spec.yaml")
-    artifacts.write_manifest(
-        v,
-        {
-            "function": name,
-            "spec_hash": spec.spec_hash(),
-            "gate": {"passed": passed, "reasons": []},
-        },
-    )
-    return v, ref
-
-
-def test_latest_prefers_passing(tmp_path):
-    v1, _ = make_artifact(tmp_path, "toy", passed=True)
-    v2, _ = make_artifact(tmp_path, "toy", passed=False)
-    assert v2.name.endswith("-r2")
-    assert artifacts.latest(tmp_path / "artifacts", "toy") == v1
-    assert artifacts.latest(tmp_path / "artifacts", "toy", passing_only=False) == v2
-
-
-def make_archived_artifact(tmp_path, name="toy", spec_files=True):
-    """A version dir built the way compile now archives: resolved spec +
-    content-addressed spec_files copies + local provenance."""
-    import textwrap as tw
-
-    from smallbatch.api import _archive_spec
-    from smallbatch.spec import load_spec
-
-    project = tmp_path / "project"
-    project.mkdir(exist_ok=True)
-    body = tw.dedent(
-        f"""
-        name: {name}
-        description: Score.
-        input_schema: {{title: str}}
-        output: {{type: int, range: [0, 10]}}
-        rubric: "original rubric"
-        teacher: {{backend: claude-cli, model: sonnet}}
-        """
-    )
-    if spec_files:
-        (project / "prefs.yaml").write_text("likes: cats")
-        body += "spec_files: [prefs.yaml]\n"
-    (project / "spec.yaml").write_text(body)
-    spec = load_spec(project / "spec.yaml")
-    v = artifacts.new_version_dir(tmp_path / "artifacts", name)
-    _archive_spec(spec, v)
-    artifacts.write_manifest(
-        v, {"function": name, "spec_hash": spec.spec_hash(), "gate": {"passed": True}}
-    )
-    return v, project
-
-
-def test_staleness_detects_spec_file_change(tmp_path):
-    v, project = make_archived_artifact(tmp_path)
-    assert artifacts.staleness(v) is None
-    (project / "prefs.yaml").write_text("likes: dogs")
-    assert "changed" in artifacts.staleness(v)
-
-
-def test_archived_artifact_is_self_contained(tmp_path, monkeypatch):
-    """The archive reproduces its manifest hash from another cwd with the
-    source project deleted — a moved/removed project is never 'stale'."""
-    import shutil
-
-    v, project = make_archived_artifact(tmp_path)
-    shutil.rmtree(project)
-    monkeypatch.chdir(tmp_path / "artifacts")
-    assert artifacts.artifact_integrity(v) is None
-    assert artifacts.source_drift(v) == artifacts.SOURCE_UNAVAILABLE
-    assert artifacts.staleness(v) is None  # unavailable source != stale
-
-
-def test_tampered_archive_reports_integrity_failure(tmp_path):
-    v, _ = make_archived_artifact(tmp_path)
-    archived_ref = next((v / "spec_files").iterdir())
-    archived_ref.write_text("tampered")
-    assert "no longer match" in artifacts.artifact_integrity(v)
-
-
-def test_source_rubric_edit_is_drift_not_integrity_failure(tmp_path):
-    v, project = make_archived_artifact(tmp_path)
-    src = project / "spec.yaml"
-    src.write_text(src.read_text().replace("original rubric", "new rubric"))
-    assert artifacts.artifact_integrity(v) is None  # snapshot intact
-    assert "rubric/contract/teacher changed" in artifacts.source_drift(v)
-
-
-def test_same_basename_spec_files_both_survive(tmp_path):
-    from smallbatch.api import _archive_spec
-    from smallbatch.spec import load_spec
-
-    project = tmp_path / "p"
-    (project / "a").mkdir(parents=True)
-    (project / "b").mkdir()
-    (project / "a" / "schema.md").write_text("alpha")
-    (project / "b" / "schema.md").write_text("beta")
-    (project / "spec.yaml").write_text(
-        "name: toy\ndescription: '-'\ninput_schema: {title: str}\n"
-        "output: {type: int, range: [0, 10]}\nrubric: '-'\n"
-        "teacher: {backend: claude-cli, model: sonnet}\n"
-        "spec_files: [a/schema.md, b/schema.md]\n"
-    )
-    spec = load_spec(project / "spec.yaml")
-    v = artifacts.new_version_dir(tmp_path / "artifacts", "toy")
-    _archive_spec(spec, v)
-    copies = sorted(p.read_text() for p in (v / "spec_files").iterdir())
-    assert copies == ["alpha", "beta"]
-
-
-def test_compile_override_would_archive_resolved_spec(tmp_path):
-    """--base/--precision mutate the spec before archiving; the archive must
-    reproduce the mutated hash (self-consistent artifact)."""
-    from smallbatch.api import _archive_spec
-    from smallbatch.spec import load_spec
-
-    v, project = make_archived_artifact(tmp_path, spec_files=False)
-    spec = load_spec(project / "spec.yaml")
-    spec.train.base = "some/other-model"  # what compile --base does
-    _archive_spec(spec, v)
-    artifacts.write_manifest(
-        v, {"function": "toy", "spec_hash": spec.spec_hash(), "gate": {"passed": True}}
-    )
-    assert artifacts.artifact_integrity(v) is None
-    assert artifacts.source_drift(v) == "build settings changed since compile"
-
-
-def test_sweep_run_dir_replaces_populated_dir(tmp_path):
+def completed_build(tmp_path):
     root = tmp_path / "artifacts"
-    d1 = artifacts.sweep_run_dir(root, "toy", "sw", "m-plain")
-    (d1 / "adapter").mkdir()
-    (d1 / "adapter" / "weights.bin").write_text("old")
-    d2 = artifacts.sweep_run_dir(root, "toy", "sw", "m-plain")
-    assert d1 == d2
-    assert not (d2 / "adapter").exists()  # stateless: prior contents wiped
-
-
-def test_sweep_runs_found_but_ignored_by_versions(tmp_path):
-    root = tmp_path / "artifacts"
-    # a normal dated version at depth 1
-    v = artifacts.new_version_dir(root, "toy")
-    artifacts.write_manifest(v, {"function": "toy", "gate": {"passed": True}})
-    # sweep runs nested at depth 2
-    for tag in ("m-plain", "m-rationale"):
-        d = artifacts.sweep_run_dir(root, "toy", "sw", tag)
-        artifacts.write_manifest(d, {"function": "toy", "gate": {"passed": True}})
-    assert artifacts.versions(root, "toy") == [v]  # depth-1 only
-    runs = artifacts.sweep_runs(root, "toy")
-    assert {p.name for p in runs} == {"m-plain", "m-rationale"}
-
-
-def _v2_manifest(tfidf_passed, lora_passed, winner="tfidf", accepted=None):
-    return {
-        "manifest_schema_version": 2,
-        "function": "toy",
-        "candidates": {
-            "tfidf": {
-                "backend": "tfidf", "status": "completed",
-                "gate": {"passed": tfidf_passed, "reasons": []},
-            },
-            "lora": {
-                "backend": "lora", "status": "completed",
-                "gate": {"passed": lora_passed, "reasons": []},
-            },
-        },
-        "selection": {"winner": winner, "reason": "highest gate agreement"},
-        "deployment": (
-            {"accepted_despite_gate": True, "accepted_candidate": accepted}
-            if accepted else None
-        ),
-        "gate": {"passed": tfidf_passed if winner == "tfidf" else lora_passed},
+    spec = make_spec()
+    build = artifacts.build_dir(root, spec.name, spec.build_hash(), "dataset")
+    (build / "spec.yaml").write_text(yaml.safe_dump(spec.model_dump(mode="json"), sort_keys=False))
+    (build / "report.json").write_text("{}")
+    manifest = {
+        "manifest_schema_version": 3,
+        "function": spec.name,
+        "version": build.name,
+        "decision_hash": spec.decision_hash(),
+        "build_hash": spec.build_hash(),
+        "dataset_hash": "dataset",
+        "candidates": {"tfidf": {"status": "completed", "backend": "tfidf"}},
     }
+    manifest["artifact_files"] = artifacts.file_hashes(build)
+    artifacts.write_manifest(build, manifest)
+    state = artifacts.read_build_state(build)
+    state["status"] = "complete"
+    artifacts.write_build_state(build, state)
+    return root, build, manifest
 
 
-def test_candidate_usability_is_candidate_scoped():
-    # both fail, tfidf accepted: only tfidf becomes usable
-    m = _v2_manifest(False, False, winner="tfidf", accepted="tfidf")
-    assert artifacts.candidate_is_usable(m, "tfidf")
-    assert not artifacts.candidate_is_usable(m, "lora")
-    assert artifacts.candidate_is_usable(m, "lora", allow_failed=True)
-    assert artifacts.artifact_is_usable(m)
-
-
-def test_passing_winner_does_not_unlock_failed_secondary():
-    m = _v2_manifest(True, False, winner="tfidf")
-    assert artifacts.candidate_is_usable(m, "tfidf")
-    assert not artifacts.candidate_is_usable(m, "lora")
-
-
-def test_unaccepted_all_fail_artifact_unusable():
-    m = _v2_manifest(False, False, winner="tfidf")
-    assert not artifacts.artifact_is_usable(m)
-    assert not artifacts.candidate_is_usable(m, "tfidf")
-
-
-def test_errored_candidate_never_usable():
-    m = _v2_manifest(False, False, winner="tfidf", accepted="tfidf")
-    m["candidates"]["tfidf"]["status"] = "error"
-    assert not artifacts.candidate_is_usable(m, "tfidf")
-    assert not artifacts.candidate_is_usable(m, "tfidf", allow_failed=True)
-
-
-def test_legacy_v1_manifest_synthesized():
-    m = {"function": "toy", "gate": {"passed": True},
-         "base_model": "b", "inference_precision": "fp32",
-         "metrics": {"adapter": {"agreement": 0.9}}}
-    assert artifacts.winner(m) == "lora"
-    rec = artifacts.candidate_record(m)
-    assert rec["backend"] == "lora" and rec["gate"]["passed"]
-    assert artifacts.artifact_is_usable(m)
-    assert artifacts.candidate_record(m, "tfidf") is None
-
-
-def test_resolve_version_candidate_scoped(tmp_path):
-    import pytest
-
+def test_matching_build_resumes_and_versions_are_nested(tmp_path):
     root = tmp_path / "artifacts"
-    v = artifacts.new_version_dir(root, "toy")
-    artifacts.write_manifest(v, _v2_manifest(False, False, accepted="tfidf"))
-    assert artifacts.resolve_version(root, "toy", None, allow_failed=False) == v
-    with pytest.raises(ValueError, match="lora"):
-        artifacts.resolve_version(root, "toy", None, False, candidate="lora")
-    assert artifacts.resolve_version(root, "toy", None, True, candidate="lora") == v
-    with pytest.raises(ValueError, match="no 'setfit' candidate"):
-        artifacts.resolve_version(root, "toy", None, True, candidate="setfit")
+    first = artifacts.build_dir(root, "ticket-priority", "build", "data")
+    second = artifacts.build_dir(root, "ticket-priority", "build", "data")
+    assert first == second
+    assert first.parent.name == "builds"
 
 
-def test_version_sort_handles_double_digit_revisions(tmp_path):
-    root = tmp_path / "artifacts"
-    base = root / "toy"
-    for name in ["2026-07-11"] + [f"2026-07-11-r{i}" for i in range(2, 12)]:
-        d = base / name
-        d.mkdir(parents=True)
-        artifacts.write_manifest(d, {"function": "toy", "gate": {"passed": True}})
-    vs = [p.name for p in artifacts.versions(root, "toy")]
-    assert vs[-1] == "2026-07-11-r11"
-    assert vs.index("2026-07-11-r9") < vs.index("2026-07-11-r10")
-    assert artifacts.latest(root, "toy").name == "2026-07-11-r11"
-    # dates still order before revisions of a later date
-    d = base / "2026-07-12"
-    d.mkdir()
-    artifacts.write_manifest(d, {"function": "toy", "gate": {"passed": True}})
-    assert artifacts.latest(root, "toy").name == "2026-07-12"
+def test_integrity_detects_tampering(tmp_path):
+    _root, build, _manifest = completed_build(tmp_path)
+    assert artifacts.artifact_integrity(build) is None
+    (build / "report.json").write_text('{"changed": true}')
+    assert "changed" in artifacts.artifact_integrity(build)
+
+
+def test_damaged_complete_build_allocates_new_revision(tmp_path):
+    root, build, manifest = completed_build(tmp_path)
+    (build / "report.json").write_text('{"changed": true}')
+    replacement = artifacts.build_dir(
+        root,
+        "ticket-priority",
+        manifest["build_hash"],
+        manifest["dataset_hash"],
+    )
+    assert replacement != build
+    assert replacement.name.endswith("-r2")
+
+
+def test_selection_is_separate_and_clearable(tmp_path):
+    root, build, _manifest = completed_build(tmp_path)
+    selection = {
+        "function": "ticket-priority",
+        "build": build.name,
+        "candidate": "tfidf",
+        "package": "packages/test",
+    }
+    artifacts.activate(root, "ticket-priority", selection)
+    assert artifacts.read_active(root, "ticket-priority")["candidate"] == "tfidf"
+    artifacts.clear_active(root, "ticket-priority")
+    assert artifacts.read_active(root, "ticket-priority") is None
+    history = (root / "ticket-priority" / "selection-history.jsonl").read_text().splitlines()
+    assert len(history) == 2 and json.loads(history[-1])["candidate"] is None
+
+
+def test_explicit_runtime_requires_completed_candidate(tmp_path):
+    root, build, _manifest = completed_build(tmp_path)
+    resolved, candidate = artifacts.resolve_runtime(
+        root, "ticket-priority", build.name, "tfidf"
+    )
+    assert resolved == build and candidate == "tfidf"
+
+
+def test_pre_v3_manifest_rejected(tmp_path):
+    path = tmp_path / "old"
+    path.mkdir()
+    (path / "manifest.json").write_text('{"manifest_schema_version": 2}')
+    try:
+        artifacts.read_manifest(path)
+    except ValueError as exc:
+        assert "unsupported pre-v0.2 artifact" in str(exc)
+    else:
+        raise AssertionError("old manifest was accepted")

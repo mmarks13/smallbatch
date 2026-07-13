@@ -1,137 +1,62 @@
-"""Programmatic pipeline API: `label` and `compile`.
-
-The CLI (`cli.py`) is a thin wrapper over these; import them directly for
-notebook or pipeline use:
-
-    import smallbatch
-    result = smallbatch.label("spec.yaml", items)
-    compiled = smallbatch.compile("spec.yaml")
-    fn = smallbatch.load_fn(compiled.manifest["function"])
-
-Heavy imports (torch/peft/trl) happen inside `compile`, so importing this
-module — and running `label` — stays light.
-"""
+"""Programmatic labeling, compilation, selection, and loading APIs."""
 
 from __future__ import annotations
 
+import datetime
+import hashlib
 import json
-import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
 from . import artifacts
-from .labeling import read_jsonl
-from .spec import FunctionSpec, load_spec
+from .labeling import dataset_hash, normalize_item_records, read_jsonl
+from .spec import (
+    FunctionSpec,
+    LoraCandidateSpec,
+    SetFitCandidateSpec,
+    TfidfCandidateSpec,
+    load_spec,
+)
 
 
 @dataclass
 class LabelResult:
     out_dir: Path
-    meta: dict  # counts, label_histogram, teacher/prompt provenance
+    meta: dict
 
     @property
     def compressed(self) -> bool:
-        """True when >50% of labels landed in one bin — a sign the rubric
-        anchors need sharpening before the dataset is worth training on."""
-        hist = self.meta["label_histogram"]
-        total = sum(hist.values())
-        return bool(total) and max(hist.values()) / total > 0.5
+        histogram = self.meta.get("label_histogram") or {}
+        total = sum(histogram.values())
+        return bool(total) and max(histogram.values()) / total > 0.5
 
 
 @dataclass
 class CompileResult:
-    passed: bool  # gate verdict; a False is an honest FAIL, not an error
-    gate: dict
-    metrics: dict  # {"adapter": {...}, "zeroshot": {...} | None}
     version_dir: Path
+    build_id: str
+    candidates: dict
     manifest: dict
-    report: dict | None = None  # full eval report (also report.json on disk)
-    report_path: Path | None = None
+    report: dict
+    report_path: Path
+
+
+@dataclass
+class SelectionResult:
+    function: str
+    build_id: str
+    candidate: str
+    package_dir: Path
+    wheel: Path
+    evidence: dict
+    active: dict
 
 
 def _as_spec(spec: FunctionSpec | str | Path) -> FunctionSpec:
     return spec if isinstance(spec, FunctionSpec) else load_spec(spec)
-
-
-def _check_labeling_identity(
-    spec: FunctionSpec, data: Path, data_meta: dict, allow_stale_labels: bool
-) -> dict | None:
-    """Refuse to train on labels generated under a different labeling identity
-    (rubric, contract, teacher, reference file, or prompt change). Build-only
-    changes — base, precision, train hyperparameters, gate thresholds — never
-    trip this. Returns the override record for the manifest when the user
-    explicitly bypassed the check, else None.
-    """
-    recorded = data_meta.get("labeling_hash")
-    if recorded is None:
-        # pre-labeling_hash dataset: the legacy spec_hash also covered build
-        # settings, so a mismatch may be benign — warn, don't fail
-        if data_meta.get("spec_hash") and data_meta["spec_hash"] != spec.spec_hash():
-            print(
-                f"warning: {data} was labeled under a different spec version "
-                "(legacy dataset without a labeling identity — re-run "
-                "`smallbatch label --append` to record one)"
-            )
-        return None
-    current = spec.labeling_hash()
-    if recorded == current:
-        return None
-    if not allow_stale_labels:
-        raise ValueError(
-            f"dataset in {data} was labeled under a different labeling identity\n"
-            f"  dataset:      {recorded}\n"
-            f"  current spec: {current}\n"
-            "the rubric, output contract, teacher, a referenced spec_file, or the\n"
-            "labeling prompt changed since these labels were generated. Relabel with\n"
-            "`smallbatch label --append`, or pass --allow-stale-labels to train on\n"
-            "the old labels anyway (the override is recorded in the artifact)."
-        )
-    print(
-        f"warning: training on stale labels from {data} (--allow-stale-labels); "
-        "the artifact manifest records this override"
-    )
-    import datetime
-
-    return {
-        "dataset_labeling_hash": recorded,
-        "spec_labeling_hash": current,
-        "allowed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }
-
-
-def _archive_spec(spec: FunctionSpec, version_dir: Path) -> None:
-    """Make the artifact self-contained: archive the RESOLVED spec (so CLI
-    overrides like --base/--precision are captured, and the archive reproduces
-    the manifest's spec_hash) plus every referenced spec_file under a
-    collision-safe content-addressed name. Absolute source paths go only into
-    provenance.local.json — a local diagnostic file that never ships.
-    """
-    import hashlib
-
-    dump = spec.model_dump(mode="json")
-    source_files = spec.resolved_spec_files()
-    if source_files:
-        dest = version_dir / "spec_files"
-        dest.mkdir(exist_ok=True)
-        rel_paths = []
-        for p in source_files:
-            digest = hashlib.sha256(p.read_bytes()).hexdigest()[:12]
-            name = f"{digest}-{p.name}"  # two files named schema.md both survive
-            shutil.copy(p, dest / name)
-            rel_paths.append(f"spec_files/{name}")
-        dump["spec_files"] = rel_paths
-    (version_dir / "spec.yaml").write_text(yaml.safe_dump(dump, sort_keys=False))
-    (version_dir / "provenance.local.json").write_text(
-        json.dumps(
-            {
-                "source_spec": str(spec._source_path) if spec._source_path else None,
-                "source_spec_files": [str(p) for p in source_files],
-            },
-            indent=2,
-        )
-    )
 
 
 def label(
@@ -140,275 +65,372 @@ def label(
     out_dir: str | Path | None = None,
     append: bool = False,
     max_variants: int | None = None,
+    *,
+    skip_calibration: bool = False,
+    interactive: bool | None = None,
+    input_fn: Callable[[str], str] = input,
 ) -> LabelResult:
-    """Teacher-label `items` into a train/dev/gate dataset for `spec`.
-
-    `append` keeps an existing dataset's rows and split assignments (the gate
-    is sticky) and only labels unseen items. `max_variants` is a global cost
-    budget: the maximum total new synthetic rows this call may generate across
-    paraphrase, field-dropout, and counterfactual augmentation (0 performs no
-    synthetic generation or labeling calls; retained rows never count).
-    """
+    """Import complete decisions or generate them with an approved teacher."""
+    from .calibration import calibrate_teacher
     from .labeling import build_dataset
     from .teacher import make_teacher
 
     spec = _as_spec(spec)
     out = Path(out_dir or f"data/{spec.name}")
-    teacher = make_teacher(spec.teacher)
-    meta = build_dataset(teacher, spec, items, out, append=append, max_variants=max_variants)
-    return LabelResult(out_dir=out, meta=meta)
-
-
-def compile(  # noqa: A001 - deliberate: `smallbatch.compile` is the product verb
-    spec: FunctionSpec | str | Path,
-    data_dir: str | Path | None = None,
-    artifacts_root: str | Path = artifacts.DEFAULT_ROOT,
-    base: str | None = None,
-    precision: str | None = None,
-    sweep_name: str | None = None,
-    tag: str | None = None,
-    arm: str | None = None,
-    allow_stale_labels: bool = False,
-) -> CompileResult:
-    """Train + evaluate + gate one adapter for `spec`.
-
-    Returns a CompileResult whose `passed` reflects the gate; raises on real
-    errors (missing data, training failure). Requires a labeled dataset from
-    `label` under `data_dir` (default data/<name>).
-    """
-    from .evaluate import run_gate, score_holdout
-    from .training import load_base_model, train
-
-    spec = _as_spec(spec)
-    if base:
-        spec.train.base = base
-    if precision:
-        spec.train.precision = precision
-
-    data = Path(data_dir or f"data/{spec.name}")
-    data_meta = json.loads((data / "meta.json").read_text()) if (data / "meta.json").exists() else {}
-    stale_labels_override = _check_labeling_identity(spec, data, data_meta, allow_stale_labels)
-    train_rows = read_jsonl(data / "train.jsonl")
-    gate_path = data / "gate.jsonl"
-    if not gate_path.exists():  # pre-v0.2 dataset layout
-        gate_path = data / "holdout.jsonl"
-    gate_rows = read_jsonl(gate_path) if gate_path.exists() else []
-    if not gate_rows:
-        raise ValueError(f"empty gate split in {data} — run `smallbatch label` first")
-
-    dev_path = data / "dev.jsonl"
-    if dev_path.exists():
-        dev_rows = read_jsonl(dev_path)
-    else:
-        # legacy dataset without a dev split: carve one from the train reals
-        # deterministically so checkpoint selection still works. Relabeling
-        # with `smallbatch label --append` gives a proper, persistent split.
-        from .labeling import resolve_count, split_holdout
-
-        n_real = sum(1 for r in train_rows if r.get("origin") == "real")
-        frac = resolve_count(spec.teacher.dev, n_real) / n_real if n_real else 0
-        train_rows, dev_rows = split_holdout(train_rows, frac, seed=spec.train.seed)
-        print(
-            f"warning: no dev.jsonl in {data} — carved {len(dev_rows)} dev rows "
-            "out of train for checkpoint selection (re-run `smallbatch label "
-            "--append` to persist a proper split)"
+    inputs, imported = normalize_item_records(spec, items)
+    teacher = None
+    force_train_ids: set[str] = set()
+    if imported is None:
+        if spec.teacher is None:
+            raise ValueError("unlabeled inputs require a `teacher` block")
+        teacher = make_teacher(spec.teacher)
+        calibration = calibrate_teacher(
+            teacher,
+            spec,
+            inputs,
+            out,
+            skip=skip_calibration,
+            interactive=interactive,
+            input_fn=input_fn,
         )
+        force_train_ids = set(calibration.row_ids)
+    elif spec.augmentation:
+        if spec.teacher is None:
+            raise ValueError("augmentation of imported decisions requires a `teacher` block")
+        teacher = make_teacher(spec.teacher)
+    meta = build_dataset(
+        spec,
+        items,
+        out,
+        teacher=teacher,
+        append=append,
+        max_variants=max_variants,
+        force_train_ids=force_train_ids,
+    )
+    return LabelResult(out, meta)
 
-    root = Path(artifacts_root)
-    if sweep_name and tag:
-        version_dir = artifacts.sweep_run_dir(root, spec.name, sweep_name, tag)
-    else:
-        version_dir = artifacts.new_version_dir(root, spec.name)
-    print(f"compiling {spec.name} -> {version_dir}")
 
-    import time
-
-    from .evaluate import compute_metrics
-    from .labeling import row_output
-
-    gate_refs = [row_output(spec, r) for r in gate_rows]
-    candidates: dict[str, dict] = {}
-
-    # ---- tfidf candidate: torch-free, seconds, isolated -------------------
-    # runs FIRST so a later LoRA OOM/crash never discards a completed
-    # conventional candidate
-    try:
-        from . import candidates as cand
-
-        t0 = time.time()
-        fmt = cand.train_tfidf(spec, train_rows, version_dir / cand.TFIDF_DIR)
-        tfidf_preds = cand.predict_tfidf(
-            version_dir / cand.TFIDF_DIR, spec, [r["input"] for r in gate_rows]
+def _archive_spec(spec: FunctionSpec, build: Path) -> None:
+    (build / "spec.yaml").write_text(
+        yaml.safe_dump(spec.model_dump(mode="json"), sort_keys=False)
+    )
+    (build / "provenance.local.json").write_text(
+        json.dumps(
+            {"source_spec": str(spec._source_path) if spec._source_path else None},
+            indent=2,
         )
-        tfidf_metrics = compute_metrics(spec, tfidf_preds, gate_refs)
-        tfidf_metrics["preds"] = tfidf_preds
-        dev_preds = cand.predict_tfidf(
-            version_dir / cand.TFIDF_DIR, spec, [r["input"] for r in dev_rows]
-        )
-        candidates["tfidf"] = {
-            "backend": "tfidf",
-            "status": "completed",
-            "artifact_path": cand.TFIDF_DIR,
-            "artifact_size_bytes": artifacts.dir_size(version_dir / cand.TFIDF_DIR),
-            **fmt,
-            "train_seconds": round(time.time() - t0, 2),
-            "metrics": tfidf_metrics,
-            "metrics_dev": compute_metrics(
-                spec, dev_preds, [row_output(spec, r) for r in dev_rows]
-            ),
-            "gate": None,  # gated below, once the shared zero-shot exists
-            "error": None,
-        }
-        print(
-            f"tfidf candidate: gate agreement "
-            f"{tfidf_metrics['agreement']:.1%} in {candidates['tfidf']['train_seconds']}s"
-        )
-    except Exception as e:  # noqa: BLE001 - isolation: recorded, not fatal
-        candidates["tfidf"] = {"backend": "tfidf", "status": "error",
-                               "error": f"{type(e).__name__}: {e}"}
-        print(f"tfidf candidate ERROR: {e}")
+    )
 
-    # ---- lora candidate: isolated the same way ----------------------------
-    zeroshot = None
-    info: dict = {}
-    try:
-        info = train(spec, train_rows, version_dir, dev_rows=dev_rows)
-        shutil.rmtree(version_dir / "trainer", ignore_errors=True)
 
-        # HF Trainer holds the training model in reference cycles; collect
-        # them before eval loads a second copy of the base model or the two
-        # won't coexist on a 12GB card
-        import gc
+def _candidate_public(record: dict) -> dict:
+    return {key: value for key, value in record.items() if key != "predictions"}
 
-        import torch
 
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        # evaluate adapter (student prompts) and zero-shot base (full-spec
-        # prompts)
-        from peft import PeftModel
-
-        from . import prompts
-
-        # eval in the training precision: a qlora adapter was trained against
-        # the 4-bit base, and reloading in fp32 needs 4x the VRAM
-        inference_precision = info["precision"]
-        tokenizer, base_model = load_base_model(spec.train.base, inference_precision)
-        max_new = prompts.completion_budget(spec)
-
-        spec_text = spec.spec_files_text()
-        if spec.gate.must_beat_zeroshot:
-            zeroshot = score_holdout(
-                spec, base_model, tokenizer, gate_rows,
-                lambda it: prompts.zeroshot_prompt(spec, it, spec_text),
-                max_new_tokens=max(16, max_new),
-            )
-        student = PeftModel.from_pretrained(base_model, info["adapter_dir"])
-        student.eval()
-        adapter_metrics = score_holdout(
-            spec, student, tokenizer, gate_rows,
-            lambda it: prompts.student_prompt(spec, it), max_new_tokens=max_new,
-        )
-        adapter_dir = Path(info["adapter_dir"])
-        candidates["lora"] = {
-            "backend": "lora",
-            "status": "completed",
-            "artifact_path": adapter_dir.name,
-            "artifact_size_bytes": artifacts.dir_size(adapter_dir),
-            "base_model": spec.train.base,
-            "train_precision": info["precision"],
-            "inference_precision": inference_precision,
-            "use_dora": spec.train.use_dora,
-            "rationale_distillation": spec.train.rationale_distillation,
-            "metrics": adapter_metrics,
-            "gate": None,
-            "train_loss": info["train_loss"],
-            "epochs_run": info.get("epochs_run"),
-            "best_epoch": info.get("best_epoch"),
-            "stopped_reason": info.get("stopped_reason"),
-            **(
-                {"eval_batch_size_effective": adapter_metrics["eval_batch_size_effective"]}
-                if adapter_metrics.get("eval_batch_size_effective") is not None
-                else {}
-            ),
-            "error": None,
-        }
-    except Exception as e:  # noqa: BLE001 - isolation: recorded unless fatal
-        if not any(c.get("status") == "completed" for c in candidates.values()):
-            raise  # every candidate errored: an operational failure, exit 1
-        candidates["lora"] = {"backend": "lora", "status": "error",
-                              "error": f"{type(e).__name__}: {e}"}
-        print(f"lora candidate ERROR: {e} — continuing with completed candidates")
-
-    # ---- gate + selection (zero-shot shared by every candidate) -----------
-    for rec in candidates.values():
-        if rec["status"] == "completed":
-            rec["gate"] = run_gate(spec, rec["metrics"], zeroshot)
-    selection = artifacts.select_winner(candidates, spec.gate.tie_margin)
-    winner = candidates[selection["winner"]]
-    gate = winner["gate"]
-    adapter_metrics = (candidates.get("lora") or {}).get("metrics")
-    _archive_spec(spec, version_dir)
-    from . import __version__
-    from .labeling import dataset_hash
-
-    lora_rec = candidates.get("lora") or {}
+def _write_provisional_manifest(
+    spec: FunctionSpec,
+    build: Path,
+    data_meta: dict,
+    exact_dataset_hash: str,
+    candidates: dict,
+    diagnostics: dict,
+) -> dict:
     manifest = {
         "manifest_schema_version": artifacts.MANIFEST_SCHEMA_VERSION,
         "function": spec.name,
-        "version": f"{sweep_name}/{tag}" if (sweep_name and tag) else version_dir.name,
-        "sweep_name": sweep_name,
-        "tag": tag,
-        "arm": arm,
-        "spec_hash": spec.spec_hash(),
-        "labeling_hash": spec.labeling_hash(),
-        "dataset_hash": dataset_hash(train_rows + dev_rows + gate_rows),
-        **({"stale_labels_override": stale_labels_override} if stale_labels_override else {}),
-        "candidates": candidates,
-        "selection": selection,
-        "deployment": None,
-        # convenience duplicates of the LORA candidate's fields (true whether
-        # or not it won; never populated from another backend) so pre-v2
-        # readers keep working. `gate` is the WINNER's — what PASS/FAIL means.
-        "base_model": spec.train.base,
-        "train_precision": lora_rec.get("train_precision"),
-        "inference_precision": lora_rec.get("inference_precision"),
-        "use_dora": spec.train.use_dora,
-        "rationale_distillation": spec.train.rationale_distillation,
+        "version": build.name,
+        "decision_hash": spec.decision_hash(),
+        "dataset_hash": exact_dataset_hash,
+        "build_hash": spec.build_hash(),
         "data": data_meta,
-        "metrics": {"adapter": adapter_metrics, "zeroshot": zeroshot},
-        "gate": gate,
-        "train_loss": lora_rec.get("train_loss"),
-        "epochs_run": lora_rec.get("epochs_run"),
-        "best_epoch": lora_rec.get("best_epoch"),
-        "stopped_reason": lora_rec.get("stopped_reason"),
-        "smallbatch_version": __version__,
+        "candidates": {
+            name: _candidate_public(record) for name, record in candidates.items()
+        },
+        "diagnostics": diagnostics,
+        "smallbatch_version": _version(),
     }
-    artifacts.write_manifest(version_dir, manifest)
+    artifacts.write_manifest(build, manifest)
+    return manifest
 
+
+def _version() -> str:
+    from . import __version__
+
+    return __version__
+
+
+def _train_candidate(
+    spec: FunctionSpec,
+    candidate_id: str,
+    config,
+    train_rows: list[dict],
+    dev_rows: list[dict],
+    candidate_dir: Path,
+) -> dict:
+    import time
+
+    started = time.perf_counter()
+    model_dir = candidate_dir / "model"
+    if isinstance(config, TfidfCandidateSpec):
+        from .candidates import train_tfidf
+
+        metadata = train_tfidf(spec, train_rows, model_dir)
+    elif isinstance(config, SetFitCandidateSpec):
+        from .setfit_candidate import train_setfit
+
+        metadata = train_setfit(spec, config, train_rows, dev_rows, model_dir)
+    elif isinstance(config, LoraCandidateSpec):
+        from .training import train
+
+        info = train(spec, config, train_rows, candidate_dir, dev_rows)
+        metadata = {
+            "format": "peft",
+            "base_model": config.model,
+            "train_precision": info["precision"],
+            "inference_precision": "fp32",
+            "rationale_distillation": config.rationale_distillation,
+            "eval_batch_size": config.eval_batch_size,
+            "training": {
+                key: info.get(key)
+                for key in (
+                    "train_loss",
+                    "curve",
+                    "best_epoch",
+                    "best_dev_agreement",
+                    "epochs_run",
+                    "stopped_reason",
+                    "train_rows",
+                    "dev_rows",
+                )
+            },
+        }
+    else:  # pragma: no cover - Pydantic discriminator makes this unreachable
+        raise TypeError(f"unsupported candidate config {type(config).__name__}")
+    return {
+        "candidate": candidate_id,
+        "backend": config.type,
+        "status": "completed",
+        "artifact_path": str(model_dir.relative_to(candidate_dir.parent.parent)),
+        "train_seconds": round(time.perf_counter() - started, 3),
+        **metadata,
+        "error": None,
+    }
+
+
+def _load_local_record(path: Path) -> dict | None:
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def _write_local_record(path: Path, record: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(record, indent=2, ensure_ascii=False))
+    tmp.replace(path)
+
+
+def compile(  # noqa: A001
+    spec: FunctionSpec | str | Path,
+    data_dir: str | Path | None = None,
+    artifacts_root: str | Path = artifacts.DEFAULT_ROOT,
+    *,
+    cpu_threads: int | None = None,
+) -> CompileResult:
+    """Train, CPU-evaluate, and compare every configured candidate."""
+    from .evaluate import compute_metrics, train_fitted_constant
+    from .profiling import profile_candidate, profile_zeroshot
     from .report import build_report, write_report
 
-    report = build_report(
-        spec, gate_rows, winner["metrics"], zeroshot, gate, info,
-        teacher_probe=(
-            {"self_agreement": data_meta["teacher_self_agreement"],
-             "n": data_meta.get("probe_n")}
-            if data_meta.get("teacher_self_agreement") is not None
-            else None
-        ),
-        candidates=candidates,
-        selection=selection,
-    )
-    report_path = write_report(version_dir, report)
+    spec = _as_spec(spec)
+    data = Path(data_dir or f"data/{spec.name}")
+    meta_path = data / "meta.json"
+    if not meta_path.exists():
+        raise ValueError(f"no v0.2 decision dataset under {data}; run `smallbatch label` first")
+    data_meta = json.loads(meta_path.read_text())
+    if data_meta.get("schema_version") != 3:
+        raise ValueError("pre-v0.2 datasets are unsupported; re-run `smallbatch label`")
+    if data_meta.get("decision_hash") != spec.decision_hash():
+        raise ValueError(
+            "dataset decisions belong to a different prompt, contract, or teacher; "
+            "re-run `smallbatch label`"
+        )
+    train_rows = read_jsonl(data / "train.jsonl")
+    dev_rows = read_jsonl(data / "dev.jsonl")
+    eval_rows = read_jsonl(data / "eval.jsonl")
+    if not train_rows or not dev_rows or not eval_rows:
+        raise ValueError(
+            f"dataset must have non-empty train/dev/eval splits; got "
+            f"{len(train_rows)}/{len(dev_rows)}/{len(eval_rows)}"
+        )
+    exact_dataset_hash = dataset_hash([*train_rows, *dev_rows, *eval_rows])
+    if data_meta.get("dataset_hash") != exact_dataset_hash:
+        raise ValueError("dataset files no longer match meta.json")
 
+    root = Path(artifacts_root)
+    build = artifacts.build_dir(root, spec.name, spec.build_hash(), exact_dataset_hash)
+    if (build / "manifest.json").exists():
+        manifest = artifacts.read_manifest(build)
+        state = artifacts.read_build_state(build)
+        if state.get("status") == "complete" and artifacts.artifact_integrity(build) is None:
+            report = json.loads((build / "report.json").read_text())
+            return CompileResult(
+                build,
+                build.name,
+                manifest["candidates"],
+                manifest,
+                report,
+                build / "report.json",
+            )
+
+    _archive_spec(spec, build)
+    (build / "evaluation.local.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in eval_rows)
+    )
+    candidates: dict[str, dict] = {}
+    diagnostics: dict[str, dict] = {}
+    eval_inputs = [row["input"] for row in eval_rows]
+    references = [row["output"] for row in eval_rows]
+
+    for candidate_id, config in spec.candidates.items():
+        candidate_dir = build / "candidates" / candidate_id
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        final_record_path = candidate_dir / "result.local.json"
+        record = _load_local_record(final_record_path)
+        if record and record.get("status") == "completed" and record.get("profile"):
+            candidates[candidate_id] = record
+            continue
+        trained_path = candidate_dir / "trained.json"
+        try:
+            record = _load_local_record(trained_path)
+            if record is None:
+                artifacts.update_candidate_state(build, candidate_id, stage="training")
+                record = _train_candidate(
+                    spec, candidate_id, config, train_rows, dev_rows, candidate_dir
+                )
+                _write_local_record(trained_path, record)
+            candidates[candidate_id] = record
+            _write_provisional_manifest(
+                spec, build, data_meta, exact_dataset_hash, candidates, diagnostics
+            )
+            artifacts.update_candidate_state(build, candidate_id, stage="cpu-evaluation")
+            profiled = profile_candidate(
+                build,
+                candidate_id,
+                eval_inputs,
+                threads=cpu_threads,
+            )
+            record["predictions"] = profiled["predictions"]
+            record["metrics"] = compute_metrics(spec, record["predictions"], references)
+            record["profile"] = profiled["profile"]
+            _write_local_record(final_record_path, record)
+            candidates[candidate_id] = record
+            artifacts.update_candidate_state(build, candidate_id, stage="completed")
+        except Exception as exc:  # candidate isolation is intentional
+            record = {
+                "candidate": candidate_id,
+                "backend": config.type,
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            candidates[candidate_id] = record
+            _write_local_record(final_record_path, record)
+            artifacts.update_candidate_state(
+                build, candidate_id, stage="error", error=record["error"]
+            )
+
+    seen_bases: set[str] = set()
+    for candidate_id, config in spec.candidates.items():
+        if not isinstance(config, LoraCandidateSpec):
+            continue
+        if candidates.get(candidate_id, {}).get("status") != "completed":
+            continue
+        if config.model in seen_bases:
+            continue
+        seen_bases.add(config.model)
+        diagnostic_id = "zero-shot-" + hashlib.sha256(
+            f"{config.model}\n{spec.prompt}".encode()
+        ).hexdigest()[:8]
+        try:
+            profiled = profile_zeroshot(
+                build,
+                diagnostic_id,
+                config.model,
+                eval_inputs,
+                threads=cpu_threads,
+            )
+            diagnostics[diagnostic_id] = {
+                "selectable": False,
+                "backend": "zeroshot",
+                "base_model": config.model,
+                "metrics": compute_metrics(spec, profiled["predictions"], references),
+                "profile": profiled["profile"],
+            }
+            _write_local_record(
+                build / f"{diagnostic_id}.local.json",
+                {**diagnostics[diagnostic_id], "predictions": profiled["predictions"]},
+            )
+        except Exception as exc:
+            diagnostics[diagnostic_id] = {
+                "selectable": False,
+                "backend": "zeroshot",
+                "base_model": config.model,
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+    constant = train_fitted_constant(spec, train_rows)
+    constant_predictions = [constant for _ in eval_rows]
+    diagnostics["train-fitted-constant"] = {
+        "selectable": False,
+        "value": constant,
+        "metrics": compute_metrics(spec, constant_predictions, references),
+    }
+    if not any(record.get("status") == "completed" for record in candidates.values()):
+        _write_provisional_manifest(
+            spec, build, data_meta, exact_dataset_hash, candidates, diagnostics
+        )
+        state = artifacts.read_build_state(build)
+        state["status"] = "error"
+        artifacts.write_build_state(build, state)
+        raise ValueError("all configured candidates failed; inspect build_state.json")
+
+    report, details = build_report(spec, eval_rows, candidates, diagnostics)
+    report_path = write_report(build, report, details)
+    manifest = _write_provisional_manifest(
+        spec, build, data_meta, exact_dataset_hash, candidates, diagnostics
+    )
+    manifest["artifact_files"] = artifacts.file_hashes(build)
+    artifacts.write_manifest(build, manifest)
+    state = artifacts.read_build_state(build)
+    state["status"] = "complete"
+    state["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    artifacts.write_build_state(build, state)
     return CompileResult(
-        passed=gate["passed"],
-        gate=gate,
-        metrics=manifest["metrics"],
-        version_dir=version_dir,
-        manifest=manifest,
-        report=report,
-        report_path=report_path,
+        build,
+        build.name,
+        manifest["candidates"],
+        manifest,
+        report,
+        report_path,
+    )
+
+
+def select(
+    name: str,
+    candidate: str,
+    *,
+    version: str | None = None,
+    artifacts_root: str | Path = artifacts.DEFAULT_ROOT,
+    accept_package_drift: bool = False,
+    interactive: bool | None = None,
+    input_fn: Callable[[str], str] = input,
+) -> SelectionResult:
+    """Package, validate, and atomically activate one completed candidate."""
+    from .standalone import package_selection
+
+    return package_selection(
+        Path(artifacts_root),
+        name,
+        candidate,
+        version=version,
+        accept_drift=accept_package_drift,
+        interactive=interactive,
+        input_fn=input_fn,
     )
