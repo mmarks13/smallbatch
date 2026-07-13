@@ -47,9 +47,9 @@ def load_base_model(base: str, precision: str):
 
     kwargs: dict = {}
     if precision == "bf16":
-        kwargs["torch_dtype"] = torch.bfloat16
+        kwargs["dtype"] = torch.bfloat16
     elif precision == "fp32":
-        kwargs["torch_dtype"] = torch.float32
+        kwargs["dtype"] = torch.float32
     elif precision == "qlora":
         from transformers import BitsAndBytesConfig
 

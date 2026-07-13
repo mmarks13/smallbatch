@@ -56,7 +56,7 @@ def _load():
     if _TOKENIZER.pad_token is None:
         _TOKENIZER.pad_token = _TOKENIZER.eos_token
     precision = runtime.get("inference_precision", "fp32")
-    kwargs = {"torch_dtype": torch.bfloat16 if precision == "bf16" else torch.float32}
+    kwargs = {"dtype": torch.bfloat16 if precision == "bf16" else torch.float32}
     try:
         base = AutoModelForCausalLM.from_pretrained(runtime["base_model"], **kwargs)
     except ValueError:
