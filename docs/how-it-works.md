@@ -34,16 +34,23 @@ augmentation uses training rows only and requires a callable teacher.
 
 `compile` attempts every configured candidate independently:
 
-- TF-IDF plus logistic regression, persisted with `skops`.
-- SetFit using a Sentence Transformer body and classifier head per field.
-- LoRA/PEFT over each configured foundation model.
+- TF-IDF (term frequency-inverse document frequency) plus logistic regression,
+  a small word-and-phrase baseline persisted with `skops`.
+- SetFit using a Sentence Transformer body and classifier head per field, the
+  semantic middle tier between sparse text features and a language model.
+- LoRA (low-rank adaptation) over each configured foundation model. LoRA is a
+  parameter-efficient fine-tuning method: it trains a small adapter while the
+  base model remains frozen.
 
 Bounded integers are learned as discrete classes. Structured functions train
 one TF-IDF or SetFit head per field and return one validated object.
 
 Completed stages are durable. Re-running a matching decision, dataset, and
-build resumes candidate work; LoRA uses trainer checkpoints. An error remains
-visible without discarding other candidates.
+build resumes candidate work; LoRA uses trainer checkpoints, and completed
+zero-shot diagnostics are also reused. During a run, progress identifies the
+current candidate and stage and prints a compact evidence summary as each CPU
+evaluation completes. An error remains visible without discarding other
+candidates.
 
 ## 4. Evaluate On CPU
 
@@ -76,7 +83,8 @@ Exact output parity is expected on the same machine. Valid differences are
 reported with changed rows and metric deltas and require explicit acceptance.
 Invalid output, load failure, or missing output prevents activation.
 
-The standalone package exposes:
+The standalone package is the generated source project and wheel that runs
+without Smallbatch. It exposes:
 
 ```python
 from smallbatch_functions.ticket_priority import classify, classify_batch, metadata

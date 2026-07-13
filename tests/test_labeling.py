@@ -76,12 +76,15 @@ def test_imported_decisions_split_and_metadata(tmp_path):
     assert all(set(row) >= {"id", "input", "output", "origin", "split"} for row in rows)
 
 
-def test_teacher_decisions_use_same_dataset_shape(tmp_path):
+def test_teacher_decisions_use_same_dataset_shape(tmp_path, capsys):
     spec = make_spec(teacher={"backend": "codex-cli", "model": "test"})
     records = [{"input": record["input"]} for record in imported_records(20)]
     meta = build_dataset(spec, records, tmp_path, teacher=FakeTeacher())
     assert meta["decision_source"] == "teacher"
     assert meta["counts"] == {"train": 14, "dev": 2, "eval": 4}
+    progress = capsys.readouterr().err
+    assert "teacher real batch=1/1 rows=20 attempt=1/2" in progress
+    assert "teacher real complete rows=20" in progress
 
 
 def test_append_keeps_existing_evaluation_membership(tmp_path):

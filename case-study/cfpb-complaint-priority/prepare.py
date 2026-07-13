@@ -18,6 +18,12 @@ POOL_TARGET = 3000
 FINAL_COUNT = 600
 
 
+def atomic_write(path: Path, text: str) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
 def fetch_pool() -> list[dict]:
     rows = []
     offset = 0
@@ -88,16 +94,28 @@ def balanced_sample(rows: list[dict]) -> list[dict]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--refresh", action="store_true")
-    args = parser.parse_args()
+    argparse.ArgumentParser().parse_args()
     frozen_path = HERE / "frozen_ids.json"
-    if frozen_path.exists() and not args.refresh:
-        raise SystemExit("frozen_ids.json already exists; pass --refresh to replace it")
+    if frozen_path.exists():
+        raise SystemExit("frozen_ids.json already exists; the case-study freeze is immutable")
     selected = balanced_sample(normalize(fetch_pool()))
     items_path = HERE / "items.jsonl"
-    items_path.write_text(
-        "".join(json.dumps({"input": row["input"]}, ensure_ascii=False) + "\n" for row in selected)
+    atomic_write(
+        items_path,
+        "".join(
+            json.dumps(
+                {
+                    "input": row["input"],
+                    "provenance": {
+                        "complaint_id": row["complaint_id"],
+                        "content_sha256": row["content_sha256"],
+                    },
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+            for row in selected
+        ),
     )
     spec_hash = hashlib.sha256((HERE / "spec.yaml").read_bytes()).hexdigest()
     frozen = {
@@ -112,7 +130,7 @@ def main() -> None:
             for row in selected
         ],
     }
-    frozen_path.write_text(json.dumps(frozen, indent=2))
+    atomic_write(frozen_path, json.dumps(frozen, indent=2) + "\n")
     print(f"froze {len(selected)} complaints -> {items_path}")
 
 

@@ -6,6 +6,7 @@ import datetime
 import hashlib
 import json
 import random
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,10 @@ from .teacher import Teacher
 
 Row = dict[str, Any]
 SPLIT_SEED = 17
+
+
+def _progress(message: str) -> None:
+    print(f"[smallbatch] {message}", file=sys.stderr, flush=True)
 
 
 def row_id(input_obj: dict) -> str:
@@ -84,14 +89,22 @@ def label_items(
         if cached is not None and cached.get("origin") == origin:
             rows[index] = dict(cached)
     pending = [index for index in range(len(items)) if index not in rows]
+    if rows:
+        _progress(f"teacher {origin} resumed rows={len(rows)} pending={len(pending)}")
     batch_size = spec.teacher.batch_size if spec.teacher else 40
-    for _attempt in range(2):
+    for attempt in range(2):
         if not pending:
             break
         next_pending: list[int] = []
+        batch_total = (len(pending) + batch_size - 1) // batch_size
         for start in range(0, len(pending), batch_size):
             indices = pending[start : start + batch_size]
             batch = [items[index] for index in indices]
+            batch_number = start // batch_size + 1
+            _progress(
+                f"teacher {origin} batch={batch_number}/{batch_total} rows={len(batch)} "
+                f"attempt={attempt + 1}/2"
+            )
             response = teacher.complete(
                 prompts.teacher_label_prompt(spec, batch, field_order=field_order)
             )
@@ -130,6 +143,8 @@ def label_items(
         raise ValueError(
             f"teacher failed to return valid decisions for {len(pending)} of {len(items)} items"
         )
+    if items:
+        _progress(f"teacher {origin} complete rows={len(items)}")
     return [rows[index] for index in range(len(items))]
 
 
@@ -227,7 +242,9 @@ def _augment(
                 (event["item"], "paraphrase", event["source_ids"])
                 for event in cached
             ]
+            _progress(f"augmentation target-band resumed generated={len(stage_rows)}")
         else:
+            _progress(f"augmentation target-band generation start requested={cap}")
             values = list(next(iter(spec.output.fields.values())).values())
             for index in range(cap):
                 source = train_reals[index % len(train_reals)]
@@ -244,6 +261,7 @@ def _augment(
                 stage_rows.append((item, "paraphrase", sources))
                 journal.record_stage_item(stage, item, source_ids=sources)
             journal.record_stage_done(stage)
+            _progress(f"augmentation target-band generation complete generated={len(stage_rows)}")
         generated.extend(stage_rows)
         budget -= len(stage_rows)
 
@@ -256,7 +274,9 @@ def _augment(
                 (event["item"], "field-dropout", event["source_ids"])
                 for event in cached
             ]
+            _progress(f"augmentation field-dropout resumed generated={len(stage_rows)}")
         else:
+            _progress("augmentation field-dropout generation start")
             remaining = budget
             for field in plan.field_dropout.fields:
                 if spec.input_schema[field] != "string":
@@ -275,6 +295,7 @@ def _augment(
                 if remaining <= 0:
                     break
             journal.record_stage_done(stage)
+            _progress(f"augmentation field-dropout generation complete generated={len(stage_rows)}")
         generated.extend(stage_rows)
         budget -= len(stage_rows)
 
@@ -288,7 +309,9 @@ def _augment(
                 (event["item"], "counterfactual", event["source_ids"])
                 for event in cached
             ]
+            _progress(f"augmentation counterfactual resumed generated={len(stage_rows)}")
         else:
+            _progress(f"augmentation counterfactual generation start requested={cap}")
             values = list(next(iter(spec.output.fields.values())).values())
             for source in train_reals[:cap]:
                 target = values[(values.index(primary_value(spec, source)) + 1) % len(values)]
@@ -307,6 +330,7 @@ def _augment(
                 stage_rows.append((item, "counterfactual", sources))
                 journal.record_stage_item(stage, item, source_ids=sources)
             journal.record_stage_done(stage)
+            _progress(f"augmentation counterfactual generation complete generated={len(stage_rows)}")
         generated.extend(stage_rows)
         budget -= len(stage_rows)
 
@@ -365,12 +389,18 @@ def build_dataset(
             existing=existing_splits,
             force_train_ids=force_train_ids,
         )
+        split_counts = Counter(row["split"] for row in real_rows)
+        _progress(
+            f"decisions ready source={decision_source} real={len(real_rows)} "
+            f"train={split_counts['train']} dev={split_counts['dev']} eval={split_counts['eval']}"
+        )
         variants: list[Row] = list(existing_variants)
         if spec.augmentation and (not append or max_variants is not None):
             if teacher is None:
                 raise ValueError("augmentation requires a callable teacher")
             train_reals = [row for row in real_rows if row["split"] == "train"]
             variants.extend(_augment(teacher, spec, train_reals, journal, max_variants))
+            _progress(f"augmentation complete variants={len(variants)}")
         rows = _dedupe([*real_rows, *variants])
         rows.sort(key=lambda row: (row["split"], row["id"]))
         for split in ("train", "dev", "eval"):

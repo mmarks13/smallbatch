@@ -18,6 +18,8 @@
   inspectable source packages and wheels with no Smallbatch runtime dependency.
 - Full standalone-package evaluation, parity reporting, and explicit valid
   drift acceptance.
+- Stage-by-stage labeling and compile progress with immediate quality and
+  operating summaries for each completed CPU evaluation.
 
 ### Changed
 
@@ -30,6 +32,8 @@
   operating evidence. Candidate choice is always explicit.
 - Introduced clean spec, dataset, manifest, and package schema v3; old projects
   and artifacts must be regenerated.
+- Completed zero-shot diagnostics now resume from their durable local records
+  after an interrupted build.
 
 ### Removed
 

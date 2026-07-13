@@ -3,15 +3,31 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
+import platform
 import shutil
-import subprocess
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 WORK = HERE / "work"
 RESULTS = HERE / "results"
+EXPECTED_CANDIDATES = {"tfidf", "bge-small", "granite-350m"}
+EXPECTED_COUNT = 600
+
+
+def atomic_copy(source: Path, destination: Path) -> None:
+    tmp = destination.with_suffix(destination.suffix + ".tmp")
+    shutil.copyfile(source, tmp)
+    tmp.replace(destination)
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, indent=2) + "\n")
+    tmp.replace(path)
 
 
 def verify_frozen() -> dict:
@@ -23,57 +39,94 @@ def verify_frozen() -> dict:
     for key, value in checks.items():
         if frozen.get(key) != value:
             raise RuntimeError(f"frozen {key} mismatch")
+    items = [json.loads(line) for line in (HERE / "items.jsonl").read_text().splitlines()]
+    complaints = frozen.get("complaints") or []
+    if frozen.get("count") != EXPECTED_COUNT or len(items) != EXPECTED_COUNT:
+        raise RuntimeError(f"frozen case must contain exactly {EXPECTED_COUNT} inputs")
+    if len(complaints) != EXPECTED_COUNT:
+        raise RuntimeError(f"frozen case must contain exactly {EXPECTED_COUNT} complaint records")
+    for index, (item, complaint) in enumerate(zip(items, complaints)):
+        provenance = item.get("provenance") or {}
+        narrative = (item.get("input") or {}).get("narrative")
+        if provenance != complaint:
+            raise RuntimeError(f"frozen complaint provenance mismatch at row {index}")
+        if not isinstance(narrative, str):
+            raise RuntimeError(f"frozen complaint narrative missing at row {index}")
+        if hashlib.sha256(narrative.encode()).hexdigest() != complaint.get("content_sha256"):
+            raise RuntimeError(f"frozen complaint content hash mismatch at row {index}")
+    if len({row["complaint_id"] for row in complaints}) != EXPECTED_COUNT:
+        raise RuntimeError("frozen complaint IDs are not unique")
+    if len({row["content_sha256"] for row in complaints}) != EXPECTED_COUNT:
+        raise RuntimeError("frozen complaint narratives are not unique")
     return frozen
+
+
+def require_all_candidates(report: dict) -> None:
+    records = report.get("candidates") or {}
+    missing = EXPECTED_CANDIDATES - set(records)
+    incomplete = {
+        name: records.get(name, {}).get("status", "missing")
+        for name in EXPECTED_CANDIDATES
+        if records.get(name, {}).get("status") != "completed"
+    }
+    if missing or incomplete:
+        details = ", ".join(f"{name}={status}" for name, status in sorted(incomplete.items()))
+        raise RuntimeError(
+            "CFPB release evidence requires all configured candidates to complete"
+            + (f": {details}" if details else "")
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--select", help="explicit candidate ID to package after compile")
+    parser.add_argument("--cpu-threads", type=int, default=4)
     args = parser.parse_args()
     frozen = verify_frozen()
     data = WORK / "data"
     if not (data / "meta.json").exists():
         raise SystemExit("label the frozen items first; see README.md")
-    artifacts = WORK / "artifacts"
-    command = [
-        "smallbatch",
-        "compile",
-        str(HERE / "spec.yaml"),
-        "--data",
-        str(data),
-        "--artifacts",
-        str(artifacts),
-    ]
-    subprocess.run(command, check=True)
-    builds = sorted((artifacts / "complaint-review-priority" / "builds").iterdir())
-    build = builds[-1]
+    from smallbatch import __version__
+    from smallbatch.api import compile as compile_fn
+    from smallbatch.api import select
+
+    artifact_root = WORK / "artifacts"
+    result = compile_fn(
+        HERE / "spec.yaml",
+        data_dir=data,
+        artifacts_root=artifact_root,
+        cpu_threads=args.cpu_threads,
+    )
+    require_all_candidates(result.report)
     if args.select:
-        subprocess.run(
-            [
-                "smallbatch",
-                "select",
-                "complaint-review-priority",
-                args.select,
-                "--version",
-                build.name,
-                "--artifacts",
-                str(artifacts),
-            ],
-            check=True,
+        select(
+            "complaint-review-priority",
+            args.select,
+            version=result.build_id,
+            artifacts_root=artifact_root,
         )
     RESULTS.mkdir(exist_ok=True)
-    shutil.copy(build / "report.json", RESULTS / "results.json")
-    shutil.copy(build / "report.md", RESULTS / "report.md")
-    (RESULTS / "protocol.json").write_text(
-        json.dumps(
-            {
-                "frozen": frozen,
-                "build": build.name,
-                "explicit_selection": args.select,
-                "correctness_claim": False,
+    atomic_copy(result.report_path, RESULTS / "results.json")
+    atomic_copy(result.version_dir / "report.md", RESULTS / "report.md")
+    atomic_json(
+        RESULTS / "protocol.json",
+        {
+            "executed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "frozen": frozen,
+            "build": result.build_id,
+            "smallbatch_version": __version__,
+            "python_version": platform.python_version(),
+            "platform": platform.platform(),
+            "cpu_threads": args.cpu_threads,
+            "candidate_statuses": {
+                name: record.get("status")
+                for name, record in result.report["candidates"].items()
             },
-            indent=2,
-        )
+            "explicit_selection": args.select,
+            "correctness_claim": False,
+            "energy_measured": False,
+            "command": [sys.executable, str(Path(__file__).resolve()), "--cpu-threads", str(args.cpu_threads)],
+        },
     )
     print(f"aggregate results -> {RESULTS}")
 

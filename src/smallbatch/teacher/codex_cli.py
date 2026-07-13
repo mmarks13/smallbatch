@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -88,7 +89,8 @@ class CodexCLITeacher:
                     self.reported_tokens += tokens
                     suffix = f", {tokens:,} tokens" if tokens else ""
                     print(
-                        f"codex-cli call {self.successful_calls} complete{suffix}",
+                        f"[smallbatch] codex-cli call {self.successful_calls} complete{suffix}",
+                        file=sys.stderr,
                         flush=True,
                     )
                     return res.stdout.strip()

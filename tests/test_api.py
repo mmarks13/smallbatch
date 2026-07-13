@@ -8,7 +8,7 @@ from smallbatch.api import label
 from smallbatch.runtime import load_fn
 
 
-def test_import_label_compile_and_explicit_run(tmp_path):
+def test_import_label_compile_and_explicit_run(tmp_path, capsys):
     spec = make_spec()
     data = tmp_path / "data"
     root = tmp_path / "artifacts"
@@ -27,6 +27,13 @@ def test_import_label_compile_and_explicit_run(tmp_path):
     assert function({"title": "urgent outage", "body": "server down"}) in {"urgent", "normal"}
     with pytest.raises(FileNotFoundError, match="no active candidate"):
         load_fn(spec.name, artifacts_root=root)
+    progress = capsys.readouterr().err
+    assert "[smallbatch] label start" in progress
+    assert "candidate 1/1 tfidf (tfidf) training start" in progress
+    assert "CPU evaluation start rows=6 threads=1" in progress
+    assert "agreement=" in progress
+    assert "p50_ms=" in progress
+    assert "compile complete" in progress
 
 
 def test_compile_refuses_changed_decision_identity(tmp_path):
@@ -47,3 +54,64 @@ def test_compile_resumes_complete_matching_build(tmp_path):
     second = compile_fn(spec, data_dir=data, artifacts_root=root, cpu_threads=1)
     assert first.build_id == second.build_id
     assert json.loads((second.version_dir / "build_state.json").read_text())["status"] == "complete"
+
+
+def test_compile_resumes_completed_zero_shot_diagnostic(tmp_path, monkeypatch, capsys):
+    from smallbatch import api, report
+
+    spec = make_spec(candidates={"student": {"type": "lora", "model": "example/base"}})
+    data = tmp_path / "data"
+    root = tmp_path / "artifacts"
+    label(spec, imported_records(30), out_dir=data)
+
+    monkeypatch.setattr(
+        api,
+        "_train_candidate",
+        lambda *args, **kwargs: {
+            "candidate": "student",
+            "backend": "lora",
+            "status": "completed",
+            "artifact_path": "candidates/student/model",
+            "train_seconds": 1.0,
+            "base_model": "example/base",
+            "inference_precision": "fp32",
+            "eval_batch_size": 1,
+            "error": None,
+        },
+    )
+    profile = {
+        "batch_one_latency_ms": {"p50": 1.0, "p95": 2.0, "n": 6},
+        "peak_rss_bytes": 100,
+        "candidate_owned_bytes": 10,
+        "required_shared_bytes": 0,
+    }
+    monkeypatch.setattr(
+        "smallbatch.profiling.profile_candidate",
+        lambda *args, **kwargs: {
+            "predictions": ["normal", "urgent", "normal", "urgent", "normal", "urgent"],
+            "profile": profile,
+        },
+    )
+    zero_calls = 0
+
+    def zero_profile(*args, **kwargs):
+        nonlocal zero_calls
+        zero_calls += 1
+        return {
+            "predictions": ["normal", "urgent", "normal", "urgent", "normal", "urgent"],
+            "profile": profile,
+        }
+
+    monkeypatch.setattr("smallbatch.profiling.profile_zeroshot", zero_profile)
+    original_build_report = report.build_report
+    monkeypatch.setattr(report, "build_report", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        compile_fn(spec, data_dir=data, artifacts_root=root, cpu_threads=1)
+    assert zero_calls == 1
+
+    monkeypatch.setattr(report, "build_report", original_build_report)
+    compile_fn(spec, data_dir=data, artifacts_root=root, cpu_threads=1)
+    assert zero_calls == 1
+    progress = capsys.readouterr().err
+    assert "diagnostic 1/1" in progress
+    assert "resumed complete" in progress

@@ -79,7 +79,7 @@ def test_codex_environment_keeps_unrelated_values(monkeypatch):
     assert os.environ["SMALLBATCH_TEST_VALUE"] == "kept"
 
 
-def test_usage_parses_codex_token_report(monkeypatch):
+def test_usage_parses_codex_token_report(monkeypatch, capsys):
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -96,6 +96,9 @@ def test_usage_parses_codex_token_report(monkeypatch):
         "successful_calls": 1,
         "reported_tokens": 2115,
     }
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "[smallbatch] codex-cli call 1 complete, 2,115 tokens" in captured.err
 
 
 def test_reasoning_effort_flag_in_command():

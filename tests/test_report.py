@@ -1,7 +1,7 @@
 import json
 
 from conftest import make_spec
-from smallbatch.report import build_report, observed_dominance, write_report
+from smallbatch.report import build_report, evidence_summary, observed_dominance, write_report
 
 
 def candidate(predictions, latency=1, memory=100, size=10):
@@ -43,3 +43,32 @@ def test_public_report_redacts_inputs_and_local_details_keep_them(tmp_path):
     assert report["claims"]["decision_correctness_validated"] is False
     assert report["claims"]["energy_measured"] is False
     assert json.loads(path.read_text())["selection_bias_note"]
+
+
+def test_integer_evidence_summary_includes_quality_and_operating_metrics():
+    record = candidate([1, 2])
+    record["metrics"] = {
+        "exact": 0.4,
+        "within_one": 0.8,
+        "mae": 0.9,
+        "p90_absolute_error": 2,
+        "max_absolute_error": 3,
+        "mean_signed_error": -0.2,
+        "pearson_r": 0.7,
+        "spearman_rho": 0.6,
+        "invalid_rate": 0.0,
+    }
+    summary = evidence_summary(record)
+    for expected in (
+        "exact=0.4000",
+        "within_one=0.8000",
+        "mae=0.9000",
+        "p90_error=2",
+        "max_error=3",
+        "signed_error=-0.2000",
+        "pearson=0.7000",
+        "spearman=0.6000",
+        "p50_ms=1",
+        "peak_rss=0.0MiB",
+    ):
+        assert expected in summary

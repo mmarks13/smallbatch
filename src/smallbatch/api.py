@@ -5,6 +5,9 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
+import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +62,10 @@ def _as_spec(spec: FunctionSpec | str | Path) -> FunctionSpec:
     return spec if isinstance(spec, FunctionSpec) else load_spec(spec)
 
 
+def _progress(message: str) -> None:
+    print(f"[smallbatch] {message}", file=sys.stderr, flush=True)
+
+
 def label(
     spec: FunctionSpec | str | Path,
     items: list[dict],
@@ -78,6 +85,11 @@ def label(
     spec = _as_spec(spec)
     out = Path(out_dir or f"data/{spec.name}")
     inputs, imported = normalize_item_records(spec, items)
+    source = "imported" if imported is not None else "teacher"
+    _progress(
+        f"label start function={spec.name} source={source} items={len(items)} "
+        f"augmentation={'yes' if spec.augmentation else 'no'}"
+    )
     teacher = None
     force_train_ids: set[str] = set()
     if imported is None:
@@ -106,6 +118,11 @@ def label(
         append=append,
         max_variants=max_variants,
         force_train_ids=force_train_ids,
+    )
+    counts = meta["counts"]
+    _progress(
+        f"label complete real={meta['real']} variants={meta['variants']} "
+        f"train={counts['train']} dev={counts['dev']} eval={counts['eval']} out={out}"
     )
     return LabelResult(out, meta)
 
@@ -236,8 +253,9 @@ def compile(  # noqa: A001
     """Train, CPU-evaluate, and compare every configured candidate."""
     from .evaluate import compute_metrics, train_fitted_constant
     from .profiling import profile_candidate, profile_zeroshot
-    from .report import build_report, write_report
+    from .report import build_report, evidence_summary, write_report
 
+    compile_started = time.perf_counter()
     spec = _as_spec(spec)
     data = Path(data_dir or f"data/{spec.name}")
     meta_path = data / "meta.json"
@@ -265,11 +283,22 @@ def compile(  # noqa: A001
 
     root = Path(artifacts_root)
     build = artifacts.build_dir(root, spec.name, spec.build_hash(), exact_dataset_hash)
+    threads = max(1, cpu_threads or min(4, os.cpu_count() or 1))
+    _progress(
+        f"compile start function={spec.name} build={build.name} candidates={len(spec.candidates)} "
+        f"train={len(train_rows)} dev={len(dev_rows)} eval={len(eval_rows)} cpu_threads={threads}"
+    )
     if (build / "manifest.json").exists():
         manifest = artifacts.read_manifest(build)
         state = artifacts.read_build_state(build)
         if state.get("status") == "complete" and artifacts.artifact_integrity(build) is None:
             report = json.loads((build / "report.json").read_text())
+            _progress(f"compile resume build={build.name} already complete")
+            for candidate_id, record in manifest["candidates"].items():
+                if record.get("status") == "completed":
+                    _progress(
+                        f"candidate {candidate_id} resumed complete: {evidence_summary(record)}"
+                    )
             return CompileResult(
                 build,
                 build.name,
@@ -288,33 +317,42 @@ def compile(  # noqa: A001
     eval_inputs = [row["input"] for row in eval_rows]
     references = [row["output"] for row in eval_rows]
 
-    for candidate_id, config in spec.candidates.items():
+    candidate_total = len(spec.candidates)
+    for candidate_index, (candidate_id, config) in enumerate(spec.candidates.items(), 1):
+        prefix = f"candidate {candidate_index}/{candidate_total} {candidate_id} ({config.type})"
         candidate_dir = build / "candidates" / candidate_id
         candidate_dir.mkdir(parents=True, exist_ok=True)
         final_record_path = candidate_dir / "result.local.json"
         record = _load_local_record(final_record_path)
         if record and record.get("status") == "completed" and record.get("profile"):
             candidates[candidate_id] = record
+            _progress(f"{prefix} resumed complete: {evidence_summary(record)}")
             continue
         trained_path = candidate_dir / "trained.json"
         try:
             record = _load_local_record(trained_path)
             if record is None:
+                _progress(f"{prefix} training start rows={len(train_rows)} dev={len(dev_rows)}")
                 artifacts.update_candidate_state(build, candidate_id, stage="training")
                 record = _train_candidate(
                     spec, candidate_id, config, train_rows, dev_rows, candidate_dir
                 )
                 _write_local_record(trained_path, record)
+                _progress(f"{prefix} training complete seconds={record['train_seconds']}")
+            else:
+                _progress(f"{prefix} resumed trained state")
             candidates[candidate_id] = record
             _write_provisional_manifest(
                 spec, build, data_meta, exact_dataset_hash, candidates, diagnostics
             )
+            _progress(f"{prefix} CPU evaluation start rows={len(eval_rows)} threads={threads}")
+            evaluation_started = time.perf_counter()
             artifacts.update_candidate_state(build, candidate_id, stage="cpu-evaluation")
             profiled = profile_candidate(
                 build,
                 candidate_id,
                 eval_inputs,
-                threads=cpu_threads,
+                threads=threads,
             )
             record["predictions"] = profiled["predictions"]
             record["metrics"] = compute_metrics(spec, record["predictions"], references)
@@ -322,6 +360,10 @@ def compile(  # noqa: A001
             _write_local_record(final_record_path, record)
             candidates[candidate_id] = record
             artifacts.update_candidate_state(build, candidate_id, stage="completed")
+            _progress(
+                f"{prefix} complete seconds={time.perf_counter() - evaluation_started:.1f}: "
+                f"{evidence_summary(record)}"
+            )
         except Exception as exc:  # candidate isolation is intentional
             record = {
                 "candidate": candidate_id,
@@ -334,8 +376,10 @@ def compile(  # noqa: A001
             artifacts.update_candidate_state(
                 build, candidate_id, stage="error", error=record["error"]
             )
+            _progress(f"{prefix} ERROR {record['error']}")
 
     seen_bases: set[str] = set()
+    diagnostic_configs = []
     for candidate_id, config in spec.candidates.items():
         if not isinstance(config, LoraCandidateSpec):
             continue
@@ -344,16 +388,31 @@ def compile(  # noqa: A001
         if config.model in seen_bases:
             continue
         seen_bases.add(config.model)
+        diagnostic_configs.append(config)
+
+    for diagnostic_index, config in enumerate(diagnostic_configs, 1):
         diagnostic_id = "zero-shot-" + hashlib.sha256(
             f"{config.model}\n{spec.prompt}".encode()
         ).hexdigest()[:8]
+        prefix = (
+            f"diagnostic {diagnostic_index}/{len(diagnostic_configs)} "
+            f"{diagnostic_id} ({config.model})"
+        )
+        local_path = build / f"{diagnostic_id}.local.json"
+        local = _load_local_record(local_path)
+        if local and local.get("metrics") and local.get("profile") and "predictions" in local:
+            diagnostics[diagnostic_id] = _candidate_public(local)
+            _progress(f"{prefix} resumed complete: {evidence_summary(local)}")
+            continue
         try:
+            _progress(f"{prefix} CPU evaluation start rows={len(eval_rows)} threads={threads}")
+            evaluation_started = time.perf_counter()
             profiled = profile_zeroshot(
                 build,
                 diagnostic_id,
                 config.model,
                 eval_inputs,
-                threads=cpu_threads,
+                threads=threads,
             )
             diagnostics[diagnostic_id] = {
                 "selectable": False,
@@ -363,8 +422,12 @@ def compile(  # noqa: A001
                 "profile": profiled["profile"],
             }
             _write_local_record(
-                build / f"{diagnostic_id}.local.json",
+                local_path,
                 {**diagnostics[diagnostic_id], "predictions": profiled["predictions"]},
+            )
+            _progress(
+                f"{prefix} complete seconds={time.perf_counter() - evaluation_started:.1f}: "
+                f"{evidence_summary(diagnostics[diagnostic_id])}"
             )
         except Exception as exc:
             diagnostics[diagnostic_id] = {
@@ -374,6 +437,8 @@ def compile(  # noqa: A001
                 "status": "error",
                 "error": f"{type(exc).__name__}: {exc}",
             }
+            _write_local_record(local_path, diagnostics[diagnostic_id])
+            _progress(f"{prefix} ERROR {diagnostics[diagnostic_id]['error']}")
 
     constant = train_fitted_constant(spec, train_rows)
     constant_predictions = [constant for _ in eval_rows]
@@ -382,6 +447,10 @@ def compile(  # noqa: A001
         "value": constant,
         "metrics": compute_metrics(spec, constant_predictions, references),
     }
+    _progress(
+        "diagnostic train-fitted-constant complete: "
+        + evidence_summary(diagnostics["train-fitted-constant"])
+    )
     if not any(record.get("status") == "completed" for record in candidates.values()):
         _write_provisional_manifest(
             spec, build, data_meta, exact_dataset_hash, candidates, diagnostics
@@ -402,6 +471,10 @@ def compile(  # noqa: A001
     state["status"] = "complete"
     state["completed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     artifacts.write_build_state(build, state)
+    _progress(
+        f"compile complete build={build.name} seconds={time.perf_counter() - compile_started:.1f} "
+        f"report={report_path}"
+    )
     return CompileResult(
         build,
         build.name,

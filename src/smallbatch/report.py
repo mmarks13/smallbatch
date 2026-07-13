@@ -8,6 +8,62 @@ from pathlib import Path
 from .spec import FunctionSpec
 
 
+def _number(value) -> str:
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return str(value)
+
+
+def _mib(value) -> str:
+    return f"{value / (1024 * 1024):.1f}MiB"
+
+
+def evidence_summary(record: dict) -> str:
+    """Compact, stable evidence line for long-running compile progress."""
+    metrics = record.get("metrics") or {}
+    parts: list[str] = []
+    if "within_one" in metrics:
+        fields = (
+            ("exact", "exact"),
+            ("within_one", "within_one"),
+            ("mae", "mae"),
+            ("p90_error", "p90_absolute_error"),
+            ("max_error", "max_absolute_error"),
+            ("signed_error", "mean_signed_error"),
+            ("pearson", "pearson_r"),
+            ("spearman", "spearman_rho"),
+            ("invalid", "invalid_rate"),
+        )
+    elif "decision_agreement" in metrics:
+        fields = (
+            ("agreement", "decision_agreement"),
+            ("macro_f1", "macro_f1"),
+            ("balanced_accuracy", "balanced_accuracy"),
+            ("invalid", "invalid_rate"),
+        )
+    else:
+        fields = (
+            ("joint_agreement", "joint_decision_agreement"),
+            ("joint_exact", "joint_exact"),
+            ("invalid", "invalid_rate"),
+        )
+    parts.extend(
+        f"{label}={_number(metrics[key])}"
+        for label, key in fields
+        if metrics.get(key) is not None
+    )
+
+    profile = record.get("profile") or {}
+    latency = profile.get("batch_one_latency_ms") or {}
+    for label, value in (("p50_ms", latency.get("p50")), ("p95_ms", latency.get("p95"))):
+        if value is not None:
+            parts.append(f"{label}={_number(value)}")
+    for label, key in (("peak_rss", "peak_rss_bytes"), ("owned", "candidate_owned_bytes")):
+        if profile.get(key) is not None:
+            parts.append(f"{label}={_mib(profile[key])}")
+    return " ".join(parts) if parts else "no evaluation evidence"
+
+
 def _row_errors(spec: FunctionSpec, predictions: list, references: list) -> list[list[float]]:
     errors: list[list[float]] = []
     for prediction, reference in zip(predictions, references):

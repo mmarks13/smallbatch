@@ -19,14 +19,17 @@ Sources:
 
 1. `prepare.py` fetches public narratives from the official API, normalizes and
    deduplicates them, balances across available product categories, and freezes
-   600 complaint IDs and content hashes.
+   600 complaint IDs and content hashes. The freeze is immutable; creating a
+   different sample requires a separately versioned protocol.
 2. `spec.yaml` and its prompt hash are frozen before any teacher access. The
    prompt is not revised after calibration; an unacceptable first draft stops
    the case study.
 3. `codex-cli` with `gpt-5.6-terra` labels the inputs after interactive
    calibration. Smallbatch creates the fixed 420/60/120 split.
 4. TF-IDF, SetFit, and LoRA candidates run through full CPU evaluation. The
-   report contains decision-fidelity and operating evidence only.
+   report contains decision-fidelity and operating evidence only. All three
+   configured candidates must complete, but there is no minimum fidelity
+   threshold and no PASS/FAIL verdict.
 5. A maintainer may explicitly select one candidate or select none. The script
    never chooses automatically.
 
@@ -39,7 +42,9 @@ smallbatch label case-study/cfpb-complaint-priority/spec.yaml \
   --items case-study/cfpb-complaint-priority/items.jsonl \
   --out case-study/cfpb-complaint-priority/work/data
 
-python case-study/cfpb-complaint-priority/run.py
+set -o pipefail
+python case-study/cfpb-complaint-priority/run.py --cpu-threads 4 \
+  2>&1 | tee case-study/cfpb-complaint-priority/work/run.log
 ```
 
 `prepare.py` requires network access. Labeling requires the maintainer's own
