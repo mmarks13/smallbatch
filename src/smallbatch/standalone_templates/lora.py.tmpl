@@ -1,7 +1,18 @@
 import itertools
+import json
 import re
+from pathlib import Path
 
-from ._common import FUNCTION, ROOT, metadata, render_input, validate_input, validate_output
+from ._common import (
+    FUNCTION,
+    ROOT,
+    metadata,
+    render_input,
+    validate_input,
+    validate_output,
+)
+
+__all__ = ["classify", "classify_batch", "metadata"]
 
 _MODEL = None
 _TOKENIZER = None
@@ -10,16 +21,38 @@ _SCORE_RE = re.compile(r"score:\s*(-?\d+)", re.I)
 _SCORE_VALUE_RE = re.compile(r"^\s*score\s*:\s*(.+)$", re.I | re.M)
 
 
+def _load_tokenizer(base):
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+    try:
+        return AutoTokenizer.from_pretrained(base)
+    except ValueError as exc:
+        if "Tokenizer class TokenizersBackend does not exist" not in str(exc):
+            raise
+        from transformers.utils import cached_file
+
+        config_path = cached_file(base, "tokenizer_config.json")
+        tokenizer_config = json.loads(Path(config_path).read_text())
+        extra_tokens = tokenizer_config.get("extra_special_tokens")
+        if isinstance(extra_tokens, list) and extra_tokens:
+            raise ValueError(
+                "tokenizer requires non-empty Transformers 5 extra_special_tokens; "
+                "this package cannot translate them safely to its Transformers 4 runtime"
+            ) from exc
+        compatibility = {"extra_special_tokens": {}} if isinstance(extra_tokens, list) else {}
+        return PreTrainedTokenizerFast.from_pretrained(base, **compatibility)
+
+
 def _load():
     global _MODEL, _TOKENIZER
     if _MODEL is not None:
         return _TOKENIZER, _MODEL
     import torch
     from peft import PeftModel
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM
 
     runtime = FUNCTION["runtime"]
-    _TOKENIZER = AutoTokenizer.from_pretrained(runtime["base_model"])
+    _TOKENIZER = _load_tokenizer(runtime["base_model"])
     if _TOKENIZER.pad_token is None:
         _TOKENIZER.pad_token = _TOKENIZER.eos_token
     precision = runtime.get("inference_precision", "fp32")
@@ -125,7 +158,14 @@ def classify_batch(items):
         f"[{FUNCTION['name']}]\n{render_input(item)}\noutput:" for item in normalized
     ]
     tokenizer.padding_side = "left"
-    encoded = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=2048)
+    encoded = tokenizer(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=2048,
+        return_token_type_ids=False,
+    )
     completions = _completion_strings()
     extra = {}
     if completions:

@@ -33,7 +33,9 @@ def main() -> int:
     relabeled = label_items(teacher, spec, [r["input"] for r in original], origin="relabel")
 
     # align by serialized input (label_items drops items that fail twice)
-    key = lambda r: json.dumps(r["input"], sort_keys=True)
+    def key(row):
+        return json.dumps(row["input"], sort_keys=True)
+
     second = {key(r): r["score"] for r in relabeled}
     pairs = [(r["score"], second[key(r)]) for r in original if key(r) in second]
 

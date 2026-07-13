@@ -1,7 +1,12 @@
 import pytest
 
 from conftest import make_spec
-from smallbatch.evaluate import _oom_backoff, compute_metrics, train_fitted_constant
+from smallbatch.evaluate import (
+    _encode_generation_batch,
+    _oom_backoff,
+    compute_metrics,
+    train_fitted_constant,
+)
 
 
 def test_train_fitted_constant_uses_only_training_rows():
@@ -37,3 +42,15 @@ def test_oom_backoff_retries_same_slice_and_sticks():
 def test_oom_at_one_is_real_failure():
     with pytest.raises(RuntimeError):
         _oom_backoff(lambda _: (_ for _ in ()).throw(RuntimeError()), [1], 1, lambda _: True)
+
+
+def test_generation_does_not_request_token_type_ids():
+    calls = []
+
+    def tokenizer(batch, **kwargs):
+        calls.append((batch, kwargs))
+        return {"input_ids": []}
+
+    _encode_generation_batch(tokenizer, ["prompt"])
+
+    assert calls[0][1]["return_token_type_ids"] is False

@@ -49,9 +49,11 @@ augmentation uses training rows only and requires a callable teacher.
 Bounded integers are learned as discrete classes. Structured functions train
 one TF-IDF or SetFit head per field and return one validated object.
 
-Completed stages are durable. Re-running a matching decision, dataset, and
-build resumes candidate work; LoRA uses trainer checkpoints, and completed
-zero-shot diagnostics are also reused. During a run, progress identifies the
+Completed stages are durable. An interrupted build resumes in place, including
+LoRA trainer checkpoints and completed zero-shot diagnostics. Re-running a
+completed build with candidate errors creates a new `-rN` revision: completed
+candidate files and diagnostics are reused, failed candidates run again, and
+the prior manifest remains unchanged. During a run, progress identifies the
 current candidate and stage and prints a compact evidence summary as each CPU
 evaluation completes. An error remains visible without discarding other
 candidates.

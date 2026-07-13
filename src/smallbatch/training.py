@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from . import prompts
@@ -10,12 +11,37 @@ from .labeling import Row
 from .spec import FunctionSpec, LoraCandidateSpec
 
 
+def _load_tokenizer(base: str):
+    """Bridge tokenizer.json-only Transformers 5 configs on our pinned v4 stack."""
+    from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+    try:
+        return AutoTokenizer.from_pretrained(base)
+    except ValueError as exc:
+        if "Tokenizer class TokenizersBackend does not exist" not in str(exc):
+            raise
+        # SetFit 1.1.x currently requires Transformers 4.x. Newer Hub repos may
+        # identify the same tokenizer.json backend by its Transformers 5 name.
+        from transformers.utils import cached_file
+
+        config_path = cached_file(base, "tokenizer_config.json")
+        tokenizer_config = json.loads(Path(config_path).read_text())
+        extra_tokens = tokenizer_config.get("extra_special_tokens")
+        if isinstance(extra_tokens, list) and extra_tokens:
+            raise ValueError(
+                "tokenizer requires non-empty Transformers 5 extra_special_tokens; "
+                "Smallbatch cannot translate them safely to its Transformers 4 runtime"
+            ) from exc
+        compatibility = {"extra_special_tokens": {}} if isinstance(extra_tokens, list) else {}
+        return PreTrainedTokenizerFast.from_pretrained(base, **compatibility)
+
+
 def load_base_model(base: str, precision: str):
     """Load tokenizer + base model at the given precision. Shared with eval."""
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM
 
-    tokenizer = AutoTokenizer.from_pretrained(base)
+    tokenizer = _load_tokenizer(base)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 

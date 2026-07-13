@@ -56,6 +56,66 @@ def test_compile_resumes_complete_matching_build(tmp_path):
     assert json.loads((second.version_dir / "build_state.json").read_text())["status"] == "complete"
 
 
+def test_compile_retries_only_failed_candidates_in_new_revision(tmp_path, monkeypatch):
+    from smallbatch import api, artifacts
+
+    spec = make_spec(
+        candidates={
+            "first": {"type": "tfidf"},
+            "retry": {"type": "tfidf"},
+        }
+    )
+    data = tmp_path / "data"
+    root = tmp_path / "artifacts"
+    label(spec, imported_records(30), out_dir=data)
+    calls = []
+
+    def train_candidate(_spec, candidate_id, config, _train, _dev, candidate_dir):
+        calls.append(candidate_id)
+        if candidate_id == "retry" and calls.count("retry") == 1:
+            raise RuntimeError("temporary incompatibility")
+        model_dir = candidate_dir / "model"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "model.bin").write_bytes(candidate_id.encode())
+        return {
+            "candidate": candidate_id,
+            "backend": config.type,
+            "status": "completed",
+            "artifact_path": f"candidates/{candidate_id}/model",
+            "train_seconds": 1.0,
+            "format": "test",
+            "error": None,
+        }
+
+    profile = {
+        "runtime": "test",
+        "batch_one_latency_ms": {"p50": 1.0, "p95": 2.0, "n": 6},
+        "peak_rss_bytes": 100,
+        "candidate_owned_bytes": 10,
+        "required_shared_bytes": 0,
+    }
+    monkeypatch.setattr(api, "_train_candidate", train_candidate)
+    monkeypatch.setattr(
+        "smallbatch.profiling.profile_candidate",
+        lambda *args, **kwargs: {
+            "predictions": ["normal", "urgent", "normal", "urgent", "normal", "urgent"],
+            "profile": profile,
+        },
+    )
+
+    first = compile_fn(spec, data_dir=data, artifacts_root=root, cpu_threads=1)
+    original_hashes = dict(first.manifest["artifact_files"])
+    assert first.candidates["retry"]["status"] == "error"
+
+    second = compile_fn(spec, data_dir=data, artifacts_root=root, cpu_threads=1)
+
+    assert second.build_id == f"{first.build_id}-r2"
+    assert second.manifest["retry_of"] == first.build_id
+    assert second.candidates["retry"]["status"] == "completed"
+    assert calls == ["first", "retry", "retry"]
+    assert artifacts.file_hashes(first.version_dir) == original_hashes
+
+
 def test_compile_resumes_completed_zero_shot_diagnostic(tmp_path, monkeypatch, capsys):
     from smallbatch import api, report
 

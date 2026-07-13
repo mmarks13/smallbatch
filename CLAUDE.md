@@ -113,6 +113,9 @@ runtime before atomically changing `active.json`.
 6. Every selectable candidate has completed full CPU evaluation.
 7. Build manifests are immutable evidence. Selection is a separate atomic
    pointer and history.
+   Re-running a completed build that contains candidate errors creates a new
+   retry revision, reuses completed candidates, and never repairs the prior
+   build in place.
 8. Generated wheels must not import or depend on `smallbatch` and must reproduce
    the evaluated candidate or disclose and explicitly accept package drift.
 9. Public evidence contains no inputs, rationales, or raw disagreements.

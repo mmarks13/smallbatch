@@ -46,6 +46,17 @@ def _prefix_allowed_fn(trie: dict, terminals: set, prompt_len: int, eos_id: int)
     return fn
 
 
+def _encode_generation_batch(tokenizer, batch: list[str]):
+    return tokenizer(
+        batch,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=2048,
+        return_token_type_ids=False,
+    )
+
+
 def _oom_backoff(process, items: list, batch_size: int, is_oom, on_oom=None):
     """Run `process(slice)` over successive slices of `items`, halving the
     batch size (floor 1) and retrying the SAME slice whenever `is_oom(exc)`.
@@ -111,7 +122,7 @@ def generate_batch(
     gen_extra: dict = {}
 
     def process(batch: list[str]) -> list[str]:
-        enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=2048)
+        enc = _encode_generation_batch(tokenizer, batch)
         enc = {k: v.to(model.device) for k, v in enc.items()}
         extra = dict(gen_extra)
         if constrain:

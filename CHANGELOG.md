@@ -34,8 +34,13 @@
   and artifacts must be regenerated.
 - Completed zero-shot diagnostics now resume from their durable local records
   after an interrupted build.
+- Completed builds with candidate errors now retry in a new immutable revision
+  while reusing successful candidate artifacts and diagnostics.
 - Bounded SetFit's embedding phase with deterministic per-class sampling and a
   recorded contrastive-pair budget while fitting its classifier on all rows.
+- Added compatibility for tokenizer.json-only model repositories that use the
+  Transformers 5 `TokenizersBackend` name and for models that reject generated
+  `token_type_ids`.
 
 ### Removed
 

@@ -24,7 +24,9 @@ nvidia-smi
 ```
 
 Candidate errors are isolated. If LoRA cannot train, completed TF-IDF and
-SetFit candidates remain available for comparison and selection.
+SetFit candidates remain available for comparison and selection. Re-running
+the same completed build retries errors in a new immutable revision and reuses
+the candidates that already completed.
 
 The selected LoRA package uses a Python PEFT CPU runtime in v0.2. GGUF and
 llama.cpp conversion are deferred because conversion and quantization can

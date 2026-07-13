@@ -5,7 +5,9 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
 import re
+import shutil
 from pathlib import Path
 
 from .spec import load_spec
@@ -50,19 +52,10 @@ def latest(root: Path, name: str) -> Path | None:
     return found[-1] if found else None
 
 
-def build_dir(root: Path, name: str, build_hash: str, dataset_hash: str) -> Path:
-    """Return the matching complete/in-progress build or allocate a new one."""
-    base = root / name / "builds"
-    base.mkdir(parents=True, exist_ok=True)
-    for path in base.iterdir():
-        state_path = path / "build_state.json"
-        if not state_path.exists():
-            continue
-        state = json.loads(state_path.read_text())
-        if state.get("build_hash") == build_hash and state.get("dataset_hash") == dataset_hash:
-            if state.get("status") != "complete" or artifact_integrity(path) is None:
-                return path
-    stem = f"{datetime.date.today().isoformat()}-{build_hash[:8]}"
+def _allocate_build(
+    base: Path, build_hash: str, dataset_hash: str, *, stem: str | None = None
+) -> Path:
+    stem = stem or f"{datetime.date.today().isoformat()}-{build_hash[:8]}"
     path = base / stem
     revision = 1
     while path.exists():
@@ -81,6 +74,74 @@ def build_dir(root: Path, name: str, build_hash: str, dataset_hash: str) -> Path
         },
     )
     return path
+
+
+def _link_or_copy(source: str, destination: str) -> str:
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+    return destination
+
+
+def _seed_retry(source: Path, destination: Path) -> None:
+    """Seed a revision without modifying or duplicating completed candidates."""
+    manifest = read_manifest(source)
+    state = read_build_state(destination)
+    state["retry_of"] = source.name
+    for candidate, record in (manifest.get("candidates") or {}).items():
+        source_dir = source / "candidates" / candidate
+        if not source_dir.exists():
+            continue
+        completed = record.get("status") == "completed"
+        shutil.copytree(
+            source_dir,
+            destination / "candidates" / candidate,
+            copy_function=_link_or_copy if completed else shutil.copy2,
+        )
+        state["candidates"][candidate] = {
+            "stage": "completed" if completed else "retry-pending",
+            "reused_from": source.name if completed else None,
+            "previous_error": None if completed else record.get("error"),
+        }
+    for diagnostic in (manifest.get("diagnostics") or {}):
+        source_record = source / f"{diagnostic}.local.json"
+        if source_record.exists():
+            _link_or_copy(str(source_record), str(destination / source_record.name))
+    write_build_state(destination, state)
+
+
+def build_dir(root: Path, name: str, build_hash: str, dataset_hash: str) -> Path:
+    """Return a resumable build or allocate an immutable retry revision."""
+    base = root / name / "builds"
+    base.mkdir(parents=True, exist_ok=True)
+    matching: list[Path] = []
+    for path in sorted(base.iterdir(), key=_version_key):
+        state_path = path / "build_state.json"
+        if not state_path.exists():
+            continue
+        state = json.loads(state_path.read_text())
+        if state.get("build_hash") == build_hash and state.get("dataset_hash") == dataset_hash:
+            matching.append(path)
+
+    running = [path for path in matching if read_build_state(path).get("status") != "complete"]
+    if running:
+        return running[-1]
+
+    intact = [path for path in matching if artifact_integrity(path) is None]
+    if intact:
+        source = intact[-1]
+        records = list((read_manifest(source).get("candidates") or {}).values())
+        if records and all(record.get("status") == "completed" for record in records):
+            return source
+        retry = _allocate_build(
+            base, build_hash, dataset_hash, stem=_version_key(source)[0]
+        )
+        _seed_retry(source, retry)
+        return retry
+
+    stem = _version_key(matching[-1])[0] if matching else None
+    return _allocate_build(base, build_hash, dataset_hash, stem=stem)
 
 
 def read_build_state(path: Path) -> dict:

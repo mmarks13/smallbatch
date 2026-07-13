@@ -57,6 +57,51 @@ def test_damaged_complete_build_allocates_new_revision(tmp_path):
     assert replacement.name.endswith("-r2")
 
 
+def test_partial_complete_build_seeds_immutable_retry_revision(tmp_path):
+    root, build, manifest = completed_build(tmp_path)
+    completed_dir = build / "candidates" / "tfidf"
+    completed_dir.mkdir(parents=True)
+    completed_file = completed_dir / "model.bin"
+    completed_file.write_bytes(b"completed")
+    failed_dir = build / "candidates" / "student"
+    failed_dir.mkdir(parents=True)
+    failed_file = failed_dir / "partial.bin"
+    failed_file.write_bytes(b"partial")
+    manifest["candidates"]["student"] = {
+        "status": "error",
+        "backend": "lora",
+        "error": "training failed",
+    }
+    manifest["artifact_files"] = artifacts.file_hashes(build)
+    artifacts.write_manifest(build, manifest)
+
+    retry = artifacts.build_dir(
+        root,
+        "ticket-priority",
+        manifest["build_hash"],
+        manifest["dataset_hash"],
+    )
+
+    assert retry != build
+    assert retry.name.endswith("-r2")
+    retry_state = artifacts.read_build_state(retry)
+    assert retry_state["retry_of"] == build.name
+    assert retry_state["candidates"]["tfidf"]["stage"] == "completed"
+    assert retry_state["candidates"]["student"]["stage"] == "retry-pending"
+    assert (retry / "candidates/tfidf/model.bin").stat().st_ino == completed_file.stat().st_ino
+    assert (retry / "candidates/student/partial.bin").stat().st_ino != failed_file.stat().st_ino
+    assert artifacts.artifact_integrity(build) is None
+    assert (
+        artifacts.build_dir(
+            root,
+            "ticket-priority",
+            manifest["build_hash"],
+            manifest["dataset_hash"],
+        )
+        == retry
+    )
+
+
 def test_selection_is_separate_and_clearable(tmp_path):
     root, build, _manifest = completed_build(tmp_path)
     selection = {

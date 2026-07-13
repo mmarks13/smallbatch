@@ -151,6 +151,7 @@ def _write_provisional_manifest(
     candidates: dict,
     diagnostics: dict,
 ) -> dict:
+    state = artifacts.read_build_state(build)
     manifest = {
         "manifest_schema_version": artifacts.MANIFEST_SCHEMA_VERSION,
         "function": spec.name,
@@ -165,6 +166,8 @@ def _write_provisional_manifest(
         "diagnostics": diagnostics,
         "smallbatch_version": _version(),
     }
+    if state.get("retry_of"):
+        manifest["retry_of"] = state["retry_of"]
     artifacts.write_manifest(build, manifest)
     return manifest
 
