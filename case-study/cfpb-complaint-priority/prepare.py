@@ -7,6 +7,9 @@ import datetime
 import hashlib
 import json
 import re
+import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
@@ -16,6 +19,13 @@ HERE = Path(__file__).resolve().parent
 API = "https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1/"
 POOL_TARGET = 3000
 FINAL_COUNT = 600
+PAGE_SIZE = 100
+API_LICENSE = "CC0"
+REQUEST_HEADERS = {
+    "Accept": "application/json",
+    "User-Agent": "smallbatch-case-study/0.2 (+https://github.com/mmarks13/smallbatch)",
+}
+RETRYABLE_HTTP_STATUS = {424, 429, 500, 502, 503, 504}
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -24,31 +34,78 @@ def atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
+def fetch_json(url: str, *, attempts: int = 4, sleep=time.sleep) -> dict:
+    for attempt in range(attempts):
+        request = urllib.request.Request(url, headers=REQUEST_HEADERS)
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                content_type = response.headers.get_content_type()
+                if content_type != "application/json":
+                    raise RuntimeError(f"CFPB API returned unexpected content type {content_type!r}")
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in RETRYABLE_HTTP_STATUS or attempt + 1 == attempts:
+                raise RuntimeError(f"CFPB API request failed with HTTP {exc.code}") from exc
+        except (TimeoutError, urllib.error.URLError) as exc:
+            if attempt + 1 == attempts:
+                raise RuntimeError(f"CFPB API request failed after {attempts} attempts") from exc
+        sleep(2**attempt)
+    raise AssertionError("unreachable")
+
+
 def fetch_pool() -> list[dict]:
     rows = []
-    offset = 0
+    seen_ids = set()
+    page = 1
+    search_after = None
     while len(rows) < POOL_TARGET:
-        query = urllib.parse.urlencode(
-            {
-                "has_narrative": "true",
-                "no_aggs": "true",
-                "no_highlight": "true",
-                "sort": "created_date_desc",
-                "size": 100,
-                "frm": offset,
-            }
-        )
-        request = urllib.request.Request(
-            API + "?" + query,
-            headers={"User-Agent": "smallbatch-case-study/0.2"},
-        )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            payload = json.load(response)
+        params = {
+            "has_narrative": "true",
+            "no_aggs": "true",
+            "no_highlight": "true",
+            "sort": "created_date_desc",
+            "size": PAGE_SIZE,
+            "frm": (page - 1) * PAGE_SIZE,
+        }
+        if search_after is not None:
+            params.update({"page": page, "search_after": search_after})
+        query = urllib.parse.urlencode(params)
+        payload = fetch_json(API + "?" + query)
+        license_name = payload.get("_meta", {}).get("license")
+        if license_name != API_LICENSE:
+            raise RuntimeError(
+                f"CFPB API reported license {license_name!r}; expected {API_LICENSE!r}"
+            )
         hits = payload.get("hits", {}).get("hits", [])
         if not hits:
             break
-        rows.extend(hit.get("_source", {}) for hit in hits)
-        offset += len(hits)
+        sources = [hit.get("_source", {}) for hit in hits]
+        page_ids = []
+        for source in sources:
+            if not isinstance(source, dict):
+                raise RuntimeError("CFPB API returned a non-object complaint")
+            raw_id = source.get("complaint_id")
+            complaint_id = "" if raw_id is None else str(raw_id).strip()
+            if not complaint_id:
+                raise RuntimeError("CFPB API returned a complaint without an ID")
+            page_ids.append(complaint_id)
+        if len(set(page_ids)) != len(page_ids):
+            raise RuntimeError("CFPB API returned duplicate complaint IDs within a page")
+        if seen_ids.intersection(page_ids):
+            raise RuntimeError("CFPB API pagination repeated complaint IDs from an earlier page")
+        seen_ids.update(page_ids)
+        rows.extend(sources)
+        print(
+            f"CFPB fetch page={page} hits={len(hits)} accumulated={len(rows)}",
+            file=sys.stderr,
+        )
+        if len(rows) >= POOL_TARGET:
+            break
+        page += 1
+        break_point = payload.get("_meta", {}).get("break_points", {}).get(str(page))
+        if not isinstance(break_point, list) or len(break_point) != 2:
+            raise RuntimeError(f"CFPB API omitted the pagination breakpoint for page {page}")
+        search_after = "_".join(str(value) for value in break_point)
     return rows
 
 
@@ -120,6 +177,7 @@ def main() -> None:
     spec_hash = hashlib.sha256((HERE / "spec.yaml").read_bytes()).hexdigest()
     frozen = {
         "source": API,
+        "api_license": API_LICENSE,
         "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "selection": "normalize, narrative length 200-4000, content dedupe, product round-robin",
         "count": len(selected),

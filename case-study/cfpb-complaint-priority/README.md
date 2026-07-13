@@ -47,9 +47,11 @@ python case-study/cfpb-complaint-priority/run.py --cpu-threads 4 \
   2>&1 | tee case-study/cfpb-complaint-priority/work/run.log
 ```
 
-`prepare.py` requires network access. Labeling requires the maintainer's own
-authorized Codex access. Model downloads and LoRA training requirements remain
-candidate-specific.
+`prepare.py` requires network access. It requests JSON explicitly, follows the
+API's search-after breakpoints, rejects repeated pages, validates the
+API-reported `CC0` license, and retries bounded transient upstream errors.
+Labeling requires the maintainer's own authorized Codex access. Model downloads
+and LoRA training requirements remain candidate-specific.
 
 ## Publication
 

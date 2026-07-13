@@ -16,6 +16,11 @@ WORK = HERE / "work"
 RESULTS = HERE / "results"
 EXPECTED_CANDIDATES = {"tfidf", "bge-small", "granite-350m"}
 EXPECTED_COUNT = 600
+EXPECTED_SOURCE = "https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1/"
+EXPECTED_API_LICENSE = "CC0"
+EXPECTED_SELECTION = (
+    "normalize, narrative length 200-4000, content dedupe, product round-robin"
+)
 
 
 def atomic_copy(source: Path, destination: Path) -> None:
@@ -33,12 +38,22 @@ def atomic_json(path: Path, value: dict) -> None:
 def verify_frozen() -> dict:
     frozen = json.loads((HERE / "frozen_ids.json").read_text())
     checks = {
+        "source": EXPECTED_SOURCE,
+        "api_license": EXPECTED_API_LICENSE,
+        "selection": EXPECTED_SELECTION,
         "spec_sha256": hashlib.sha256((HERE / "spec.yaml").read_bytes()).hexdigest(),
         "items_sha256": hashlib.sha256((HERE / "items.jsonl").read_bytes()).hexdigest(),
     }
     for key, value in checks.items():
         if frozen.get(key) != value:
             raise RuntimeError(f"frozen {key} mismatch")
+    extracted_at = frozen.get("extracted_at")
+    try:
+        extracted = datetime.datetime.fromisoformat(extracted_at)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("frozen extraction timestamp is invalid") from exc
+    if extracted.tzinfo is None:
+        raise RuntimeError("frozen extraction timestamp must include a timezone")
     items = [json.loads(line) for line in (HERE / "items.jsonl").read_text().splitlines()]
     complaints = frozen.get("complaints") or []
     if frozen.get("count") != EXPECTED_COUNT or len(items) != EXPECTED_COUNT:
@@ -46,12 +61,43 @@ def verify_frozen() -> dict:
     if len(complaints) != EXPECTED_COUNT:
         raise RuntimeError(f"frozen case must contain exactly {EXPECTED_COUNT} complaint records")
     for index, (item, complaint) in enumerate(zip(items, complaints)):
-        provenance = item.get("provenance") or {}
-        narrative = (item.get("input") or {}).get("narrative")
+        if not isinstance(item, dict) or set(item) != {"input", "provenance"}:
+            raise RuntimeError(f"frozen item schema mismatch at row {index}")
+        input_value = item.get("input")
+        if not isinstance(input_value, dict) or set(input_value) != {
+            "product",
+            "issue",
+            "narrative",
+        }:
+            raise RuntimeError(f"frozen input schema mismatch at row {index}")
+        if any(
+            not isinstance(input_value[field], str) or not input_value[field].strip()
+            for field in ("product", "issue", "narrative")
+        ):
+            raise RuntimeError(f"frozen input value missing at row {index}")
+        narrative = input_value["narrative"]
+        if not 200 <= len(narrative) <= 4000:
+            raise RuntimeError(f"frozen narrative length invalid at row {index}")
+        provenance = item.get("provenance")
+        if not isinstance(provenance, dict) or set(provenance) != {
+            "complaint_id",
+            "content_sha256",
+        }:
+            raise RuntimeError(f"frozen complaint provenance schema mismatch at row {index}")
+        if not isinstance(complaint, dict) or set(complaint) != set(provenance):
+            raise RuntimeError(f"frozen complaint record schema mismatch at row {index}")
         if provenance != complaint:
             raise RuntimeError(f"frozen complaint provenance mismatch at row {index}")
-        if not isinstance(narrative, str):
-            raise RuntimeError(f"frozen complaint narrative missing at row {index}")
+        complaint_id = complaint.get("complaint_id")
+        content_hash = complaint.get("content_sha256")
+        if not isinstance(complaint_id, str) or not complaint_id.isdecimal():
+            raise RuntimeError(f"frozen complaint ID invalid at row {index}")
+        if (
+            not isinstance(content_hash, str)
+            or len(content_hash) != 64
+            or any(character not in "0123456789abcdef" for character in content_hash)
+        ):
+            raise RuntimeError(f"frozen complaint content hash invalid at row {index}")
         if hashlib.sha256(narrative.encode()).hexdigest() != complaint.get("content_sha256"):
             raise RuntimeError(f"frozen complaint content hash mismatch at row {index}")
     if len({row["complaint_id"] for row in complaints}) != EXPECTED_COUNT:
