@@ -75,6 +75,7 @@ def package_selection(
             "inference_precision",
             "rationale_distillation",
             "eval_batch_size",
+            "decode",
         )
         if record.get(key) is not None
     }

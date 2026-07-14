@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import prompts
 from .hardware import pick_precision
-from .labeling import Row
+from .labeling import Row, _progress
 from .spec import FunctionSpec, LoraCandidateSpec
 
 
@@ -378,9 +378,14 @@ def train(
         trainer.model.save_pretrained(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
     epochs_run = int(round(trainer.state.epoch or config.max_epochs))
+    decoder, comparison = _select_decoder(
+        spec, config, trainer.model, tokenizer, dev_rows
+    )
     return {
         "precision": precision,
         "objective": "ordinal" if ordinal else "token",
+        "decode": decoder,
+        "dev_decode_comparison": comparison,
         "train_rows": len(train_rows),
         "train_loss": round(result.training_loss, 4),
         "adapter_dir": str(adapter_dir),
@@ -391,3 +396,48 @@ def train(
         "stopped_reason": dev_cb.stopped_reason if dev_cb else "max_epochs",
         "dev_rows": len(dev_rows or []),
     }
+
+
+def _select_decoder(
+    spec: FunctionSpec, config: LoraCandidateSpec, model, tokenizer, dev_rows
+) -> tuple[str, dict | None]:
+    """Which point of the level distribution to report, decided on dev.
+
+    The mode maximizes exact agreement and the median minimizes absolute error;
+    which one reproduces the supplied decisions better is an empirical question,
+    so `auto` measures both on the development split and keeps the winner. It
+    is never decided on the evaluation split.
+    """
+    from . import decode
+    from .labeling import row_output
+    from .metrics import compare
+
+    levels = decode.scale_levels(spec)
+    if levels is None or config.rationale_distillation:
+        return "argmax", None
+    if config.decode != "auto":
+        return config.decode, None
+    if not dev_rows:
+        return "argmax", None
+
+    texts = [prompts.student_prompt(spec, row["input"]) for row in dev_rows]
+    references = [row_output(spec, row) for row in dev_rows]
+    distributions = decode.score_levels(
+        model, tokenizer, spec, texts, config.eval_batch_size
+    )
+    comparison = {}
+    for candidate in decode.DECODERS:
+        predictions = decode.decode_levels(distributions, levels, candidate)
+        comparison[candidate] = compare(spec, predictions, references)
+    chosen = max(
+        decode.DECODERS, key=lambda name: _quality_value(spec, comparison[name])
+    )
+    _progress(
+        "decoder selected on dev: "
+        + " ".join(
+            f"{name}={_quality_value(spec, comparison[name]):.4f}"
+            for name in decode.DECODERS
+        )
+        + f" -> {chosen}"
+    )
+    return chosen, comparison

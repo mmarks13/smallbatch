@@ -149,6 +149,63 @@ def _constraint(tokenizer, completions, prompt_length):
     return allowed
 
 
+def _scale_levels():
+    """The ordered levels of a scalar integer decision, else None."""
+    if FUNCTION["runtime"].get("rationale_distillation"):
+        return None
+    fields = FUNCTION["output"]["fields"]
+    if list(fields) != ["score"] or fields["score"].get("range") is None:
+        return None
+    low, high = fields["score"]["range"]
+    return list(range(low, high + 1))
+
+
+def _deciding_tokens(tokenizer, levels):
+    """Where the level completions diverge, and the token each contributes."""
+    tokenized = [
+        tokenizer(f" {level}", add_special_tokens=False)["input_ids"] for level in levels
+    ]
+    shortest = min(len(ids) for ids in tokenized)
+    prefix = 0
+    while prefix < shortest and len({ids[prefix] for ids in tokenized}) == 1:
+        prefix += 1
+    deciding = [ids[prefix:] for ids in tokenized]
+    if any(len(ids) != 1 for ids in deciding):
+        return None
+    ids = [only[0] for only in deciding]
+    return (prefix, ids) if len(set(ids)) == len(ids) else None
+
+
+def _classify_levels(tokenizer, model, prompts, levels):
+    """One forward pass: the distribution over the scale sits in the logits at
+    the deciding position. `decode` picks the mode or the median of it."""
+    import torch
+
+    decision = _deciding_tokens(tokenizer, levels)
+    if decision is None:
+        return None
+    prefix, ids = decision
+    lead = tokenizer(f" {levels[0]}", add_special_tokens=False)["input_ids"][:prefix]
+    tokenizer.padding_side = "left"
+    encoded = tokenizer(
+        [prompt + tokenizer.decode(lead) if lead else prompt for prompt in prompts],
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=2048,
+        add_special_tokens=False,
+        return_token_type_ids=False,
+    )
+    with torch.no_grad():
+        logits = model(**encoded).logits[:, -1, :].float()
+    probabilities = torch.softmax(logits[:, torch.tensor(ids)], dim=-1)
+    if FUNCTION["runtime"].get("decode") == "median":
+        chosen = (probabilities.cumsum(dim=-1) >= 0.5).float().argmax(dim=-1)
+    else:
+        chosen = probabilities.argmax(dim=-1)
+    return [levels[int(index)] for index in chosen]
+
+
 def classify_batch(items):
     normalized = [validate_input(item) for item in items]
     if not normalized:
@@ -157,6 +214,11 @@ def classify_batch(items):
     prompts = [
         f"[{FUNCTION['name']}]\n{render_input(item)}\noutput:" for item in normalized
     ]
+    levels = _scale_levels()
+    if levels is not None:
+        outputs = _classify_levels(tokenizer, model, prompts, levels)
+        if outputs is not None:
+            return [validate_output(output) for output in outputs]
     tokenizer.padding_side = "left"
     encoded = tokenizer(
         prompts,

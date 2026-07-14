@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import artifacts, prompts
+from . import artifacts, decode, prompts
 from .spec import FunctionSpec, load_spec, validate_input, validate_output
 
 
@@ -127,9 +127,19 @@ def load_candidate(build: Path, candidate: str) -> CandidateFunction:
     model = PeftModel.from_pretrained(base, str(model_dir))
     model.eval()
     rationale = bool(record.get("rationale_distillation"))
+    levels = None if rationale else decode.scale_levels(spec)
+    decoder = record.get("decode", "argmax")
 
     def predict(items: list[dict]) -> list[Any]:
         texts = [prompts.student_prompt(spec, item) for item in items]
+        if levels is not None:
+            # a level is one token, so the distribution over the scale is in the
+            # logits at one position: no decoding loop, and the decoder chooses
+            # which point of it to report
+            distributions = decode.score_levels(
+                model, tokenizer, spec, texts, record.get("eval_batch_size", 16)
+            )
+            return decode.decode_levels(distributions, levels, decoder)
         raw, _ = generate_batch(
             model,
             tokenizer,

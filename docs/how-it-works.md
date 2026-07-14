@@ -62,6 +62,15 @@ scale is refused: rescale the decision (a 0-10 scale becomes 0-9), or use
 `labels` when the values are unordered. Structured functions train one TF-IDF
 or SetFit head per field and return one validated object.
 
+Because a level is one token, a LoRA student reads its whole distribution over
+the scale from a single forward pass, with no decoding loop. That exposes a
+choice: `decode: argmax` reports the most likely level, which maximizes exact
+agreement, and `decode: median` reports the first level whose cumulative
+probability reaches one half, which trades exact hits for smaller misses. The
+default, `auto`, measures both on the development split and keeps the better
+one; the evaluation split never decides it. The selected decoder and the
+comparison are recorded with the candidate.
+
 Completed stages are durable. An interrupted build resumes in place, including
 LoRA trainer checkpoints and completed zero-shot diagnostics. Re-running a
 completed build with candidate or diagnostic errors creates a new `-rN`

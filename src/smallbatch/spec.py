@@ -213,6 +213,11 @@ class LoraCandidateSpec(BaseModel):
     # integer scale trains as ordered levels rather than unrelated symbols.
     # auto uses it for scalar integer decisions without rationale distillation.
     objective: Literal["auto", "token", "ordinal"] = "auto"
+    # which point of the level distribution to report: the mode (argmax, the
+    # level constrained generation would emit) or the median (the first level
+    # whose cumulative probability reaches one half, which trades exact hits
+    # for smaller misses). auto lets the development split decide.
+    decode: Literal["auto", "argmax", "median"] = "auto"
     max_epochs: int = 12
     patience: int | None = 2
     min_delta: float = 0.0
