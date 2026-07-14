@@ -212,6 +212,9 @@ def _dependencies(backend: str) -> list[str]:
             "setfit>=1.1.3,<1.2",
             "sentence-transformers>=3,<6",
             "transformers>=4.56,<5",
+            # an integer scale is served by the ordered head persisted with skops
+            "scikit-learn>=1.4,<2",
+            "skops>=0.10",
         ],
         "lora": ["torch>=2.4", "transformers>=4.56,<5", "peft>=0.14"],
     }[backend]

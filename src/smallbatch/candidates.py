@@ -42,39 +42,48 @@ def _check_class_coverage(spec: FunctionSpec, train_rows: list[Row]) -> None:
 
 
 def train_tfidf(spec: FunctionSpec, train_rows: list[Row], out_dir: Path) -> dict[str, Any]:
-    """Fit one TfidfVectorizer+LogisticRegression pipeline per output field
-    (int ranges are classification over the discrete values) and persist with
-    skops. Returns format metadata
-    for the candidate record."""
+    """Fit a TF-IDF vectorizer plus one head per output field and persist with
+    skops. Integer scales get an ordered head (`P(y > level)` per boundary) so
+    the levels train as a scale; enum labels get a multinomial classifier.
+    Returns format metadata for the candidate record."""
     import sklearn
     import skops
     import skops.io as sio
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import Pipeline
+
+    from . import ordinal
 
     _check_class_coverage(spec, train_rows)
     texts = _texts(spec, train_rows)
-    pipelines: dict[str, Any] = {}
-    for name in spec.output.fields:
+    models: dict[str, Any] = {}
+    objectives: dict[str, str] = {}
+    for name, field in spec.output.fields.items():
         outs = [row_output(spec, r) for r in train_rows]
         labels = [out[name] if isinstance(out, dict) else out for out in outs]
-        pipe = Pipeline(
-            [
-                ("tfidf", TfidfVectorizer(sublinear_tf=True, ngram_range=(1, 2))),
-                ("clf", LogisticRegression(max_iter=1000)),
-            ]
-        )
-        pipe.fit(texts, labels)
-        pipelines[name] = pipe
+        vectorizer = TfidfVectorizer(sublinear_tf=True, ngram_range=(1, 2))
+        features = vectorizer.fit_transform(texts)
+        if ordinal.applies(spec, name):
+            head = ordinal.build(
+                field.values(),
+                features,
+                labels,
+                lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
+            )
+            objectives[name] = "ordinal"
+        else:
+            head = LogisticRegression(max_iter=1000).fit(features, labels)
+            objectives[name] = "multinomial"
+        models[name] = {"vectorizer": vectorizer, "head": head}
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    sio.dump(pipelines, out_dir / MODEL_FILE)
+    sio.dump(models, out_dir / MODEL_FILE)
     return {
         "format": "skops",
         "sklearn_version": sklearn.__version__,
         "skops_version": skops.__version__,
         "fields": list(spec.output.fields),
+        "objective": objectives,
     }
 
 
@@ -106,11 +115,20 @@ def predict_tfidf(
 def predict_tfidf_pipelines(
     pipelines: dict[str, Any], spec: FunctionSpec, items: list[dict]
 ) -> list[Any]:
-    """Predict with already-loaded pipelines for honest batch-one timing."""
+    """Predict with already-loaded models for honest batch-one timing."""
+    from . import ordinal
+
     texts = [prompts.render_input(it, spec.input_schema) for it in items]
     if not texts:
         return []
-    per_field = {name: list(pipe.predict(texts)) for name, pipe in pipelines.items()}
+    per_field = {}
+    for name, model in pipelines.items():
+        features = model["vectorizer"].transform(texts)
+        head = model["head"]
+        if isinstance(head, dict) and head.get("kind") == ordinal.KIND:
+            per_field[name] = ordinal.predict(head, features)
+        else:
+            per_field[name] = list(head.predict(features))
     if spec.output.is_scalar:
         (only,) = per_field.values()
         return [_native(v) for v in only]

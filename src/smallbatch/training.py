@@ -340,9 +340,14 @@ def train(
         target_modules="all-linear",
         task_type="CAUSAL_LM",
     )
+    ordinal = ordinal_objective_applies(spec, config)
     cfg = SFTConfig(
         output_dir=str(out_dir / "trainer"),
         num_train_epochs=config.max_epochs,
+        # the ordinal objective forwards every legal completion per row, so it
+        # holds `classes` times the activations of a token-loss step; trade the
+        # recompute for memory to keep the same batch size on a small GPU
+        gradient_checkpointing=ordinal,
         learning_rate=config.learning_rate,
         per_device_train_batch_size=config.batch_size,
         max_length=config.max_seq_len,
@@ -365,7 +370,6 @@ def train(
         if dev_rows
         else None
     )
-    ordinal = ordinal_objective_applies(spec, config)
     trainer_class = _ordinal_trainer_class(spec, tokenizer) if ordinal else SFTTrainer
     trainer = trainer_class(
         model=model, args=cfg, train_dataset=ds, processing_class=tokenizer,

@@ -11,11 +11,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from . import prompts
+from . import ordinal, prompts
 from .candidates import _check_class_coverage
 from .labeling import Row, row_output
 from .spec import FunctionSpec, SetFitCandidateSpec
 
+ORDINAL_HEAD_FILE = "ordinal_head.skops"
 TARGET_CONTRASTIVE_PAIRS = 1024
 MAX_PAIR_ITERATIONS = 20
 
@@ -136,7 +137,26 @@ def train_setfit(
                 [dev_labels[index] for index in embedding_eval] if embedding_eval else None,
                 args=args,
             )
-        trainer.train_classifier(train_texts, train_labels, args=args)
+        objective = "multinomial"
+        if ordinal.applies(spec, field_name):
+            # SetFit's own head is multinomial over unrelated symbols. Fit the
+            # ordered head on the same tuned embeddings instead, and persist it
+            # as stock sklearn parts so packages need no Smallbatch class.
+            import skops.io as sio
+            from sklearn.linear_model import LogisticRegression
+
+            embeddings = model.encode(train_texts, show_progress_bar=False)
+            head = ordinal.build(
+                list(range(len(values))),
+                embeddings,
+                train_labels,
+                lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
+            )
+            field_dir.mkdir(parents=True, exist_ok=True)
+            sio.dump(head, field_dir / ORDINAL_HEAD_FILE)
+            objective = "ordinal"
+        else:
+            trainer.train_classifier(train_texts, train_labels, args=args)
         shutil.rmtree(checkpoint_dir, ignore_errors=True)
         model.save_pretrained(field_dir / "model")
         (field_dir / "labels.json").write_text(
@@ -147,6 +167,7 @@ def train_setfit(
             "embedding_eval_rows": len(embedding_eval),
             "embedding_status": embedding_status,
             "classifier_train_rows": len(train_rows),
+            "objective": objective,
             "resolved_args": resolved,
         }
     return {
@@ -166,6 +187,7 @@ def predict_setfit(
 
 
 def load_setfit_models(model_dir: Path, spec: FunctionSpec, device: str = "cpu") -> dict:
+    import skops.io as sio
     from setfit import SetFitModel
 
     loaded = {}
@@ -173,7 +195,16 @@ def load_setfit_models(model_dir: Path, spec: FunctionSpec, device: str = "cpu")
         field_dir = model_dir / field_name
         values = json.loads((field_dir / "labels.json").read_text())
         model = SetFitModel.from_pretrained(field_dir / "model", device=device)
-        loaded[field_name] = (model, values)
+        head_path = field_dir / ORDINAL_HEAD_FILE
+        head = None
+        if head_path.exists():
+            untrusted = sio.get_untrusted_types(file=head_path)
+            if untrusted:
+                raise ValueError(
+                    f"refusing to load {head_path}: unexpected types {sorted(untrusted)}"
+                )
+            head = sio.load(head_path, trusted=[])
+        loaded[field_name] = (model, values, head)
     return loaded
 
 
@@ -182,9 +213,13 @@ def predict_setfit_models(models: dict, spec: FunctionSpec, items: list[dict]) -
         return []
     texts = [prompts.render_input(item, spec.input_schema) for item in items]
     per_field: dict[str, list[Any]] = {}
-    for field_name, (model, values) in models.items():
-        raw = model.predict(texts, use_labels=False)
-        indices = raw.tolist() if hasattr(raw, "tolist") else list(raw)
+    for field_name, (model, values, head) in models.items():
+        if head is not None:
+            embeddings = model.encode(texts, show_progress_bar=False)
+            indices = ordinal.predict(head, embeddings)
+        else:
+            raw = model.predict(texts, use_labels=False)
+            indices = raw.tolist() if hasattr(raw, "tolist") else list(raw)
         per_field[field_name] = [values[int(index)] for index in indices]
     if spec.output.is_scalar:
         return per_field[next(iter(spec.output.fields))]

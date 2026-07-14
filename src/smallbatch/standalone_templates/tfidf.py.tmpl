@@ -1,19 +1,27 @@
-from ._common import FUNCTION, ROOT, metadata, render_input, validate_input, validate_output
+from ._common import (
+    FUNCTION,
+    ROOT,
+    metadata,
+    ordinal_predict,
+    render_input,
+    validate_input,
+    validate_output,
+)
 
-_PIPELINES = None
+_MODELS = None
 
 
 def _load():
-    global _PIPELINES
-    if _PIPELINES is None:
+    global _MODELS
+    if _MODELS is None:
         import skops.io as sio
 
         path = ROOT / "model" / "model.skops"
         unknown = sio.get_untrusted_types(file=path)
         if unknown:
             raise ValueError(f"standalone TF-IDF model contains unexpected types: {unknown}")
-        _PIPELINES = sio.load(path, trusted=[])
-    return _PIPELINES
+        _MODELS = sio.load(path, trusted=[])
+    return _MODELS
 
 
 def _native(value):
@@ -25,10 +33,15 @@ def classify_batch(items):
     if not normalized:
         return []
     texts = [render_input(item) for item in normalized]
-    per_field = {
-        name: [_native(value) for value in pipeline.predict(texts)]
-        for name, pipeline in _load().items()
-    }
+    per_field = {}
+    for name, model in _load().items():
+        features = model["vectorizer"].transform(texts)
+        head = model["head"]
+        if isinstance(head, dict) and head.get("kind") == "ordinal-cumulative":
+            values = ordinal_predict(head, features)
+        else:
+            values = head.predict(features)
+        per_field[name] = [_native(value) for value in values]
     if list(FUNCTION["output"]["fields"]) == ["score"]:
         outputs = per_field["score"]
     else:
