@@ -1,5 +1,9 @@
 # smallbatch
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mmarks13/smallbatch/main/assets/smallbatch_banner.png" alt="smallbatch — distill once, own the function" width="100%">
+</p>
+
 **Smallbatch distills prompt-driven LLM decisions into small, tested local
 functions that run on a CPU.**
 
