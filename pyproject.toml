@@ -20,7 +20,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.5",
     "pyyaml>=6.0",
-    # Pascal cards need a <2.7/cu124 build (see README hardware notes);
+    # Pascal cards need a <2.7/cu124 build (see docs/local-gpu.md);
     # Blackwell (RTX 50xx) needs >=2.7/cu128 — so no upper bound here
     "torch>=2.4",
     # SetFit 1.1.3 imports Transformers 4.x APIs removed in 5.x
