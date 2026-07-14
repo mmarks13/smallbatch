@@ -24,6 +24,16 @@
   evaluations, shared by selectable candidates and zero-shot diagnostics.
 - A release case-study protocol with 600 hash-verified public CFPB inputs,
   aggregate-only publication boundaries, and an all-candidate completion gate.
+- Ordinal-aware training for bounded integer scales: cumulative-link ordinal
+  heads for TF-IDF and SetFit, and a LoRA objective of class NLL plus ranked
+  probability score read from a single forward pass over the legal
+  completions.
+- Per-field decoder selection (argmax vs. median cumulative mass) measured on
+  the dev split and recorded in the build manifest.
+- Optional per-candidate LoRA gradient checkpointing for memory-bound
+  training.
+- A completed CFPB case-study run with published aggregate evidence, a
+  narrative write-up, and a dated rights review.
 
 ### Changed
 
@@ -47,6 +57,13 @@
 - Added compatibility for tokenizer.json-only model repositories that use the
   Transformers 5 `TokenizersBackend` name and for models that reject generated
   `token_type_ids`.
+- Integer scale outputs must lie within 0-9; specs outside that range fail
+  closed.
+- Train/dev/eval splits are proportionally stratified per class with
+  largest-remainder allocation, and `meta.json` records per-split label
+  histograms.
+- The OpenAI-compatible teacher now treats null or empty completion content
+  as a retryable error instead of a silently missing decision.
 
 ### Removed
 
