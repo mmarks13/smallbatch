@@ -14,7 +14,7 @@ class FakeTokenizer:
 
 
 def test_allowed_completions_int_and_enum():
-    assert allowed_completions(make_spec(output={"type": "int", "range": [0, 10]}))[:3] == [" 0", " 1", " 2"]
+    assert allowed_completions(make_spec(output={"type": "int", "range": [0, 9]}))[:3] == [" 0", " 1", " 2"]
     spec = make_spec(output={"type": "enum", "labels": ["urgent", "low"]})
     assert allowed_completions(spec) == [" urgent", " low"]
 

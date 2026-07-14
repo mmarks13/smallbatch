@@ -31,7 +31,12 @@ def test_case_spec_is_prompt_first_and_frozen_scale():
     spec = load_spec(CASE / "spec.yaml")
     assert spec.name == "complaint-review-priority"
     assert spec.output.scalar.range == (0, 4)
-    assert "Do not infer legal violations" in spec.prompt
+    # the rubric is an ordinal ladder: cumulative levels, a constrained output,
+    # and decision rules that keep uncertainty out of the scale
+    assert "Do not infer facts, motives, or legal violations" in spec.prompt
+    assert "Return exactly one of: 0, 1, 2, 3, 4." in spec.prompt
+    for level in range(5):
+        assert f"\n{level} - " in spec.prompt
     assert set(spec.candidates) == {
         "tfidf",
         "bge-small",

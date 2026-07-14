@@ -58,6 +58,13 @@ class FieldSpec(BaseModel):
             raise ValueError("an output field needs exactly one of `range` or `labels`")
         if self.range is not None and self.range[0] > self.range[1]:
             raise ValueError(f"range {list(self.range)} is reversed")
+        if self.range is not None and not (0 <= self.range[0] and self.range[1] <= 9):
+            raise ValueError(
+                f"integer range {list(self.range)} must lie within 0-9: a level must be "
+                "one token so the decision is one choice the student can be trained and "
+                "scored on as an ordered scale. Rescale the decision (a 0-10 scale "
+                "becomes 0-9), or use `labels` if the values are unordered"
+            )
         if self.labels is not None:
             if not self.labels:
                 raise ValueError("`labels` must be non-empty")

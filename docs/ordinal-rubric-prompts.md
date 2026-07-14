@@ -6,6 +6,11 @@ more reliably than they follow holistic judgment, and a prompt written this way
 raises teacher self-consistency, which bounds every candidate's achievable
 fidelity.
 
+Integer scales run within `0-9`, so each level is a single token and the
+decision is one ordered choice. Prefer few, well-separated levels: a scale with
+more levels than the input can actually distinguish shows up as teacher
+disagreement at the crowded boundaries, and that noise caps every candidate.
+
 ## Define one construct
 
 State exactly what the model is scoring in one sentence.

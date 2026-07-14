@@ -69,3 +69,69 @@ def test_loss_is_minimized_by_confident_correct_prediction():
     uncertain = torch.tensor([[1.0, 1.0, 1.0, 1.0, 1.0]])
     assert _rps_loss(confident, target) < _rps_loss(uncertain, target)
     assert float(_rps_loss(confident, target)) < 0.05
+
+
+class FakeTokenizer:
+    """Single-token answers (" 0".." 4") plus a two-token answer for " 10"."""
+
+    eos_token = "<eos>"
+
+    def __call__(self, text, add_special_tokens=False):
+        pieces = []
+        for chunk in text.replace("<eos>", " <eos>").split():
+            if chunk == "<eos>":
+                pieces.append(99)
+            elif len(chunk) == 1:
+                pieces.append(100 + int(chunk))
+            else:  # "10" splits into digits, as Qwen-style tokenizers do
+                pieces.extend(100 + int(digit) for digit in chunk)
+        return {"input_ids": pieces}
+
+
+def test_decision_tokens_find_the_one_token_that_decides():
+    """Completions share the leading space; only the digit decides, so the
+    whole distribution is readable from the logits at that one position."""
+    from smallbatch.training import ordinal_decision_tokens
+
+    prefix, ids = ordinal_decision_tokens(int_spec(), FakeTokenizer())
+    assert prefix == 0
+    assert ids == [100, 101, 102, 103, 104]
+
+
+def test_scales_wider_than_one_digit_are_refused_by_the_spec():
+    """A level must be one token to be trained and scored as an ordered choice,
+    so an integer range has to fit in 0-9: a 0-10 scale would split "10" into
+    two digits and no single position would carry the decision."""
+    from smallbatch.spec import FunctionSpec
+
+    with pytest.raises(ValueError, match="must lie within 0-9"):
+        make_spec(output={"type": "int", "range": [0, 10]})
+    with pytest.raises(ValueError, match="must lie within 0-9"):
+        FunctionSpec(
+            name="wide",
+            description="d",
+            input_schema={"text": "string"},
+            output={"type": "int", "range": [-1, 5]},
+            prompt="p",
+            candidates={"c": {"type": "tfidf"}},
+        )
+    make_spec(output={"type": "int", "range": [0, 9]})  # the widest legal scale
+
+
+def test_shared_completion_tokens_cancel_in_the_class_distribution():
+    """Both paths normalize over the legal completions, so anything the
+    completions share — the prompt, the leading space — cancels. Only the
+    deciding tokens may move the distribution, which is why the shared trailing
+    token is excluded from the scored span in both paths."""
+    deciding = torch.tensor([[0.4, 2.1, -1.0, 0.3, 1.7]])
+    shared = -3.7  # identical for every completion
+
+    assert torch.allclose(
+        torch.log_softmax(deciding, dim=-1),
+        torch.log_softmax(deciding + shared, dim=-1),
+        atol=1e-6,
+    )
+    target = torch.tensor([3])
+    assert _rps_loss(deciding, target) == pytest.approx(
+        float(_rps_loss(deciding + shared, target)), abs=1e-6
+    )

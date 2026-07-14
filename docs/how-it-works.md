@@ -27,8 +27,10 @@ Calibration is teacher-behavior inspection, not correctness validation. Its
 rows are training-only because the user saw them before approval.
 
 Real rows split deterministically into 70% train, 10% dev, and 20% evaluation.
-Evaluation membership remains sticky when data is appended. Optional
-augmentation uses training rows only and requires a callable teacher.
+Every decision class takes a proportional share of each split, so a rare class
+is present in training and development rather than being concentrated in
+evaluation. Evaluation membership remains sticky when data is appended.
+Optional augmentation uses training rows only and requires a callable teacher.
 
 ## 3. Build Candidates
 
@@ -46,8 +48,19 @@ augmentation uses training rows only and requires a callable teacher.
   parameter-efficient fine-tuning method: it trains a small adapter while the
   base model remains frozen.
 
-Bounded integers are learned as discrete classes. Structured functions train
-one TF-IDF or SetFit head per field and return one validated object.
+An integer output is an **ordered scale**, not a set of unrelated categories,
+and every candidate is trained that way: predicting 4 when the decision was 0
+costs more than predicting 1. TF-IDF and SetFit fit one model per boundary of
+the scale (`P(level > k)`) and difference the chain into a distribution; a LoRA
+student renormalizes the logits of the legal levels and optimizes class
+likelihood plus the ranked probability score. Enum labels have no order to
+exploit and keep an ordinary multinomial head.
+
+Integer ranges must lie within **0-9**, so each level is a single token and the
+decision is one ordered choice a student can be trained and scored on. A wider
+scale is refused: rescale the decision (a 0-10 scale becomes 0-9), or use
+`labels` when the values are unordered. Structured functions train one TF-IDF
+or SetFit head per field and return one validated object.
 
 Completed stages are durable. An interrupted build resumes in place, including
 LoRA trainer checkpoints and completed zero-shot diagnostics. Re-running a

@@ -40,10 +40,14 @@ TEMPLATES = {
     "scorer": {
         "description": "TODO: what repeated decision this function makes.",
         "input_schema": {"title": "string", "summary": "string"},
-        "output": "output:\n  type: int\n  range: [0, 10]\n",
+        # integer scales run 0-9: one token per level, so the decision is one
+        # ordered choice a student can be trained and scored on
+        "output": "output:\n  type: int\n  range: [0, 9]\n",
         "prompt": (
-            "Assign an integer from 0 to 10.\n"
-            "9-10: TODO\n7-8: TODO\n5-6: TODO\n3-4: TODO\n0-2: TODO\n"
+            "Assign an integer from 0 to 9. Return the highest level whose\n"
+            "complete definition is supported by the input.\n"
+            "0: TODO\n1: TODO\n2: TODO\n3: TODO\n4: TODO\n"
+            "5: TODO\n6: TODO\n7: TODO\n8: TODO\n9: TODO\n"
         ),
     },
     "structured": {
