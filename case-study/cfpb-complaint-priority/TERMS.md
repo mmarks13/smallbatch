@@ -1,6 +1,6 @@
 # Case Study Rights And Publication Review
 
-**Status: pending final maintainer sign-off (date and reviewer below).**
+**Status: reviewed and signed by the maintainer (final line).**
 
 The teacher is the open-weights `openai/gpt-oss-120b` (Apache 2.0),
 self-hosted behind an OpenAI-compatible endpoint on a rented single GPU. No
@@ -42,7 +42,7 @@ Infrastructure:
   infallible and the freeze was additionally pattern-scanned for PII
 - Frozen complaint IDs rechecked for continued public availability: [x]
   2026-07-13 (all 600 fetched from the live official API at freeze time)
-- Review date and reviewer: [ ] **pending maintainer sign-off**
+- Review date and reviewer: [x] Michael Marks, 2026-07-14 (see final line)
 
 ## Teacher Review
 
@@ -71,3 +71,5 @@ aggregate evidence regardless of the permissions above.
 - Narratives are not verified and are not representative of all consumers.
 - Decision agreement is not correctness, fairness, or legal validation.
 - CPU latency, memory, and footprint are not energy measurements.
+
+Reviewed by Michael Marks, 2026-07-14

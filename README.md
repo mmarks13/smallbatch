@@ -136,6 +136,19 @@ or PASS/FAIL. Comparing candidates on one evaluation split introduces selection
 bias; v0.2 reports that limitation and does not claim independent confirmation.
 CPU time, memory, and footprint are operating proxies, not energy measurements.
 
+## Case Study
+
+[case-study/cfpb-complaint-priority](case-study/cfpb-complaint-priority/README.md)
+runs the whole pipeline on one constructed decision: assign a 0-4 review
+priority to public CFPB consumer complaints, with a self-hosted open-weights
+teacher (`gpt-oss-120b`) labeling 600 frozen inputs. The take-home:
+distillation moved the prompt's rubric into the students' weights — every
+trained student agreed with the teacher more than its own base model given
+the full rubric in context, at about a fifth of the latency — and each
+additional step of fidelity cost roughly ten times more CPU latency, from
+TF-IDF at ~1 ms to a 4B LoRA at ~4 s. Agreement is fidelity to the teacher's
+decisions, not correctness, and no candidate was declared a winner.
+
 ## Responsible use
 
 Smallbatch trains candidate functions on teacher outputs, so **your teacher
