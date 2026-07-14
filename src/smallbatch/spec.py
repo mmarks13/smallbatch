@@ -218,6 +218,10 @@ class LoraCandidateSpec(BaseModel):
     # whose cumulative probability reaches one half, which trades exact hits
     # for smaller misses). auto lets the development split decide.
     decode: Literal["auto", "argmax", "median"] = "auto"
+    # recompute activations in the backward pass instead of holding them: buys
+    # a large amount of GPU memory for roughly a third more compute, which is
+    # what lets a bigger student train on a small card
+    gradient_checkpointing: bool = False
     max_epochs: int = 12
     patience: int | None = 2
     min_delta: float = 0.0

@@ -40,9 +40,9 @@ def test_case_spec_is_prompt_first_and_frozen_scale():
     assert set(spec.candidates) == {
         "tfidf",
         "bge-small",
-        "qwen35-08b",
-        "qwen35-2b",
-        "qwen35-4b",
+        "qwen3-06b",
+        "qwen3-17b",
+        "qwen3-4b",
     }
 
 

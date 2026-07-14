@@ -14,7 +14,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 WORK = HERE / "work"
 RESULTS = HERE / "results"
-EXPECTED_CANDIDATES = {"tfidf", "bge-small", "qwen35-08b", "qwen35-2b", "qwen35-4b"}
+EXPECTED_CANDIDATES = {"tfidf", "bge-small", "qwen3-06b", "qwen3-17b", "qwen3-4b"}
 EXPECTED_COUNT = 600
 EXPECTED_SOURCE = "https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1/"
 EXPECTED_API_LICENSE = "CC0"

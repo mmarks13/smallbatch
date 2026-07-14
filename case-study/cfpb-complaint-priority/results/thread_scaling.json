@@ -1,0 +1,152 @@
+{
+  "build": "2026-07-14-538d9418",
+  "rows_timed": 40,
+  "machine_cores": 30,
+  "platform": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+  "threads_skipped_over_core_count": [],
+  "latency": {
+    "tfidf": {
+      "4": {
+        "p50_ms": 1.15,
+        "p95_ms": 1.5271,
+        "cold_load_seconds": 3.4735
+      },
+      "8": {
+        "p50_ms": 1.1699,
+        "p95_ms": 1.4387,
+        "cold_load_seconds": 3.4292
+      },
+      "16": {
+        "p50_ms": 1.1603,
+        "p95_ms": 1.4791,
+        "cold_load_seconds": 3.4207
+      },
+      "30": {
+        "p50_ms": 1.1662,
+        "p95_ms": 1.5082,
+        "cold_load_seconds": 3.446
+      }
+    },
+    "bge-small": {
+      "4": {
+        "p50_ms": 40.5958,
+        "p95_ms": 85.8782,
+        "cold_load_seconds": 4.8134
+      },
+      "8": {
+        "p50_ms": 29.935,
+        "p95_ms": 58.9048,
+        "cold_load_seconds": 4.8189
+      },
+      "16": {
+        "p50_ms": 27.1125,
+        "p95_ms": 41.9493,
+        "cold_load_seconds": 4.8369
+      },
+      "30": {
+        "p50_ms": 26.2025,
+        "p95_ms": 1463.1091,
+        "cold_load_seconds": 4.8905
+      }
+    },
+    "qwen3-06b": {
+      "4": {
+        "p50_ms": 854.9825,
+        "p95_ms": 2897.6136,
+        "cold_load_seconds": 5.3708
+      },
+      "8": {
+        "p50_ms": 486.4243,
+        "p95_ms": 1626.0803,
+        "cold_load_seconds": 5.1484
+      },
+      "16": {
+        "p50_ms": 352.1485,
+        "p95_ms": 1077.4541,
+        "cold_load_seconds": 5.226
+      },
+      "30": {
+        "p50_ms": 481.7054,
+        "p95_ms": 1806.8881,
+        "cold_load_seconds": 5.8389
+      }
+    },
+    "qwen3-17b": {
+      "4": {
+        "p50_ms": 1994.8554,
+        "p95_ms": 5931.1983,
+        "cold_load_seconds": 6.0134
+      },
+      "8": {
+        "p50_ms": 1134.2287,
+        "p95_ms": 3059.7512,
+        "cold_load_seconds": 5.4925
+      },
+      "16": {
+        "p50_ms": 778.0961,
+        "p95_ms": 2256.117,
+        "cold_load_seconds": 5.3711
+      },
+      "30": {
+        "p50_ms": 1063.559,
+        "p95_ms": 2301.4192,
+        "cold_load_seconds": 6.0661
+      }
+    },
+    "qwen3-4b": {
+      "4": {
+        "p50_ms": 4676.938,
+        "p95_ms": 14554.8762,
+        "cold_load_seconds": 7.2894
+      },
+      "8": {
+        "p50_ms": 2558.6412,
+        "p95_ms": 8246.3284,
+        "cold_load_seconds": 6.3092
+      },
+      "16": {
+        "p50_ms": 1588.6445,
+        "p95_ms": 5135.5621,
+        "cold_load_seconds": 6.0823
+      },
+      "30": {
+        "p50_ms": 1837.637,
+        "p95_ms": 5741.2798,
+        "cold_load_seconds": 6.8528
+      }
+    }
+  },
+  "speedup_vs_lowest": {
+    "tfidf": {
+      "4": 1.0,
+      "8": 0.98,
+      "16": 0.99,
+      "30": 0.99
+    },
+    "bge-small": {
+      "4": 1.0,
+      "8": 1.36,
+      "16": 1.5,
+      "30": 1.55
+    },
+    "qwen3-06b": {
+      "4": 1.0,
+      "8": 1.76,
+      "16": 2.43,
+      "30": 1.77
+    },
+    "qwen3-17b": {
+      "4": 1.0,
+      "8": 1.76,
+      "16": 2.56,
+      "30": 1.88
+    },
+    "qwen3-4b": {
+      "4": 1.0,
+      "8": 1.83,
+      "16": 2.94,
+      "30": 2.55
+    }
+  },
+  "note": "One decision is timed at a time; torch parallelizes within a single forward pass (interop threads are pinned to 1). Speedup is therefore intra-decision, and only candidates dominated by large matrix multiplies can use the extra threads."
+}

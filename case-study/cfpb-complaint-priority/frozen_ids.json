@@ -4,7 +4,7 @@
   "extracted_at": "2026-07-13T16:17:57.013426+00:00",
   "selection": "normalize, narrative length 200-4000, content dedupe, product round-robin",
   "count": 600,
-  "spec_sha256": "b2537638d27eb9cc929a7bebdfdbc08289a863365cb1d692b94152e3e2a70018",
+  "spec_sha256": "6ba10709e91e85f3daa9b93320a70c684baf78af3648200cdfe5ddc7baef3db5",
   "items_sha256": "c630d0939cea6f7f676425f375e8e295fa0a3ac3f28442be4c2a13da6a4b632e",
   "complaints": [
     {

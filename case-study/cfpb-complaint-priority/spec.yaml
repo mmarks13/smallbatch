@@ -8,29 +8,82 @@ output:
   type: int
   range: [0, 4]
 prompt: |
-  Assign review_priority using only facts explicitly stated in the complaint.
-  Do not infer legal violations, protected status, intent, or facts not given.
-  Choose the highest level directly supported by the text.
+  TASK
 
-  0: No actionable consumer harm is described, or the text is an informational
-  or status request without an unresolved problem.
+  Score the complaint for review_priority: how urgently a human reviewer must
+  act on the unresolved consumer harm the complaint states. Return the highest
+  level whose complete definition is supported.
 
-  1: Limited or already resolved harm, inconvenience, or delay with no stated
-  continuing material impact.
+  SCALE
 
-  2: Material unresolved harm requiring normal review, such as a disputed
-  charge or fee, withheld funds, access problem, or repeated unsuccessful
-  resolution, without a stated severe or imminent consequence.
+  0 - Nothing asserted wrong: the complaint asks the company or bureau to do
+  something routine, such as provide information or documents, decide
+  eligibility, close an account, or stop contact, and does not assert that
+  anything is wrong or unresolved. An offer, attempt, or error that the person
+  declined or stopped, with nothing owed, taken, or blocked, also belongs here.
 
-  3: Severe or ongoing harm requiring expedited review, such as substantial
-  loss, prolonged loss of essential account or credit access, active
-  collections or damaging credit reporting, repeated fraud, or threatened
-  loss of housing, a vehicle, or another essential service.
+  1 - Something asserted wrong: meets level 0 except that the complaint asserts
+  something is wrong or unresolved, and additionally no money and no account
+  access is affected. Saying that reported information is inaccurate, or asking a
+  company or bureau to investigate, verify, correct, or delete information, is an
+  assertion that something is wrong. Poor treatment, delays, unanswered requests,
+  and being refused a new account also belong here.
 
-  4: Immediate and time-sensitive risk of irreversible harm, such as imminent
-  foreclosure, eviction, repossession, active identity theft causing continuing
-  loss, a near irreversible deadline, or frozen essential funds creating an
-  immediate basic-needs risk.
+  2 - Money or access affected: meets level 1 and additionally the complaint
+  states that money is lost, taken, withheld, frozen, wrongly charged, or
+  disputed; or that the person cannot use an account, card, wallet, or deposit.
+  A closed, frozen, locked, or suspended account, a card that cannot be
+  activated, and a deposit that has not cleared are all loss of access, even when
+  no dollar amount is stated.
+
+  3 - Large or continuing loss: meets level 2 and additionally the affected
+  amount is stated as $1,000 or more; or the person has already lost the use of
+  their home, vehicle, essential funds, or only bank account, and that loss
+  continues.
+
+  4 - Imminent irreversible harm: meets level 3 and additionally the complaint
+  states one of the following: a date or deadline by which the loss becomes
+  permanent, such as a scheduled foreclosure, eviction, repossession, or sale
+  date, or a stated number of days remaining; or that the person is homeless now
+  or cannot now pay for food, housing, utilities, or medical care.
+
+  DECISION RULES
+
+  1. Use only facts stated in the complaint.
+  2. Do not infer facts, motives, or legal violations that are not stated.
+  3. Legal citations, statute references, and formal demand language do not
+     change the level.
+  4. A debt, charge, or balance the person says is not theirs, or disputes, is
+     money affected. Use its stated amount at every level.
+  5. Evaluate the levels in order from 0 upward.
+  6. Return the highest level whose full requirements are satisfied.
+  7. If a higher level is only partially satisfied, return the lower level.
+  8. Level 4 requires a stated date, deadline, or present inability to pay for
+     basic needs. Words such as risk, may, could, or will be, and a loss that is
+     feared but not dated, are not enough: score 3.
+  9. Do not use the score to express confidence or uncertainty.
+
+  EXAMPLES
+
+  Asks the bureau for the documents used to verify an account and does not say
+  the account is wrong. -> 0
+
+  Says a reported account is inaccurate and demands deletion; no money or access
+  affected. -> 1
+
+  Says a prepaid card cannot be activated and no dollar amount is given. -> 2
+
+  Says several collection accounts totaling $2,700 are not theirs. -> 3
+
+  Says the servicer approved a foreclosure and the home may be lost, with no
+  date given. -> 3
+
+  Says the foreclosure sale is set for the 14th while a modification is pending.
+  -> 4
+
+  Says the bank froze the account and they cannot buy food or pay rent now. -> 4
+
+  Return exactly one of: 0, 1, 2, 3, 4.
 teacher:
   backend: openai-compatible
   model: openai/gpt-oss-120b
@@ -41,23 +94,25 @@ candidates:
   bge-small:
     type: setfit
     model: BAAI/bge-small-en-v1.5
-  qwen35-08b:
+  qwen3-06b:
     type: lora
-    model: Qwen/Qwen3.5-0.8B
+    model: Qwen/Qwen3-0.6B
     precision: auto
     batch_size: 2
     eval_batch_size: 4
     max_seq_len: 2048
-  qwen35-2b:
+  qwen3-17b:
     type: lora
-    model: Qwen/Qwen3.5-2B
+    gradient_checkpointing: true
+    model: Qwen/Qwen3-1.7B
     precision: qlora
     batch_size: 2
     eval_batch_size: 4
     max_seq_len: 2048
-  qwen35-4b:
+  qwen3-4b:
     type: lora
-    model: Qwen/Qwen3.5-4B
+    gradient_checkpointing: true
+    model: Qwen/Qwen3-4B
     precision: qlora
     batch_size: 2
     eval_batch_size: 4

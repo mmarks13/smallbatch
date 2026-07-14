@@ -343,6 +343,7 @@ def train(
     cfg = SFTConfig(
         output_dir=str(out_dir / "trainer"),
         num_train_epochs=config.max_epochs,
+        gradient_checkpointing=config.gradient_checkpointing,
         learning_rate=config.learning_rate,
         per_device_train_batch_size=config.batch_size,
         max_length=config.max_seq_len,
