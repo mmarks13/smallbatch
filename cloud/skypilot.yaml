@@ -7,8 +7,6 @@
 #
 # Labeling happens locally (it needs your teacher credentials); only the
 # GPU-bound compile step ships to the cloud, so `data/` must exist first.
-# Note: any `spec_files` your spec references must live inside the workdir
-# (or be mirrored with file_mounts) so they exist on the remote host.
 
 resources:
   accelerators: { L4: 1 }   # any modern GPU works; L4 spot is usually cheapest

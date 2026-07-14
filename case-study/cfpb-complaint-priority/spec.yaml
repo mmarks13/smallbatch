@@ -32,8 +32,9 @@ prompt: |
   loss, a near irreversible deadline, or frozen essential funds creating an
   immediate basic-needs risk.
 teacher:
-  backend: codex-cli
-  model: gpt-5.6-terra
+  backend: openai-compatible
+  model: openai/gpt-oss-120b
+  base_url: http://127.0.0.1:8000/v1
 candidates:
   tfidf:
     type: tfidf

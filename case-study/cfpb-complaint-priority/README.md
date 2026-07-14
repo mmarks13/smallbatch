@@ -24,8 +24,9 @@ Sources:
 2. `spec.yaml` and its prompt hash are frozen before any teacher access. The
    prompt is not revised after calibration; an unacceptable first draft stops
    the case study.
-3. `codex-cli` with `gpt-5.6-terra` labels the inputs after interactive
-   calibration. Smallbatch creates the fixed 420/60/120 split.
+3. The open-weights `openai/gpt-oss-120b` (Apache 2.0), self-hosted behind an
+   OpenAI-compatible endpoint on a rented single H100, labels the inputs after
+   interactive calibration. Smallbatch creates the fixed 420/60/120 split.
 4. TF-IDF, SetFit, and LoRA candidates run through full CPU evaluation. The
    report contains decision-fidelity and operating evidence only. All three
    configured candidates must complete, but there is no minimum fidelity

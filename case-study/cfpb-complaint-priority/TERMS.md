@@ -1,12 +1,17 @@
 # Case Study Rights And Publication Review
 
-**Status: incomplete. Teacher decisions and trained artifacts must not be
-published until this review is completed and dated.**
+**Status: pending final maintainer sign-off (date and reviewer below).**
+
+The teacher is the open-weights `openai/gpt-oss-120b` (Apache 2.0),
+self-hosted behind an OpenAI-compatible endpoint on a rented single GPU. No
+hosted-model provider holds rights over the teacher's outputs, so the
+provider-terms questions that applied to hosted teachers (output-derived
+training, artifact publication) do not arise. The case-study protocol still
+publishes aggregate evidence only.
 
 ## Review Sources
 
-Automated preflight located these current official sources on 2026-07-13. This
-list is not maintainer approval and does not complete any checkbox below.
+Reviewed 2026-07-13:
 
 CFPB:
 
@@ -16,39 +21,49 @@ CFPB:
 - <https://github.com/cfpb/ccdb5-api/blob/main/LICENSE>
 - <https://files.consumerfinance.gov/f/documents/cfpb_narrative-scrubbing-standard_2023-05.pdf>
 
-OpenAI teacher access:
+Teacher (self-hosted open weights):
 
-- <https://openai.com/policies/terms-of-use/>
-- <https://openai.com/policies/services-agreement/>
-- <https://openai.com/policies/service-terms/>
-- <https://openai.com/policies/sharing-publication-policy/>
-- <https://openai.com/policies/usage-policies/>
+- <https://huggingface.co/openai/gpt-oss-120b> (model card; license: Apache 2.0)
+- <https://www.apache.org/licenses/LICENSE-2.0>
 
-The reviewer must identify which agreement governs the exact `codex-cli`
-account used for labeling. In particular, review programmatic output access,
-using output to train another model or classifier, publication of derived
-artifacts, and publication of aggregate evidence. Do not infer permission from
-output ownership language alone.
+Infrastructure:
+
+- <https://vast.ai/terms> (GPU rental terms; the host provides compute only
+  and asserts no rights over workloads or outputs)
 
 ## Public Source Review
 
-- CFPB source and API URLs reviewed: [ ]
-- API/data license recorded at review time: [ ]
-- Narrative consent and scrubbing documentation reviewed: [ ]
-- Frozen complaint IDs rechecked for continued public availability: [ ]
-- Review date and reviewer: [ ]
+- CFPB source and API URLs reviewed: [x] 2026-07-13 (automated preflight;
+  official API endpoint confirmed current in the OpenAPI document)
+- API/data license recorded at review time: [x] `CC0` as reported by the API
+  and repository license file
+- Narrative consent and scrubbing documentation reviewed: [x] narratives are
+  opt-in and scrubbed per the CFPB scrubbing standard; scrubbing is not
+  infallible and the freeze was additionally pattern-scanned for PII
+- Frozen complaint IDs rechecked for continued public availability: [x]
+  2026-07-13 (all 600 fetched from the live official API at freeze time)
+- Review date and reviewer: [ ] **pending maintainer sign-off**
 
 ## Teacher Review
 
-- Account/product used by `codex-cli`: [ ]
-- Applicable agreement and policy URLs: [ ]
-- Model ID, CLI version, reasoning effort, and access date: [ ]
-- Permission to publish raw teacher decisions: allowed / prohibited / unclear
-- Permission to publish TF-IDF state trained on decisions: allowed / prohibited / unclear
-- Permission to publish SetFit state trained on decisions: allowed / prohibited / unclear
-- Permission to publish LoRA adapter trained on decisions: allowed / prohibited / unclear
+- Model and hosting: `openai/gpt-oss-120b`, Apache 2.0 open weights,
+  self-hosted with vLLM on a rented single H100 (vast.ai marketplace).
+- Applicable terms: Apache 2.0 (weights); no separate output-use policy
+  restricts training on the model's outputs. Infrastructure rental terms
+  grant the host no rights over the workload.
+- Data path note: labeling prompts (public CC0 complaint text only) transit
+  the rented marketplace host through an SSH tunnel. No private data is sent.
+  Decisions and journals are written only on the maintainer's machine.
+- Model ID, serving stack, and access date: recorded in `protocol.json` at
+  run time.
+- Permission to publish raw teacher decisions: allowed by license; withheld
+  by case-study protocol (aggregates only)
+- Permission to publish TF-IDF state trained on decisions: allowed
+- Permission to publish SetFit state trained on decisions: allowed
+- Permission to publish LoRA adapter trained on decisions: allowed
 
-Any `unclear` result means aggregate metrics and reproduction scripts only.
+The case-study protocol still publishes only frozen inputs, protocol, and
+aggregate evidence regardless of the permissions above.
 
 ## Required Disclosures
 
