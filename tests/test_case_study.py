@@ -32,7 +32,13 @@ def test_case_spec_is_prompt_first_and_frozen_scale():
     assert spec.name == "complaint-review-priority"
     assert spec.output.scalar.range == (0, 4)
     assert "Do not infer legal violations" in spec.prompt
-    assert set(spec.candidates) == {"tfidf", "bge-small", "granite-350m"}
+    assert set(spec.candidates) == {
+        "tfidf",
+        "bge-small",
+        "qwen35-08b",
+        "qwen35-2b",
+        "qwen35-4b",
+    }
 
 
 def test_prepare_normalizes_deduplicates_and_balances():

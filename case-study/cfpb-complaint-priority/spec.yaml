@@ -41,7 +41,24 @@ candidates:
   bge-small:
     type: setfit
     model: BAAI/bge-small-en-v1.5
-  granite-350m:
+  qwen35-08b:
     type: lora
-    model: ibm-granite/granite-4.0-350m
+    model: Qwen/Qwen3.5-0.8B
     precision: auto
+    batch_size: 2
+    eval_batch_size: 4
+    max_seq_len: 2048
+  qwen35-2b:
+    type: lora
+    model: Qwen/Qwen3.5-2B
+    precision: qlora
+    batch_size: 2
+    eval_batch_size: 4
+    max_seq_len: 2048
+  qwen35-4b:
+    type: lora
+    model: Qwen/Qwen3.5-4B
+    precision: qlora
+    batch_size: 2
+    eval_batch_size: 4
+    max_seq_len: 2048

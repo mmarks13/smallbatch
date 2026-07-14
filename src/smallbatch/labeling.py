@@ -148,21 +148,38 @@ def label_items(
     return [rows[index] for index in range(len(items))]
 
 
-def _interleaved_strata(spec: FunctionSpec, rows: list[Row], seed: int) -> list[Row]:
+def _strata(spec: FunctionSpec, rows: list[Row], seed: int) -> dict[str, list[Row]]:
     rng = random.Random(seed)
     groups: dict[str, list[Row]] = defaultdict(list)
     for row in rows:
         groups[json.dumps(primary_value(spec, row), sort_keys=True)].append(row)
     for group in groups.values():
         rng.shuffle(group)
-    ordered: list[Row] = []
-    names = sorted(groups)
-    while any(groups.values()):
-        rng.shuffle(names)
-        for name in names:
-            if groups[name]:
-                ordered.append(groups[name].pop())
-    return ordered
+    return dict(sorted(groups.items()))
+
+
+def _proportional_allocation(
+    groups: dict[str, list[Row]], quota: int, taken: dict[str, int]
+) -> dict[str, int]:
+    """Largest-remainder share of `quota` per class, after `taken` rows."""
+    remaining = {name: len(rows) - taken[name] for name, rows in groups.items()}
+    total = sum(remaining.values())
+    if not total or quota <= 0:
+        return {name: 0 for name in groups}
+    exact = {name: quota * count / total for name, count in remaining.items()}
+    allocation = {name: min(int(value), remaining[name]) for name, value in exact.items()}
+    leftover = quota - sum(allocation.values())
+    by_remainder = sorted(
+        groups,
+        key=lambda name: (allocation[name] - exact[name], name),
+    )
+    for name in by_remainder:
+        if leftover <= 0:
+            break
+        if allocation[name] < remaining[name]:
+            allocation[name] += 1
+            leftover -= 1
+    return allocation
 
 
 def assign_splits(
@@ -172,7 +189,14 @@ def assign_splits(
     existing: dict[str, str] | None = None,
     force_train_ids: set[str] | None = None,
 ) -> None:
-    """Deterministic 70/10/20 split with sticky existing assignments."""
+    """Deterministic proportional 70/10/20 split with sticky assignments.
+
+    Every split receives a proportional share of each decision class: the
+    class-interleaved order is walked once and each row goes to the split
+    with the largest remaining quota deficit. Slicing the interleaved head
+    into eval would instead concentrate rare classes there, starving dev
+    (breaking early stopping) and train (hiding classes from candidates).
+    """
     existing = existing or {}
     force_train_ids = force_train_ids or set()
     for row in rows:
@@ -185,15 +209,20 @@ def assign_splits(
     target_dev = round(len(rows) * 0.1)
     current = Counter(row.get("split") for row in rows)
     unassigned = [row for row in rows if not row.get("split")]
-    ordered = _interleaved_strata(spec, unassigned, SPLIT_SEED)
-    eval_needed = max(0, target_eval - current["eval"])
-    dev_needed = max(0, target_dev - current["dev"])
-    for row in ordered[:eval_needed]:
-        row["split"] = "eval"
-    for row in ordered[eval_needed : eval_needed + dev_needed]:
-        row["split"] = "dev"
-    for row in ordered[eval_needed + dev_needed :]:
-        row["split"] = "train"
+    groups = _strata(spec, unassigned, SPLIT_SEED)
+    taken = {name: 0 for name in groups}
+    for split, quota in (
+        ("eval", max(0, target_eval - current["eval"])),
+        ("dev", max(0, target_dev - current["dev"])),
+    ):
+        allocation = _proportional_allocation(groups, quota, taken)
+        for name, count in allocation.items():
+            for row in groups[name][taken[name] : taken[name] + count]:
+                row["split"] = split
+            taken[name] += count
+    for name, group in groups.items():
+        for row in group[taken[name] :]:
+            row["split"] = "train"
 
 
 def _imported_rows(spec: FunctionSpec, inputs: list[dict], outputs: list[Any]) -> list[Row]:
@@ -418,6 +447,18 @@ def build_dataset(
             "real": len(real_rows),
             "variants": sum(row.get("origin") != "real" for row in rows),
             "label_histogram": dict(sorted(histogram.items())),
+            "split_label_histograms": {
+                split: dict(
+                    sorted(
+                        Counter(
+                            str(primary_value(spec, row))
+                            for row in real_rows
+                            if row["split"] == split
+                        ).items()
+                    )
+                )
+                for split in ("train", "dev", "eval")
+            },
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
         _atomic_json(out_dir / "meta.json", meta)

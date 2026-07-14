@@ -78,6 +78,123 @@ def load_base_model(base: str, precision: str):
     return tokenizer, model
 
 
+def ordinal_objective_applies(spec: FunctionSpec, config: LoraCandidateSpec) -> bool:
+    """Ordinal training needs one scalar int decision and no free-text rationale."""
+    if config.objective == "token":
+        return False
+    scalar = spec.output.is_scalar and spec.output.scalar.type == "int"
+    if config.objective == "ordinal":
+        if not scalar:
+            raise ValueError(
+                "objective: ordinal requires a scalar integer output; use objective: token"
+            )
+        if config.rationale_distillation:
+            raise ValueError(
+                "objective: ordinal cannot score free-text rationales; "
+                "disable rationale_distillation or use objective: token"
+            )
+        return True
+    return scalar and not config.rationale_distillation
+
+
+def _ordinal_trainer_class(spec: FunctionSpec, tokenizer):
+    """SFTTrainer that scores the legal completions instead of loose tokens.
+
+    Token cross-entropy treats "3" and "4" as unrelated symbols, so a student
+    is punished the same for a near miss and a far one. Here each legal
+    decision is scored as a whole completion, the scores are normalized into a
+    distribution over the ordered scale, and the loss combines class NLL with
+    the ranked probability score (RPS), which accumulates error across the
+    ordered levels and therefore penalizes distant predictions more than
+    adjacent ones.
+    """
+    import torch
+    import torch.nn.functional as F
+    from trl import SFTTrainer
+
+    values = spec.output.scalar.values()
+    completions = [
+        tokenizer(
+            prompts.student_completion(spec, value) + tokenizer.eos_token,
+            add_special_tokens=False,
+        )["input_ids"]
+        for value in values
+    ]
+
+    class OrdinalSFTTrainer(SFTTrainer):
+        def compute_loss(
+            self, model, inputs, return_outputs=False, num_items_in_batch=None
+        ):
+            input_ids = inputs["input_ids"]
+            labels = inputs["labels"]
+            attention = inputs.get("attention_mask")
+            device = input_ids.device
+            classes = len(completions)
+
+            sequences, completion_spans, targets = [], [], []
+            for row in range(input_ids.size(0)):
+                supervised = labels[row] != -100
+                if not bool(supervised.any()):
+                    continue
+                first = int(supervised.nonzero()[0])
+                prompt_ids = input_ids[row, :first]
+                if attention is not None:
+                    prompt_ids = prompt_ids[attention[row, :first].bool()]
+                target_ids = input_ids[row][supervised].tolist()
+                match = [
+                    index
+                    for index, completion in enumerate(completions)
+                    if completion == target_ids
+                ]
+                if not match:
+                    raise ValueError(
+                        "ordinal training expects every completion to be one of the "
+                        f"{classes} legal decisions; got token ids {target_ids}"
+                    )
+                targets.append(match[0])
+                for completion in completions:
+                    tokens = torch.tensor(completion, device=device, dtype=input_ids.dtype)
+                    sequences.append(torch.cat([prompt_ids, tokens]))
+                    completion_spans.append(len(completion))
+
+            if not sequences:
+                return input_ids.sum() * 0.0
+
+            width = max(len(sequence) for sequence in sequences)
+            pad_id = self.processing_class.pad_token_id or 0
+            padded = torch.full(
+                (len(sequences), width), pad_id, device=device, dtype=input_ids.dtype
+            )
+            mask = torch.zeros((len(sequences), width), device=device, dtype=torch.long)
+            for index, sequence in enumerate(sequences):
+                padded[index, : len(sequence)] = sequence
+                mask[index, : len(sequence)] = 1
+
+            logits = model(input_ids=padded, attention_mask=mask).logits.float()
+            log_probs = F.log_softmax(logits[:, :-1], dim=-1)
+            gathered = log_probs.gather(2, padded[:, 1:].unsqueeze(-1)).squeeze(-1)
+
+            scores = []
+            for index, sequence in enumerate(sequences):
+                span = completion_spans[index]
+                end = len(sequence) - 1
+                scores.append(gathered[index, end - span : end].sum())
+            # normalized likelihood over the legal completions only
+            class_logits = torch.stack(scores).view(-1, classes)
+            target = torch.tensor(targets, device=device, dtype=torch.long)
+
+            nll = F.cross_entropy(class_logits, target)
+            probabilities = F.softmax(class_logits, dim=-1)
+            cumulative = probabilities.cumsum(dim=-1)
+            steps = (
+                torch.arange(classes, device=device).unsqueeze(0) >= target.unsqueeze(1)
+            ).to(cumulative.dtype)
+            rps = ((cumulative - steps) ** 2).sum(dim=-1).mean() / max(classes - 1, 1)
+            return nll + rps
+
+    return OrdinalSFTTrainer
+
+
 def _last_logged_loss(log_history: list[dict]) -> float | None:
     for entry in reversed(log_history):
         if "loss" in entry:
@@ -248,7 +365,9 @@ def train(
         if dev_rows
         else None
     )
-    trainer = SFTTrainer(
+    ordinal = ordinal_objective_applies(spec, config)
+    trainer_class = _ordinal_trainer_class(spec, tokenizer) if ordinal else SFTTrainer
+    trainer = trainer_class(
         model=model, args=cfg, train_dataset=ds, processing_class=tokenizer,
         peft_config=lora, callbacks=[dev_cb] if dev_cb else None,
     )
@@ -262,6 +381,7 @@ def train(
     epochs_run = int(round(trainer.state.epoch or config.max_epochs))
     return {
         "precision": precision,
+        "objective": "ordinal" if ordinal else "token",
         "train_rows": len(train_rows),
         "train_loss": round(result.training_loss, 4),
         "adapter_dir": str(adapter_dir),

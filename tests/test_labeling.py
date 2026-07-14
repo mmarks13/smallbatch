@@ -137,3 +137,34 @@ def test_completed_augmentation_generation_replays_after_labeling_crash(tmp_path
     )
     assert resumed.generation_calls == 0
     assert meta["variants"] == 2
+
+
+def test_split_gives_every_split_a_proportional_share_of_rare_classes(tmp_path):
+    """A skewed distribution must not concentrate rare decisions in eval:
+    slicing the class-interleaved head starved dev (breaking early stopping)
+    and train (hiding classes from candidates) in the CFPB case study."""
+    spec = make_spec(output={"type": "int", "range": [0, 4]})
+    records = []
+    for index in range(300):
+        # skewed like real data: two dominant classes, three rare ones
+        output = [0, 4, 1, 2, 3][index % 5] if index < 45 else (2 if index % 2 else 3)
+        records.append(
+            {
+                "input": {"title": f"case {index}", "body": f"details {index}"},
+                "output": output,
+            }
+        )
+    meta = build_dataset(spec, records, tmp_path)
+    assert meta["counts"] == {"train": 210, "dev": 30, "eval": 60}
+    histograms = meta["split_label_histograms"]
+    totals = {}
+    for histogram in histograms.values():
+        for label, count in histogram.items():
+            totals[label] = totals.get(label, 0) + count
+    for label, total in totals.items():
+        eval_share = histograms["eval"].get(label, 0) / total
+        train_share = histograms["train"].get(label, 0) / total
+        assert 0.1 <= eval_share <= 0.4, f"label {label} eval share {eval_share}"
+        assert train_share >= 0.5, f"label {label} train share {train_share}"
+        if total >= 9:
+            assert histograms["dev"].get(label, 0) >= 1, f"label {label} absent from dev"

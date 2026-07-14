@@ -202,6 +202,10 @@ class LoraCandidateSpec(BaseModel):
     lora_dropout: float = 0.05
     use_dora: bool = False
     rationale_distillation: bool = False
+    # ordinal: score the legal completions and optimize class NLL + RPS so an
+    # integer scale trains as ordered levels rather than unrelated symbols.
+    # auto uses it for scalar integer decisions without rationale distillation.
+    objective: Literal["auto", "token", "ordinal"] = "auto"
     max_epochs: int = 12
     patience: int | None = 2
     min_delta: float = 0.0
