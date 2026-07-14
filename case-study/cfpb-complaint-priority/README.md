@@ -25,6 +25,23 @@ complaint, where each level is a cumulative ladder (level N requires
 everything level N-1 requires, plus one new stated fact). The prompt contains
 the full rubric, decision rules, and worked examples.
 
+The ladder, with each rung's newly required fact illustrated by a real
+complaint from the frozen inputs:
+
+| level | adds the stated fact | a complaint that states it |
+|---|---|---|
+| 0 | a routine ask; nothing asserted wrong or unresolved | "Please provide a complete itemized accounting of all fees, costs, and expenses charged …" (checking, `22612794`) |
+| 1 | something is asserted wrong; no money or access affected | "… all inaccurate, incomplete, or unverifiable information be deleted from my credit report." (debt collection, `22613257`) |
+| 2 | money or account access is affected | "They are holding my funds and have frozen my accounts for no reason." (checking, `22627671`) |
+| 3 | the affected amount is $1,000+, or the loss of a home, vehicle, or essential funds continues | "I deposited a Truist-issued check for {$11000.00} from a law firm 's …" (checking, `22610663`) |
+| 4 | a date or deadline makes the loss permanent, or the person cannot now pay for basics | "… past due bill around XXXX dollars and a auction date of XX/XX/XXXX." (mortgage, `22652424`) |
+
+Excerpts are verbatim from the published `items.jsonl` (CFPB scrubbing
+replaces dates and identifiers with `XX..` and rounds amounts in braces).
+Each excerpt was chosen because it states the fact its rung newly requires;
+the placements illustrate the ladder and are not teacher decisions, which
+remain unpublished per the protocol.
+
 The trained students never see that rubric. At inference they receive only
 `product`, `issue`, and `narrative` — a short prompt with no instructions in
 it. The rubric exists only in training: it is what the teacher applies and
