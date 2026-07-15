@@ -142,16 +142,29 @@ CPU time, memory, and footprint are operating proxies, not energy measurements.
 
 ## Case Study
 
-[case-study/cfpb-complaint-priority](case-study/cfpb-complaint-priority/README.md)
-runs the whole pipeline on one constructed decision: assign a 0-4 review
-priority to public CFPB consumer complaints, with a self-hosted open-weights
-teacher (`gpt-oss-120b`) labeling 600 frozen inputs. The take-home:
-distillation moved the prompt's rubric into the students' weights — every
-trained student agreed with the teacher more than its own base model given
-the full rubric in context, at about a fifth of the latency — and each
-additional step of fidelity cost roughly ten times more CPU latency, from
-TF-IDF at ~1 ms to a 4B LoRA at ~4 s. Agreement is fidelity to the teacher's
-decisions, not correctness, and no candidate was declared a winner.
+Assign a 0-4 review priority to public CFPB consumer complaints. A
+self-hosted open-weights teacher (`gpt-oss-120b`) labeled 600 frozen inputs;
+Smallbatch trained five local functions on 420 of its decisions and evaluated
+all of them, on the same machine, against the same 120 held-out decisions.
+
+| local function | agrees with teacher | p50 CPU latency | peak memory |
+|---|---:|---:|---:|
+| TF-IDF | 54% | 1.2 ms | 0.8 GB |
+| SetFit (bge-small, 33M) | 57% | 42 ms | 1.8 GB |
+| LoRA (Qwen3-0.6B) | 63% | 0.8 s | 5.3 GB |
+| LoRA (Qwen3-1.7B) | 64% | 1.9 s | 11 GB |
+| LoRA (Qwen3-4B) | 69% | 4.3 s | 21 GB |
+| *Qwen3-0.6B, no training, full rubric in the prompt* | *18%* | *3.9 s* | *9.0 GB* |
+| *Qwen3-4B, no training, full rubric in the prompt* | *48%* | *16.5 s* | *21 GB* |
+
+The trained functions never see the rubric — 420 teacher decisions moved it
+into their weights, which is why the 0.6B student beats the same model
+reading the full rubric (63% vs 18%) at a fifth of the latency. Going down
+the table, each step of fidelity costs roughly ten times more latency; which
+row is worth it depends on the workload, so no winner is declared and
+agreement measures fidelity to the teacher's decisions, not correctness.
+Protocol, evidence, and the honest caveats:
+[case-study/cfpb-complaint-priority](case-study/cfpb-complaint-priority/README.md).
 
 ## Responsible use
 
