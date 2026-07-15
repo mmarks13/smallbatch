@@ -172,17 +172,11 @@ The trained functions never see the prompt's rubric — the teacher's
 decisions moved it into their weights. Prompting the same base models with
 the full rubric instead, on the same evaluation rows:
 
-<table>
-<thead>
-<tr><th>base model</th><th colspan="2">rubric in the prompt, no training</th><th colspan="2">trained on 420 decisions, no rubric</th></tr>
-<tr><th></th><th>exact</th><th>p50</th><th>exact</th><th>p50</th></tr>
-</thead>
-<tbody>
-<tr><td>Qwen3-0.6B</td><td>18%</td><td>3.9 s</td><td><strong>63%</strong></td><td><strong>0.8 s</strong></td></tr>
-<tr><td>Qwen3-1.7B</td><td>3%</td><td>7.2 s</td><td><strong>64%</strong></td><td><strong>1.9 s</strong></td></tr>
-<tr><td>Qwen3-4B</td><td>48%</td><td>16.5 s</td><td><strong>69%</strong></td><td><strong>4.3 s</strong></td></tr>
-</tbody>
-</table>
+| base model | prompt, no training: exact | prompt, no training: p50 | trained, no rubric: exact | trained, no rubric: p50 |
+|---|---:|---:|---:|---:|
+| Qwen3-0.6B | 18% | 3.9 s | **63%** | **0.8 s** |
+| Qwen3-1.7B | 3% | 7.2 s | **64%** | **1.9 s** |
+| Qwen3-4B | 48% | 16.5 s | **69%** | **4.3 s** |
 
 No winner is declared — which row is worth its latency depends on the
 workload, and agreement measures fidelity to the teacher's decisions, not
