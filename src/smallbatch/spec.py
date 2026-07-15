@@ -404,7 +404,7 @@ def _validate_field(field: FieldSpec, value: Any, name: str) -> Any:
 _MIGRATION_HELP = """\
 v0.2 uses a prompt-first spec. Rename `rubric` to `prompt`, move each model
 under `candidates: <id>:`, and remove `gate`, top-level `train`, and `spec_files`.
-See `smallbatch init` or examples/ticket-priority/spec.yaml for the new format.
+Run `smallbatch init` to scaffold a spec in the new format.
 """
 
 

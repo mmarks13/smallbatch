@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import prompts
+from .atomic import atomic_json, atomic_jsonl
 from .journal import LabelJournal, NullJournal
 from .spec import FunctionSpec, validate_input, validate_output
 from .teacher import Teacher
@@ -79,8 +80,13 @@ def label_items(
     origin: str,
     journal=None,
     field_order: list[str] | None = None,
+    allow_partial: bool = False,
 ) -> list[Row]:
-    """Teacher-label validated input objects with one retry and journal replay."""
+    """Teacher-label validated input objects with one retry and journal replay.
+
+    Real decisions are all-or-nothing; `allow_partial` lets synthetic
+    augmentation variants degrade to fewer rows instead of aborting the run.
+    """
     journal = journal or NullJournal()
     rows: dict[int, Row] = {}
     for index, item in enumerate(items):
@@ -140,12 +146,18 @@ def label_items(
             )
         pending = next_pending
     if pending:
-        raise ValueError(
-            f"teacher failed to return valid decisions for {len(pending)} of {len(items)} items"
+        if not allow_partial:
+            raise ValueError(
+                f"teacher failed to return valid decisions for {len(pending)} of "
+                f"{len(items)} items"
+            )
+        _progress(
+            f"teacher {origin} dropped {len(pending)} of {len(items)} rows "
+            "after 2 attempts"
         )
-    if items:
+    elif items:
         _progress(f"teacher {origin} complete rows={len(items)}")
-    return [rows[index] for index in range(len(items))]
+    return [rows[index] for index in range(len(items)) if index in rows]
 
 
 def _strata(spec: FunctionSpec, rows: list[Row], seed: int) -> dict[str, list[Row]]:
@@ -373,7 +385,10 @@ def _augment(
         chosen = [entry for entry in unique.values() if entry[1] == origin]
         if not chosen:
             continue
-        labeled = label_items(teacher, spec, [entry[0] for entry in chosen], origin, journal)
+        labeled = label_items(
+            teacher, spec, [entry[0] for entry in chosen], origin, journal,
+            allow_partial=True,
+        )
         provenance = {row_id(entry[0]): entry[2] for entry in chosen}
         for row in labeled:
             row["source_ids"] = provenance[row["id"]]
@@ -433,8 +448,8 @@ def build_dataset(
         rows = _dedupe([*real_rows, *variants])
         rows.sort(key=lambda row: (row["split"], row["id"]))
         for split in ("train", "dev", "eval"):
-            _atomic_jsonl(out_dir / f"{split}.jsonl", [row for row in rows if row["split"] == split])
-        _atomic_jsonl(out_dir / "labeled.jsonl", rows)
+            atomic_jsonl(out_dir / f"{split}.jsonl", [row for row in rows if row["split"] == split])
+        atomic_jsonl(out_dir / "labeled.jsonl", rows)
         histogram = Counter(str(primary_value(spec, row)) for row in real_rows)
         meta = {
             "schema_version": 3,
@@ -461,7 +476,7 @@ def build_dataset(
             },
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
-        _atomic_json(out_dir / "meta.json", meta)
+        atomic_json(out_dir / "meta.json", meta)
         journal.archive()
         return meta
     except BaseException:
@@ -475,13 +490,3 @@ def read_jsonl(path: Path) -> list[Row]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def _atomic_jsonl(path: Path, rows: list[Row]) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
-    tmp.replace(path)
-
-
-def _atomic_json(path: Path, value: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False))
-    tmp.replace(path)

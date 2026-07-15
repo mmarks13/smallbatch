@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .atomic import atomic_json
 from .spec import FunctionSpec
 
 
@@ -86,7 +87,7 @@ def calibrate_teacher(
 
     if skip:
         payload = {**identity, "status": "bypassed", "row_ids": [], "batches_reviewed": 0}
-        _write_json(path, payload)
+        atomic_json(path, payload)
         return CalibrationResult("bypassed", [], 0, path)
 
     if interactive is None:
@@ -139,7 +140,7 @@ def calibrate_teacher(
         print_fn(json.dumps(metrics, indent=2))
         reviewed.extend(common)
         batches += 1
-        _write_json(
+        atomic_json(
             path,
             {
                 **identity,
@@ -151,7 +152,7 @@ def calibrate_teacher(
         )
         answer = input_fn("Approve teacher behavior, review more, or decline? [a/m/d] ").strip().lower()
         if answer in {"a", "approve", "y", "yes"}:
-            _write_json(
+            atomic_json(
                 path,
                 {
                     **identity,
@@ -163,7 +164,7 @@ def calibrate_teacher(
             )
             return CalibrationResult("approved", reviewed, batches, path)
         if answer not in {"m", "more"}:
-            _write_json(
+            atomic_json(
                 path,
                 {
                     **identity,
@@ -179,9 +180,3 @@ def calibrate_teacher(
         offset += len(batch)
 
     raise CalibrationDeclined("no additional calibration inputs remain")
-
-
-def _write_json(path: Path, value: dict) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False))
-    tmp.replace(path)

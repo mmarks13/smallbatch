@@ -42,3 +42,13 @@ def test_statistical_helpers():
     assert wilson_ci(5, 10) == [0.2366, 0.7634]
     assert nearest_rank_p90(list(range(1, 11))) == 9
     assert pearson_r([1, 1], [1, 2]) is None
+
+
+def test_macro_scores_count_contract_classes_absent_from_the_split():
+    """A hard class dropping out of a resampled eval split must not inflate
+    macro_f1/balanced_accuracy: absent contract classes count as zero."""
+    spec = make_spec(output={"type": "enum", "labels": ["a", "b", "c"]})
+    metrics = compare(spec, ["a", "a", None], ["a", "b", "b"])
+    assert metrics["classes_absent"] == ["c"]
+    assert metrics["macro_f1"] == 0.2222  # (0.6667 + 0 + 0) / 3
+    assert metrics["balanced_accuracy"] == 0.3333  # (1 + 0 + 0) / 3

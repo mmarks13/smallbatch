@@ -242,3 +242,61 @@ def test_compile_retries_failed_zero_shot_diagnostic_in_new_revision(tmp_path, m
         record.get("status") != "error"
         for record in second.report["diagnostics"].values()
     )
+
+
+def test_lora_record_carries_the_dev_selected_decoder(tmp_path, monkeypatch):
+    """runtime.py and the standalone package read record["decode"]; dropping it
+    silently serves argmax no matter what the dev comparison selected."""
+    import smallbatch.training
+    from smallbatch import api
+    from smallbatch.spec import LoraCandidateSpec
+
+    spec = make_spec(output={"type": "int", "range": [0, 4]})
+    comparison = {"argmax": {"within_one": 0.5}, "median": {"within_one": 0.9}}
+    info = {
+        "precision": "fp32",
+        "objective": "ordinal",
+        "decode": "median",
+        "dev_decode_comparison": comparison,
+        "train_rows": 4,
+        "train_loss": 0.1,
+        "adapter_dir": str(tmp_path / "model"),
+        "curve": [],
+        "best_epoch": 1,
+        "best_dev_agreement": 0.9,
+        "epochs_run": 1,
+        "stopped_reason": "max_epochs",
+        "dev_rows": 2,
+    }
+    monkeypatch.setattr(smallbatch.training, "train", lambda *args, **kwargs: info)
+    record = api._train_candidate(
+        spec,
+        "lora",
+        LoraCandidateSpec(type="lora"),
+        [],
+        [],
+        tmp_path / "candidates" / "lora",
+    )
+    assert record["decode"] == "median"
+    assert record["training"]["dev_decode_comparison"] == comparison
+
+
+def test_release_accelerator_memory_empties_cuda_and_survives_no_torch(monkeypatch):
+    import sys
+    import types
+
+    from smallbatch import api
+
+    calls = []
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(
+            is_available=lambda: True, empty_cache=lambda: calls.append("empty")
+        )
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    api._release_accelerator_memory()
+    assert calls == ["empty"]
+
+    monkeypatch.delitem(sys.modules, "torch")
+    api._release_accelerator_memory()
+    assert calls == ["empty"]

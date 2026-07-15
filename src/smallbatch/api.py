@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 
 from . import artifacts
+from .atomic import atomic_json
 from .labeling import dataset_hash, normalize_item_records, read_jsonl
 from .spec import (
     FunctionSpec,
@@ -209,6 +210,9 @@ def _train_candidate(
             "inference_precision": "fp32",
             "rationale_distillation": config.rationale_distillation,
             "eval_batch_size": config.eval_batch_size,
+            # the dev-selected decoder must reach the record: runtime.py and
+            # the standalone package fall back to argmax when it is absent
+            "decode": info["decode"],
             "training": {
                 key: info.get(key)
                 for key in (
@@ -220,6 +224,7 @@ def _train_candidate(
                     "stopped_reason",
                     "train_rows",
                     "dev_rows",
+                    "dev_decode_comparison",
                 )
             },
         }
@@ -236,14 +241,23 @@ def _train_candidate(
     }
 
 
+def _release_accelerator_memory() -> None:
+    """HF Trainer holds the trained model in reference cycles; collect them
+    between candidates or consecutive trainings won't coexist on a 12GB card."""
+    import gc
+
+    gc.collect()
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _load_local_record(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
 def _write_local_record(path: Path, record: dict) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(record, indent=2, ensure_ascii=False))
-    tmp.replace(path)
+    atomic_json(path, record)
 
 
 def compile(  # noqa: A001
@@ -380,6 +394,8 @@ def compile(  # noqa: A001
                 build, candidate_id, stage="error", error=record["error"]
             )
             _progress(f"{prefix} ERROR {record['error']}")
+        finally:
+            _release_accelerator_memory()
 
     seen_bases: set[str] = set()
     diagnostic_configs = []

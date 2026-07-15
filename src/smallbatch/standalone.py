@@ -24,6 +24,9 @@ from .spec import load_spec
 
 _TEMPLATES = Path(__file__).parent / "standalone_templates"
 
+# backends whose packaged function needs no network after pip install
+OFFLINE_BACKENDS = frozenset({"tfidf", "setfit"})
+
 
 def package_selection(
     root: Path,
@@ -97,8 +100,11 @@ def package_selection(
 
     items = [row["input"] for row in eval_rows]
     references = [row["output"] for row in eval_rows]
-    provisional = _evaluate_wheel(wheel, module, items)
     candidate_profile = local_record["profile"]
+    # verify under the thread count the candidate was evaluated with, or the
+    # packaged profile silently describes different operating conditions
+    threads = max(1, candidate_profile.get("threads") or min(4, os.cpu_count() or 1))
+    provisional = _evaluate_wheel(wheel, module, items, threads)
     provisional["profile"].update(
         {
             "runtime": record["backend"],
@@ -107,7 +113,7 @@ def package_selection(
             "required_base_model": record.get("base_model"),
             "dependencies": candidate_profile.get("dependencies", {}),
             "cpu": candidate_profile.get("cpu", "unknown"),
-            "offline_after_install": record["backend"] in {"tfidf", "setfit"},
+            "offline_after_install": record["backend"] in OFFLINE_BACKENDS,
         }
     )
     predictions = provisional["predictions"]
@@ -173,7 +179,7 @@ def package_selection(
         dependencies,
         clean=True,
     )
-    final = _evaluate_wheel(wheel, module, items)
+    final = _evaluate_wheel(wheel, module, items, threads)
     if final["predictions"] != predictions:
         raise ValueError("final wheel predictions changed after embedding evidence")
     wheel_hash = hashlib.sha256(wheel.read_bytes()).hexdigest()
@@ -221,10 +227,28 @@ def _dependencies(backend: str) -> list[str]:
     }[backend]
 
 
+def _requirement_name(requirement: str) -> str:
+    return requirement.split("<", 1)[0].split(">", 1)[0].split("=", 1)[0]
+
+
+def runtime_dependency_names(backend: str) -> list[str]:
+    """Package names behind a backend's runtime, for evidence reporting.
+
+    Derived from the pinned packaging list so public evidence can never
+    understate what the standalone package installs, plus the load-bearing
+    transitive packages worth versioning in a profile.
+    """
+    if backend == "zeroshot":
+        return ["torch", "transformers"]
+    extras = {"tfidf": ["numpy", "scipy"], "setfit": ["torch"]}
+    names = [_requirement_name(requirement) for requirement in _dependencies(backend)]
+    return names + extras.get(backend, [])
+
+
 def _tested_requirements(requirements: list[str]) -> list[str]:
     output = []
     for requirement in requirements:
-        name = requirement.split("<", 1)[0].split(">", 1)[0].split("=", 1)[0]
+        name = _requirement_name(requirement)
         try:
             output.append(f"{name}=={importlib.metadata.version(name)}")
         except importlib.metadata.PackageNotFoundError:
@@ -325,7 +349,7 @@ def _build_wheel(
     return wheel
 
 
-def _evaluate_wheel(wheel: Path, module: str, items: list[dict]) -> dict:
+def _evaluate_wheel(wheel: Path, module: str, items: list[dict], threads: int) -> dict:
     runner = r'''
 import builtins, importlib, json, os, platform, resource, sys, time
 real_import = builtins.__import__
@@ -369,7 +393,6 @@ json.dump({"predictions": outputs, "profile": {
         request = temporary / "request.json"
         result = temporary / "result.json"
         script = temporary / "runner.py"
-        threads = min(4, os.cpu_count() or 1)
         request.write_text(
             json.dumps(
                 {

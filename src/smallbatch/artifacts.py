@@ -10,18 +10,12 @@ import re
 import shutil
 from pathlib import Path
 
+from .atomic import atomic_json
 from .spec import load_spec
 
 DEFAULT_ROOT = Path("artifacts")
 MANIFEST_SCHEMA_VERSION = 3
 SOURCE_UNAVAILABLE = "source comparison unavailable"
-
-
-def _atomic_json(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False))
-    tmp.replace(path)
 
 
 def dir_size(path: Path) -> int:
@@ -170,7 +164,7 @@ def read_build_state(path: Path) -> dict:
 
 
 def write_build_state(path: Path, state: dict) -> None:
-    _atomic_json(path / "build_state.json", state)
+    atomic_json(path / "build_state.json", state, mkdir=True)
 
 
 def update_candidate_state(path: Path, candidate: str, **values) -> dict:
@@ -182,7 +176,7 @@ def update_candidate_state(path: Path, candidate: str, **values) -> dict:
 
 
 def write_manifest(path: Path, manifest: dict) -> None:
-    _atomic_json(path / "manifest.json", manifest)
+    atomic_json(path / "manifest.json", manifest, mkdir=True)
 
 
 def read_manifest(path: Path) -> dict:
@@ -262,7 +256,7 @@ def read_active(root: Path, name: str) -> dict | None:
 
 
 def activate(root: Path, name: str, selection: dict) -> None:
-    _atomic_json(active_path(root, name), selection)
+    atomic_json(active_path(root, name), selection, mkdir=True)
     history = root / name / "selection-history.jsonl"
     with history.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(selection, ensure_ascii=False) + "\n")

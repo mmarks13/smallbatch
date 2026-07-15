@@ -114,9 +114,12 @@ def enum_field_metrics(field: FieldSpec, predictions: list, references: list) ->
             "support": support,
         }
     observed = [str(label) for label in labels if per_class[str(label)]["support"]]
+    # macro averages span every contract class: an absent class counts as zero,
+    # or the score inflates whenever a hard class misses this eval split
+    class_names = [str(label) for label in labels]
     macro_f1 = (
-        round(sum(per_class[label]["f1"] for label in observed) / len(observed), 4)
-        if observed
+        round(sum(per_class[label]["f1"] for label in class_names) / len(class_names), 4)
+        if n
         else None
     )
     weighted_f1 = (
@@ -129,8 +132,10 @@ def enum_field_metrics(field: FieldSpec, predictions: list, references: list) ->
         else None
     )
     balanced = (
-        round(sum(per_class[label]["recall"] for label in observed) / len(observed), 4)
-        if observed
+        round(
+            sum(per_class[label]["recall"] for label in class_names) / len(class_names), 4
+        )
+        if n
         else None
     )
     worst = min(observed, key=lambda label: per_class[label]["recall"]) if observed else None

@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .atomic import atomic_json
+
 PROFILE_HEARTBEAT_SECONDS = 30
 
 
@@ -100,7 +102,7 @@ def _run_profile(
         request.unlink(missing_ok=True)
         result.unlink(missing_ok=True)
         progress.unlink(missing_ok=True)
-        progress.with_suffix(progress.suffix + ".tmp").unlink(missing_ok=True)
+        progress.with_name(progress.name + ".tmp").unlink(missing_ok=True)
 
 
 def profile_candidate(
@@ -139,14 +141,13 @@ def profile_zeroshot(
 
 
 def _write_progress(path: Path, completed: int, total: int) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps({"completed": completed, "total": total}))
-    tmp.replace(path)
+    atomic_json(path, {"completed": completed, "total": total}, indent=None)
 
 
 def _worker(build: Path, candidate: str, request_path: Path, result_path: Path) -> None:
     from . import artifacts
     from .runtime import load_candidate
+    from .standalone import OFFLINE_BACKENDS
 
     request = json.loads(request_path.read_text())
     items = request["items"]
@@ -212,7 +213,7 @@ def _worker(build: Path, candidate: str, request_path: Path, result_path: Path) 
             "threads": threads,
             "os": platform.platform(),
             "python": platform.python_version(),
-            "offline_after_install": record["backend"] in {"tfidf", "setfit"},
+            "offline_after_install": record["backend"] in OFFLINE_BACKENDS,
         },
     }
     result_path.write_text(json.dumps(result, ensure_ascii=False))
@@ -250,14 +251,10 @@ def _percentile(values: list[float], quantile: float) -> float:
 
 
 def _runtime_dependencies(backend: str) -> dict[str, str]:
-    names = {
-        "tfidf": ["scikit-learn", "skops", "numpy", "scipy"],
-        "setfit": ["setfit", "sentence-transformers", "torch", "transformers"],
-        "lora": ["torch", "transformers", "peft"],
-        "zeroshot": ["torch", "transformers"],
-    }[backend]
+    from .standalone import runtime_dependency_names
+
     versions = {}
-    for name in names:
+    for name in runtime_dependency_names(backend):
         try:
             versions[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:

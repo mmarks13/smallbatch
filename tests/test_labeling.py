@@ -168,3 +168,41 @@ def test_split_gives_every_split_a_proportional_share_of_rare_classes(tmp_path):
         assert train_share >= 0.5, f"label {label} train share {train_share}"
         if total >= 9:
             assert histograms["dev"].get(label, 0) >= 1, f"label {label} absent from dev"
+
+
+class DropLastTeacher(AugmentationTeacher):
+    """Labels every row in a batch except the last one, on every attempt."""
+
+    def complete(self, prompt):
+        if prompt.startswith("Generate realistic"):
+            return super().complete(prompt)
+        count = len(re.findall(r'"id":\s*\d+', prompt.split("Reply with", 1)[0]))
+        return json.dumps(
+            [
+                {"id": index, "output": "urgent", "reason": "test"}
+                for index in range(count - 1)
+            ]
+        )
+
+
+def test_augmentation_drops_unlabelable_variants_instead_of_aborting(tmp_path, capsys):
+    spec = make_spec(
+        teacher={"backend": "codex-cli", "model": "test"},
+        augmentation={"paraphrase": {"cap": 2}},
+    )
+    meta = build_dataset(
+        spec,
+        imported_records(30),
+        tmp_path,
+        teacher=DropLastTeacher(),
+        max_variants=2,
+    )
+    assert meta["variants"] == 1
+    assert "teacher paraphrase dropped 1 of 2 rows" in capsys.readouterr().err
+
+
+def test_real_decisions_stay_all_or_nothing(tmp_path):
+    spec = make_spec(teacher={"backend": "codex-cli", "model": "test"})
+    records = [{"input": record["input"]} for record in imported_records(4)]
+    with pytest.raises(ValueError, match="failed to return valid decisions"):
+        build_dataset(spec, records, tmp_path, teacher=DropLastTeacher())

@@ -282,6 +282,19 @@ def _make_dev_callback(
     return DevEval()
 
 
+def _latest_checkpoint(trainer_dir: Path) -> Path | None:
+    """HF names checkpoints checkpoint-<step>: compare steps numerically, or a
+    crash between save and rotation resumes 'checkpoint-999' over '-1000'."""
+    checkpoints = [
+        path
+        for path in trainer_dir.glob("checkpoint-*")
+        if path.name.rsplit("-", 1)[-1].isdigit()
+    ]
+    if not checkpoints:
+        return None
+    return max(checkpoints, key=lambda path: int(path.name.rsplit("-", 1)[-1]))
+
+
 def train(
     spec: FunctionSpec,
     config: LoraCandidateSpec,
@@ -371,8 +384,8 @@ def train(
         model=model, args=cfg, train_dataset=ds, processing_class=tokenizer,
         peft_config=lora, callbacks=[dev_cb] if dev_cb else None,
     )
-    checkpoints = sorted((out_dir / "trainer").glob("checkpoint-*"))
-    result = trainer.train(resume_from_checkpoint=str(checkpoints[-1]) if checkpoints else None)
+    checkpoint = _latest_checkpoint(out_dir / "trainer")
+    result = trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint else None)
 
     if dev_cb is None or dev_cb.best_epoch is None:
         # no dev split (or it never scored): fall back to the final adapter
@@ -421,6 +434,9 @@ def _select_decoder(
     if not dev_rows:
         return "argmax", None
 
+    # DevEval restores train mode after every epoch, so dropout is still
+    # active here; the argmax-vs-median comparison must run deterministically
+    model.eval()
     texts = [prompts.student_prompt(spec, row["input"]) for row in dev_rows]
     references = [row_output(spec, row) for row in dev_rows]
     distributions = decode.score_levels(

@@ -16,6 +16,7 @@ __all__ = ["classify", "classify_batch", "metadata"]
 
 _MODEL = None
 _TOKENIZER = None
+_CONSTRAINT_TABLES = None
 _INT_RE = re.compile(r"-?\d+")
 _SCORE_RE = re.compile(r"score:\s*(-?\d+)", re.I)
 _SCORE_VALUE_RE = re.compile(r"^\s*score\s*:\s*(.+)$", re.I | re.M)
@@ -129,15 +130,33 @@ def _completion_strings():
     ]
 
 
-def _constraint(tokenizer, completions, prompt_length):
-    trie, terminals = {}, set()
-    for completion in completions:
-        ids = tuple(tokenizer(completion, add_special_tokens=False)["input_ids"])
-        for index in range(len(ids)):
-            trie.setdefault(ids[:index], set()).add(ids[index])
-        trie.setdefault(ids, set())
-        terminals.add(ids)
-    eos = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else tokenizer.pad_token_id
+def _constraint_tables(tokenizer):
+    """Token-prefix trie over the legal completions. It depends only on the
+    fixed FUNCTION spec, so build it once: retokenizing up to 5000 completion
+    strings per call would dominate the packaged hot path."""
+    global _CONSTRAINT_TABLES
+    if _CONSTRAINT_TABLES is None:
+        completions = _completion_strings()
+        if not completions:
+            _CONSTRAINT_TABLES = ()
+            return _CONSTRAINT_TABLES
+        trie, terminals = {}, set()
+        for completion in completions:
+            ids = tuple(tokenizer(completion, add_special_tokens=False)["input_ids"])
+            for index in range(len(ids)):
+                trie.setdefault(ids[:index], set()).add(ids[index])
+            trie.setdefault(ids, set())
+            terminals.add(ids)
+        eos = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else tokenizer.pad_token_id
+        _CONSTRAINT_TABLES = (trie, terminals, eos)
+    return _CONSTRAINT_TABLES
+
+
+def _constraint(tokenizer, prompt_length):
+    tables = _constraint_tables(tokenizer)
+    if not tables:
+        return None
+    trie, terminals, eos = tables
 
     def allowed(batch_id, input_ids):
         generated = tuple(input_ids[prompt_length:].tolist())
@@ -228,12 +247,10 @@ def classify_batch(items):
         max_length=2048,
         return_token_type_ids=False,
     )
-    completions = _completion_strings()
     extra = {}
-    if completions:
-        extra["prefix_allowed_tokens_fn"] = _constraint(
-            tokenizer, completions, encoded["input_ids"].shape[1]
-        )
+    allowed_fn = _constraint(tokenizer, encoded["input_ids"].shape[1])
+    if allowed_fn is not None:
+        extra["prefix_allowed_tokens_fn"] = allowed_fn
     max_new = 8 + 8 * len(FUNCTION["output"]["fields"])
     if FUNCTION["runtime"].get("rationale_distillation"):
         max_new += 72

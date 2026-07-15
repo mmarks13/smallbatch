@@ -25,6 +25,10 @@ def test_selected_wheel_has_no_smallbatch_runtime_dependency(tmp_path, monkeypat
     )
     assert selected.wheel.exists()
     assert selected.evidence["parity"]["exact"] == 1
+    assert (
+        selected.evidence["package_profile"]["threads"]
+        == selected.evidence["candidate_profile"]["threads"]
+    )
     with zipfile.ZipFile(selected.wheel) as archive:
         names = archive.namelist()
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
@@ -75,3 +79,16 @@ def test_selected_wheel_has_no_smallbatch_runtime_dependency(tmp_path, monkeypat
     with pytest.raises(ValueError, match="integrity"):
         load_fn(spec.name, artifacts_root=root)
     assert hashlib.sha256(selected.wheel.read_bytes()).hexdigest() == selected.active["wheel_sha256"]
+
+
+def test_reported_dependency_names_cover_the_packaged_pins():
+    """profiling's public-evidence dependency list is derived from the pinned
+    packaging list, so it can never understate what the wheel installs."""
+    for backend in ("tfidf", "setfit", "lora"):
+        pinned = {
+            standalone._requirement_name(requirement)
+            for requirement in standalone._dependencies(backend)
+        }
+        assert pinned <= set(standalone.runtime_dependency_names(backend))
+    assert {"scikit-learn", "skops"} <= set(standalone.runtime_dependency_names("setfit"))
+    assert standalone.runtime_dependency_names("zeroshot") == ["torch", "transformers"]
