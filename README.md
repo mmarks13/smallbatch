@@ -147,23 +147,34 @@ self-hosted open-weights teacher (`gpt-oss-120b`) labeled 600 frozen inputs;
 Smallbatch trained five local functions on 420 of its decisions and evaluated
 all of them, on the same machine, against the same 120 held-out decisions.
 
-| local function | agrees with teacher | p50 CPU latency | peak memory |
-|---|---:|---:|---:|
-| TF-IDF | 54% | 1.2 ms | 0.8 GB |
-| SetFit (bge-small, 33M) | 57% | 42 ms | 1.8 GB |
-| LoRA (Qwen3-0.6B) | 63% | 0.8 s | 5.3 GB |
-| LoRA (Qwen3-1.7B) | 64% | 1.9 s | 11 GB |
-| LoRA (Qwen3-4B) | 69% | 4.3 s | 21 GB |
-| *Qwen3-0.6B, no training, full rubric in the prompt* | *18%* | *3.9 s* | *9.0 GB* |
-| *Qwen3-4B, no training, full rubric in the prompt* | *48%* | *16.5 s* | *21 GB* |
+| local function | of the teacher's own consistency* | avg. rungs off | p50 CPU latency | ships as |
+|---|---:|---:|---:|---:|
+| TF-IDF | ~71% | 0.60 | 1.2 ms | 27 MB |
+| SetFit (bge-small, 33M) | ~75% | 0.55 | 42 ms | 135 MB |
+| LoRA (Qwen3-0.6B) | ~83% | 0.45 | 0.8 s | 1.6 GB |
+| LoRA (Qwen3-1.7B) | ~84% | 0.43 | 1.9 s | 4.1 GB |
+| LoRA (Qwen3-4B) | ~90% | 0.38 | 4.3 s | 8.1 GB |
 
-The trained functions never see the rubric — 420 teacher decisions moved it
-into their weights, which is why the 0.6B student beats the same model
-reading the full rubric (63% vs 18%) at a fifth of the latency. Going down
-the table, each step of fidelity costs roughly ten times more latency; which
-row is worth it depends on the workload, so no winner is declared and
-agreement measures fidelity to the teacher's decisions, not correctness.
-Protocol, evidence, and the honest caveats:
+\* A student cannot reliably agree with the teacher more than the teacher
+agrees with itself: re-labeling the same 100 complaints twice, the teacher
+repeated its own decision 76-77% of the time (rubric probes, earlier
+drafts). That repeat rate is the ceiling here, so the 4B student's 69%
+exact agreement is ~90% of it. Raw metrics with confidence intervals are in
+[`results.json`](case-study/cfpb-complaint-priority/results/results.json).
+
+The trained functions never see the prompt's rubric — the teacher's
+decisions moved it into their weights. Prompting the same base models with
+the full rubric instead, on the same evaluation rows:
+
+| base model | rubric in the prompt, no training | trained on 420 decisions, no rubric |
+|---|---|---|
+| Qwen3-0.6B | 18% exact · 3.9 s | 63% exact · 0.8 s |
+| Qwen3-1.7B | 3% exact · 7.2 s | 64% exact · 1.9 s |
+| Qwen3-4B | 48% exact · 16.5 s | 69% exact · 4.3 s |
+
+Which row is worth its latency depends on the workload, so no winner is
+declared, and agreement measures fidelity to the teacher's decisions, not
+correctness. Protocol, evidence, and the honest caveats:
 [case-study/cfpb-complaint-priority](case-study/cfpb-complaint-priority/README.md).
 
 ## Responsible use
