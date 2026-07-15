@@ -22,3 +22,7 @@ local/
 PROJECT_EVALUATION.md
 V0.2_RELEASE_PLAN_REVIEW.md
 V0.2_RELEASE_PLAN_READINESS_REVIEW.md
+
+# internal operational docs — kept locally, not tracked or shipped
+RELEASE_CHECKLIST.md
+ROADMAP.md

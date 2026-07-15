@@ -54,7 +54,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.sdist]
-exclude = ["assets/"]
+# Ship source, tests, docs, README, LICENSE, CHANGELOG. Leave out the repo's
+# banner, the CI/sky infra, the contributor contract, and the case-study data
+# (~1 MB of frozen CFPB inputs) — none are needed to build or use the package.
+exclude = ["assets/", ".github/", ".skyignore", "CLAUDE.md", "case-study/"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/smallbatch"]
