@@ -1,0 +1,21 @@
+{
+  "measured_at": "2026-07-14",
+  "teacher": "openai/gpt-oss-120b",
+  "serving": "vLLM 0.25.1, self-hosted single H100, temperature 0",
+  "method": "each item labeled twice; second pass shuffles row order and reverses input-field order, so disagreement is presentation sensitivity, not sampling noise (temperature 0)",
+  "shipped_rubric": {
+    "on_eval_rows": {
+      "n": 120,
+      "exact": 0.8167,
+      "within_one": 0.9667,
+      "mae": 0.2167
+    },
+    "on_100_sample": {
+      "n": 100,
+      "exact": 0.76,
+      "within_one": 0.91,
+      "mae": 0.34
+    }
+  },
+  "note": "The eval-row figure is the reference ceiling for the case-study report: a student cannot reliably agree with the teacher's decisions more often than the teacher reproduces them. Per-item decisions are withheld per the aggregate-only protocol."
+}

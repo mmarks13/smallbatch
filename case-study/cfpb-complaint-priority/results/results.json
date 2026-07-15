@@ -1,0 +1,701 @@
+{
+  "schema_version": 3,
+  "function": "complaint-review-priority",
+  "evaluation_rows": 120,
+  "small_evaluation_warning": false,
+  "candidates": {
+    "tfidf": {
+      "candidate": "tfidf",
+      "backend": "tfidf",
+      "status": "completed",
+      "artifact_path": "candidates/tfidf/model",
+      "train_seconds": 8.072,
+      "format": "skops",
+      "sklearn_version": "1.9.0",
+      "skops_version": "0.14.0",
+      "fields": [
+        "score"
+      ],
+      "objective": {
+        "score": "ordinal"
+      },
+      "error": null,
+      "metrics": {
+        "n": 120,
+        "valid_n": 120,
+        "invalid_rate": 0.0,
+        "exact": 0.5417,
+        "exact_ci": [
+          0.4526,
+          0.6281
+        ],
+        "within_one": 0.8667,
+        "within_one_ci": [
+          0.7944,
+          0.9162
+        ],
+        "mae": 0.6,
+        "absolute_error_histogram": {
+          "0": 65,
+          "1": 39,
+          "2": 15,
+          "3": 1
+        },
+        "p90_absolute_error": 2,
+        "max_absolute_error": 3,
+        "mean_signed_error": -0.4333,
+        "pearson_r": 0.373,
+        "spearman_rho": 0.367
+      },
+      "profile": {
+        "runtime": "tfidf",
+        "cold_load_seconds": 3.4516,
+        "batch_one_latency_ms": {
+          "p50": 1.1858,
+          "p95": 1.4817,
+          "n": 120
+        },
+        "peak_rss_bytes": 804626432,
+        "candidate_owned_bytes": 27212093,
+        "required_shared_bytes": 0,
+        "required_base_model": null,
+        "dependencies": {
+          "scikit-learn": "1.9.0",
+          "skops": "0.14.0",
+          "numpy": "2.5.1",
+          "scipy": "1.18.0"
+        },
+        "cpu": "Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz",
+        "threads": 4,
+        "os": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+        "python": "3.12.13",
+        "offline_after_install": true
+      }
+    },
+    "bge-small": {
+      "candidate": "bge-small",
+      "backend": "setfit",
+      "status": "completed",
+      "artifact_path": "candidates/bge-small/model",
+      "train_seconds": 38.016,
+      "format": "setfit",
+      "setfit_version": "1.1.3",
+      "model": "BAAI/bge-small-en-v1.5",
+      "fields": [
+        "score"
+      ],
+      "embedding_samples_per_class": 8,
+      "field_training": {
+        "score": {
+          "embedding_train_rows": 35,
+          "embedding_eval_rows": 25,
+          "embedding_status": "trained",
+          "classifier_train_rows": 420,
+          "objective": "ordinal",
+          "resolved_args": {
+            "output_dir": "/home/ubuntu/case-study/cfpb-complaint-priority/work/artifacts/complaint-review-priority/builds/2026-07-14-538d9418/candidates/bge-small/model/score/checkpoints",
+            "batch_size": [
+              16,
+              2
+            ],
+            "num_epochs": [
+              1,
+              16
+            ],
+            "max_steps": -1,
+            "sampling_strategy": "oversampling",
+            "num_iterations": 15,
+            "body_learning_rate": [
+              2e-05,
+              1e-05
+            ],
+            "head_learning_rate": 0.01,
+            "loss": "<class 'sentence_transformers.sentence_transformer.losses.cosine_similarity.CosineSimilarityLoss'>",
+            "distance_metric": "<function BatchHardTripletLossDistanceFunction.cosine_distance at 0x7f43e2e228e0>",
+            "margin": 0.25,
+            "end_to_end": false,
+            "use_amp": false,
+            "warmup_proportion": 0.1,
+            "l2_weight": 0.01,
+            "max_length": null,
+            "samples_per_label": 2,
+            "show_progress_bar": false,
+            "seed": 42,
+            "report_to": [
+              "none"
+            ],
+            "run_name": null,
+            "logging_dir": "runs/Jul14_19-15-43_129-159-189-145",
+            "logging_strategy": "steps",
+            "logging_first_step": true,
+            "logging_steps": 50,
+            "eval_strategy": "no",
+            "evaluation_strategy": null,
+            "eval_steps": null,
+            "eval_delay": 0,
+            "eval_max_steps": -1,
+            "save_strategy": "no",
+            "save_steps": 500,
+            "save_total_limit": 1,
+            "load_best_model_at_end": false,
+            "metric_for_best_model": "embedding_loss",
+            "greater_is_better": false
+          }
+        }
+      },
+      "error": null,
+      "metrics": {
+        "n": 120,
+        "valid_n": 120,
+        "invalid_rate": 0.0,
+        "exact": 0.5667,
+        "exact_ci": [
+          0.4773,
+          0.6519
+        ],
+        "within_one": 0.8833,
+        "within_one_ci": [
+          0.8137,
+          0.9292
+        ],
+        "mae": 0.55,
+        "absolute_error_histogram": {
+          "0": 68,
+          "1": 38,
+          "2": 14
+        },
+        "p90_absolute_error": 2,
+        "max_absolute_error": 2,
+        "mean_signed_error": -0.1,
+        "pearson_r": 0.4526,
+        "spearman_rho": 0.4714
+      },
+      "profile": {
+        "runtime": "setfit",
+        "cold_load_seconds": 4.7822,
+        "batch_one_latency_ms": {
+          "p50": 42.321,
+          "p95": 78.8281,
+          "n": 120
+        },
+        "peak_rss_bytes": 1794359296,
+        "candidate_owned_bytes": 134520754,
+        "required_shared_bytes": 0,
+        "required_base_model": null,
+        "dependencies": {
+          "setfit": "1.1.3",
+          "sentence-transformers": "5.6.0",
+          "torch": "2.6.0+cu126",
+          "transformers": "4.57.6"
+        },
+        "cpu": "Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz",
+        "threads": 4,
+        "os": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+        "python": "3.12.13",
+        "offline_after_install": true
+      }
+    },
+    "qwen3-06b": {
+      "candidate": "qwen3-06b",
+      "backend": "lora",
+      "status": "completed",
+      "artifact_path": "candidates/qwen3-06b/model",
+      "train_seconds": 288.644,
+      "format": "peft",
+      "base_model": "Qwen/Qwen3-0.6B",
+      "train_precision": "bf16",
+      "inference_precision": "fp32",
+      "rationale_distillation": false,
+      "eval_batch_size": 4,
+      "training": {
+        "train_loss": 0.8835,
+        "curve": [
+          {
+            "epoch": 1,
+            "train_loss": 1.2771,
+            "dev_agreement": 0.9
+          },
+          {
+            "epoch": 2,
+            "train_loss": 1.3877,
+            "dev_agreement": 0.9
+          },
+          {
+            "epoch": 3,
+            "train_loss": 0.8784,
+            "dev_agreement": 0.9333
+          },
+          {
+            "epoch": 4,
+            "train_loss": 0.771,
+            "dev_agreement": 0.8833
+          },
+          {
+            "epoch": 5,
+            "train_loss": 0.2774,
+            "dev_agreement": 0.8167
+          }
+        ],
+        "best_epoch": 3,
+        "best_dev_agreement": 0.9333,
+        "epochs_run": 5,
+        "stopped_reason": "early_stop(patience=2)",
+        "train_rows": 420,
+        "dev_rows": 60
+      },
+      "error": null,
+      "metrics": {
+        "n": 120,
+        "valid_n": 120,
+        "invalid_rate": 0.0,
+        "exact": 0.6333,
+        "exact_ci": [
+          0.5442,
+          0.7142
+        ],
+        "within_one": 0.9167,
+        "within_one_ci": [
+          0.8534,
+          0.9541
+        ],
+        "mae": 0.45,
+        "absolute_error_histogram": {
+          "0": 76,
+          "1": 34,
+          "2": 10
+        },
+        "p90_absolute_error": 1,
+        "max_absolute_error": 2,
+        "mean_signed_error": 0.2667,
+        "pearson_r": 0.5778,
+        "spearman_rho": 0.587
+      },
+      "profile": {
+        "runtime": "lora",
+        "cold_load_seconds": 5.2986,
+        "batch_one_latency_ms": {
+          "p50": 781.3839,
+          "p95": 2209.3827,
+          "n": 120
+        },
+        "peak_rss_bytes": 5330980864,
+        "candidate_owned_bytes": 56310842,
+        "required_shared_bytes": 1519182365,
+        "required_base_model": "Qwen/Qwen3-0.6B",
+        "dependencies": {
+          "torch": "2.6.0+cu126",
+          "transformers": "4.57.6",
+          "peft": "0.19.1"
+        },
+        "cpu": "Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz",
+        "threads": 4,
+        "os": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+        "python": "3.12.13",
+        "offline_after_install": false
+      }
+    },
+    "qwen3-17b": {
+      "candidate": "qwen3-17b",
+      "backend": "lora",
+      "status": "completed",
+      "artifact_path": "candidates/qwen3-17b/model",
+      "train_seconds": 701.283,
+      "format": "peft",
+      "base_model": "Qwen/Qwen3-1.7B",
+      "train_precision": "qlora",
+      "inference_precision": "fp32",
+      "rationale_distillation": false,
+      "eval_batch_size": 4,
+      "training": {
+        "train_loss": 0.645,
+        "curve": [
+          {
+            "epoch": 1,
+            "train_loss": 0.8525,
+            "dev_agreement": 0.8667
+          },
+          {
+            "epoch": 2,
+            "train_loss": 0.997,
+            "dev_agreement": 0.8
+          },
+          {
+            "epoch": 3,
+            "train_loss": 0.101,
+            "dev_agreement": 0.9
+          },
+          {
+            "epoch": 4,
+            "train_loss": 0.0012,
+            "dev_agreement": 0.8667
+          },
+          {
+            "epoch": 5,
+            "train_loss": 0.0022,
+            "dev_agreement": 0.85
+          }
+        ],
+        "best_epoch": 3,
+        "best_dev_agreement": 0.9,
+        "epochs_run": 5,
+        "stopped_reason": "early_stop(patience=2)",
+        "train_rows": 420,
+        "dev_rows": 60
+      },
+      "error": null,
+      "metrics": {
+        "n": 120,
+        "valid_n": 120,
+        "invalid_rate": 0.0,
+        "exact": 0.6417,
+        "exact_ci": [
+          0.5527,
+          0.7218
+        ],
+        "within_one": 0.9333,
+        "within_one_ci": [
+          0.8739,
+          0.9658
+        ],
+        "mae": 0.425,
+        "absolute_error_histogram": {
+          "0": 77,
+          "1": 35,
+          "2": 8
+        },
+        "p90_absolute_error": 1,
+        "max_absolute_error": 2,
+        "mean_signed_error": 0.0917,
+        "pearson_r": 0.601,
+        "spearman_rho": 0.6122
+      },
+      "profile": {
+        "runtime": "lora",
+        "cold_load_seconds": 5.9459,
+        "batch_one_latency_ms": {
+          "p50": 1874.1125,
+          "p95": 4758.1081,
+          "n": 120
+        },
+        "peak_rss_bytes": 11148455936,
+        "candidate_owned_bytes": 50806178,
+        "required_shared_bytes": 4079423234,
+        "required_base_model": "Qwen/Qwen3-1.7B",
+        "dependencies": {
+          "torch": "2.6.0+cu126",
+          "transformers": "4.57.6",
+          "peft": "0.19.1"
+        },
+        "cpu": "Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz",
+        "threads": 4,
+        "os": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+        "python": "3.12.13",
+        "offline_after_install": false
+      }
+    },
+    "qwen3-4b": {
+      "candidate": "qwen3-4b",
+      "backend": "lora",
+      "status": "completed",
+      "artifact_path": "candidates/qwen3-4b/model",
+      "train_seconds": 1373.453,
+      "format": "peft",
+      "base_model": "Qwen/Qwen3-4B",
+      "train_precision": "qlora",
+      "inference_precision": "fp32",
+      "rationale_distillation": false,
+      "eval_batch_size": 4,
+      "training": {
+        "train_loss": 0.7137,
+        "curve": [
+          {
+            "epoch": 1,
+            "train_loss": 1.1681,
+            "dev_agreement": 0.8833
+          },
+          {
+            "epoch": 2,
+            "train_loss": 1.2086,
+            "dev_agreement": 0.9
+          },
+          {
+            "epoch": 3,
+            "train_loss": 0.2947,
+            "dev_agreement": 0.9167
+          },
+          {
+            "epoch": 4,
+            "train_loss": 0.0898,
+            "dev_agreement": 0.9
+          },
+          {
+            "epoch": 5,
+            "train_loss": 0.3231,
+            "dev_agreement": 0.9167
+          }
+        ],
+        "best_epoch": 3,
+        "best_dev_agreement": 0.9167,
+        "epochs_run": 5,
+        "stopped_reason": "early_stop(patience=2)",
+        "train_rows": 420,
+        "dev_rows": 60
+      },
+      "error": null,
+      "metrics": {
+        "n": 120,
+        "valid_n": 120,
+        "invalid_rate": 0.0,
+        "exact": 0.6917,
+        "exact_ci": [
+          0.6042,
+          0.7673
+        ],
+        "within_one": 0.9333,
+        "within_one_ci": [
+          0.8739,
+          0.9658
+        ],
+        "mae": 0.375,
+        "absolute_error_histogram": {
+          "0": 83,
+          "1": 29,
+          "2": 8
+        },
+        "p90_absolute_error": 1,
+        "max_absolute_error": 2,
+        "mean_signed_error": 0.0583,
+        "pearson_r": 0.6472,
+        "spearman_rho": 0.6397
+      },
+      "profile": {
+        "runtime": "lora",
+        "cold_load_seconds": 7.2601,
+        "batch_one_latency_ms": {
+          "p50": 4334.7738,
+          "p95": 10709.2322,
+          "n": 120
+        },
+        "peak_rss_bytes": 20703903744,
+        "candidate_owned_bytes": 82016444,
+        "required_shared_bytes": 8060896856,
+        "required_base_model": "Qwen/Qwen3-4B",
+        "dependencies": {
+          "torch": "2.6.0+cu126",
+          "transformers": "4.57.6",
+          "peft": "0.19.1"
+        },
+        "cpu": "Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz",
+        "threads": 4,
+        "os": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+        "python": "3.12.13",
+        "offline_after_install": false
+      }
+    }
+  },
+  "diagnostics": {
+    "zero-shot-68723f98": {
+      "selectable": false,
+      "backend": "zeroshot",
+      "base_model": "Qwen/Qwen3-0.6B",
+      "metrics": {
+        "n": 120,
+        "valid_n": 120,
+        "invalid_rate": 0.0,
+        "exact": 0.1833,
+        "exact_ci": [
+          0.1243,
+          0.262
+        ],
+        "within_one": 0.4917,
+        "within_one_ci": [
+          0.4039,
+          0.58
+        ],
+        "mae": 1.4917,
+        "absolute_error_histogram": {
+          "0": 22,
+          "1": 37,
+          "2": 41,
+          "3": 20
+        },
+        "p90_absolute_error": 3,
+        "max_absolute_error": 3,
+        "mean_signed_error": 1.2583,
+        "pearson_r": 0.1685,
+        "spearman_rho": 0.0792
+      },
+      "profile": {
+        "runtime": "zeroshot",
+        "cold_load_seconds": 3.7641,
+        "batch_one_latency_ms": {
+          "p50": 3879.2782,
+          "p95": 5696.1502,
+          "n": 120
+        },
+        "peak_rss_bytes": 9029894144,
+        "candidate_owned_bytes": 0,
+        "required_shared_bytes": 1519182365,
+        "required_base_model": "Qwen/Qwen3-0.6B",
+        "dependencies": {
+          "torch": "2.6.0+cu126",
+          "transformers": "4.57.6"
+        },
+        "cpu": "Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz",
+        "threads": 4,
+        "os": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+        "python": "3.12.13",
+        "offline_after_install": false
+      }
+    },
+    "zero-shot-21651908": {
+      "selectable": false,
+      "backend": "zeroshot",
+      "base_model": "Qwen/Qwen3-1.7B",
+      "metrics": {
+        "n": 120,
+        "valid_n": 120,
+        "invalid_rate": 0.0,
+        "exact": 0.025,
+        "exact_ci": [
+          0.0085,
+          0.0709
+        ],
+        "within_one": 0.325,
+        "within_one_ci": [
+          0.2478,
+          0.4131
+        ],
+        "mae": 2.0333,
+        "absolute_error_histogram": {
+          "0": 3,
+          "1": 36,
+          "2": 35,
+          "3": 46
+        },
+        "p90_absolute_error": 3,
+        "max_absolute_error": 3,
+        "mean_signed_error": 1.8167,
+        "pearson_r": 0.1936,
+        "spearman_rho": 0.2052
+      },
+      "profile": {
+        "runtime": "zeroshot",
+        "cold_load_seconds": 4.8436,
+        "batch_one_latency_ms": {
+          "p50": 7198.7836,
+          "p95": 11012.3248,
+          "n": 120
+        },
+        "peak_rss_bytes": 11141140480,
+        "candidate_owned_bytes": 0,
+        "required_shared_bytes": 4079423234,
+        "required_base_model": "Qwen/Qwen3-1.7B",
+        "dependencies": {
+          "torch": "2.6.0+cu126",
+          "transformers": "4.57.6"
+        },
+        "cpu": "Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz",
+        "threads": 4,
+        "os": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+        "python": "3.12.13",
+        "offline_after_install": false
+      }
+    },
+    "zero-shot-bddaf01d": {
+      "selectable": false,
+      "backend": "zeroshot",
+      "base_model": "Qwen/Qwen3-4B",
+      "metrics": {
+        "n": 120,
+        "valid_n": 120,
+        "invalid_rate": 0.0,
+        "exact": 0.4833,
+        "exact_ci": [
+          0.3958,
+          0.5719
+        ],
+        "within_one": 0.8,
+        "within_one_ci": [
+          0.7196,
+          0.8618
+        ],
+        "mae": 0.7333,
+        "absolute_error_histogram": {
+          "0": 58,
+          "1": 38,
+          "2": 22,
+          "3": 2
+        },
+        "p90_absolute_error": 2,
+        "max_absolute_error": 3,
+        "mean_signed_error": 0.7,
+        "pearson_r": 0.4607,
+        "spearman_rho": 0.426
+      },
+      "profile": {
+        "runtime": "zeroshot",
+        "cold_load_seconds": 5.2312,
+        "batch_one_latency_ms": {
+          "p50": 16493.2122,
+          "p95": 24957.8096,
+          "n": 120
+        },
+        "peak_rss_bytes": 20685418496,
+        "candidate_owned_bytes": 0,
+        "required_shared_bytes": 8060896856,
+        "required_base_model": "Qwen/Qwen3-4B",
+        "dependencies": {
+          "torch": "2.6.0+cu126",
+          "transformers": "4.57.6"
+        },
+        "cpu": "Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz",
+        "threads": 4,
+        "os": "Linux-6.8.0-60-generic-x86_64-with-glibc2.35",
+        "python": "3.12.13",
+        "offline_after_install": false
+      }
+    },
+    "train-fitted-constant": {
+      "selectable": false,
+      "value": 2,
+      "metrics": {
+        "n": 120,
+        "valid_n": 120,
+        "invalid_rate": 0.0,
+        "exact": 0.2833,
+        "exact_ci": [
+          0.2104,
+          0.3697
+        ],
+        "within_one": 0.975,
+        "within_one_ci": [
+          0.9291,
+          0.9915
+        ],
+        "mae": 0.7417,
+        "absolute_error_histogram": {
+          "0": 34,
+          "1": 83,
+          "2": 3
+        },
+        "p90_absolute_error": 1,
+        "max_absolute_error": 2,
+        "mean_signed_error": 0.1583,
+        "pearson_r": null,
+        "spearman_rho": null
+      }
+    }
+  },
+  "observed_strict_dominance": [],
+  "selection_bias_note": "These candidates share one evaluation split. Selecting after comparison makes the selected result optimistic; v0.2 does not provide an independent confirmation set.",
+  "claims": {
+    "decision_correctness_validated": false,
+    "energy_measured": false,
+    "operating_proxies": [
+      "CPU latency",
+      "peak RSS",
+      "artifact bytes"
+    ]
+  }
+}

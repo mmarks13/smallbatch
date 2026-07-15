@@ -41,7 +41,17 @@ class OpenAICompatTeacher:
                 req = urllib.request.Request(self.url, data=body, headers=headers)
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     data = json.loads(resp.read())
-                return data["choices"][0]["message"]["content"]
+                choice = data["choices"][0]
+                content = choice.get("message", {}).get("content")
+                if not isinstance(content, str) or not content.strip():
+                    # Reasoning models legally return content: null when
+                    # generation truncates before the final channel; treat it
+                    # as a failed attempt instead of leaking None upstream.
+                    raise RuntimeError(
+                        "completion returned no text content "
+                        f"(finish_reason={choice.get('finish_reason')!r})"
+                    )
+                return content
             except Exception as e:  # noqa: BLE001 - retry any transport error
                 last_err = e
                 if attempt < self.retries:

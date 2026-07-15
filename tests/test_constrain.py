@@ -1,22 +1,9 @@
 """Constrained decoding: legal-completion enumeration and the token trie
 (torch-free — the tokenizer is faked)."""
 
+from conftest import make_spec
 from smallbatch.evaluate import _prefix_allowed_fn, completion_trie
 from smallbatch.prompts import allowed_completions
-from smallbatch.spec import FunctionSpec
-
-
-def make_spec(**over):
-    base = dict(
-        name="toy",
-        description="-",
-        input_schema={"t": "str"},
-        output={"type": "int", "range": [0, 10]},
-        rubric="-",
-        teacher={"backend": "claude-cli", "model": "sonnet"},
-    )
-    base.update(over)
-    return FunctionSpec(**base)
 
 
 class FakeTokenizer:
@@ -27,13 +14,13 @@ class FakeTokenizer:
 
 
 def test_allowed_completions_int_and_enum():
-    assert allowed_completions(make_spec())[:3] == [" 0", " 1", " 2"]
+    assert allowed_completions(make_spec(output={"type": "int", "range": [0, 9]}))[:3] == [" 0", " 1", " 2"]
     spec = make_spec(output={"type": "enum", "labels": ["urgent", "low"]})
     assert allowed_completions(spec) == [" urgent", " low"]
 
 
 def test_allowed_completions_none_in_rationale_mode():
-    assert allowed_completions(make_spec(train={"rationale_distillation": True})) is None
+    assert allowed_completions(make_spec(), rationale=True) is None
 
 
 def test_trie_prefix_and_terminals():

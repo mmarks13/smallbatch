@@ -1,168 +1,236 @@
+# smallbatch
+
 <p align="center">
-  <img src="assets/smallbatch_banner.png" alt="smallbatch — distill once, own the function" width="100%">
+  <img src="https://raw.githubusercontent.com/mmarks13/smallbatch/main/assets/smallbatch_banner.png" alt="smallbatch — distill once, own the function" width="100%">
 </p>
 
-*Small-batch distillation: compile a frontier model's ability on one narrow
-task into a small model you own.*
+**Smallbatch distills prompt-driven LLM decisions into small, tested local
+functions that run on a CPU.**
 
-Lots of useful functions are fuzzy: *score this item 0–10 against a rubric*,
-*classify this ticket as urgent/normal/low*. A frontier model does these well
-from a prompt — so teams end up renting one forever for a task that never
-changes: every call costs money, takes seconds, hits rate limits, and sends
-your data to someone else's computer.
+Replace repeated LLM inference with a local CPU function you control, with
+clear evidence about the quality and operating tradeoffs.
 
-smallbatch turns that prompt into a function you own. It uses the big model
-**once**, as a teacher to label your real examples, then trains a small model
-that runs on almost any hardware (typically under 2B parameters) to do that
-one job. After that the function is yours: no per-call cost, no rate limits,
-no network dependency, your data stays local, milliseconds per call — and a
-fraction of the energy per call that frontier-model inference burns.
+Smallbatch is an alpha release. It measures **decision fidelity**: how closely
+a local function reproduces the supplied decisions on examples kept out of
+training. It does not establish that those decisions are correct or validate
+the prompt, imported decisions, or teacher behavior.
 
-The whole loop — spec → teacher-labeled data → small-model training → quality
-check → callable function — is open source and runs from one YAML file on
-your own machine. You choose the teacher (any `/chat/completions` endpoint,
-including a local Ollama model, or the Claude Code CLI). You choose the
-student — any open-weights model — and train it on whatever GPU you have,
-your own or a rented spot instance. No platform, no account, no production
-traffic required: just a spec and some example items.
+You provide a constrained decision prompt and representative inputs, either
+with existing decisions or with a callable LLM **teacher**: the larger model
+whose example decisions you approve and want the local function to reproduce.
+Smallbatch builds and compares CPU-runnable **candidates**, meaning alternative
+local implementations of those decisions. You explicitly select one or none.
 
-Outputs are deliberately constrained — an integer in a range or one label
-from a fixed list. That narrowness is the point: it's the regime where a
-small student genuinely matches its teacher, it makes quality measurable, and
-it keeps compiled functions squarely in "specialized classifier" territory
-(see [Responsible use](#responsible-use)).
+## When It Fits
+
+Use Smallbatch when the same constrained prompt is repeatedly producing a
+bounded integer, one choice from a fixed list (an enum), or a structured
+combination of those outputs, and the prompt, output meaning, and input
+distribution are stable enough to compile.
+
+Keep the original LLM call when the task is open-ended, the prompt changes
+frequently, examples are not representative, or a local function cannot
+express the output.
+
+## What It Builds
+
+You do not need to predict which local approach will work best. Configure the
+ones you want Smallbatch to try; it trains each candidate, runs each through
+the same CPU evaluation, and reports the quality and operating tradeoffs.
+
+| Approach | What it is | Why it might fit |
+|---|---|---|
+| **TF-IDF** (term frequency-inverse document frequency) | A conventional classifier driven mostly by which words and phrases appear in the input. | Usually the fastest and smallest option. It works well for literal wording patterns but may miss similar meanings expressed in different language. |
+| **SetFit** | A small model that learns useful sentence representations, often called embeddings, and trains a classifier on top of them. | A middle tier that can recognize semantic similarity without running a generative language model locally. |
+| **LoRA** (low-rank adaptation) | An efficient fine-tuning method that adapts a small foundation language model by training a relatively small set of additional weights, called an adapter. | The heaviest option, but potentially useful for subtler decisions. It takes more training resources and produces a larger, slower CPU function. |
+
+The options are a ladder, not a required progression. A TF-IDF candidate may
+be the best choice when it already reproduces the decisions well enough. See
+[How Smallbatch Works](docs/how-it-works.md) for the technical details.
 
 ## Install
 
 ```bash
-pip install smallbatch            # + [qlora] for 4-bit training of 3-9B bases
+pip install smallbatch
 ```
 
-Training needs a CUDA GPU — a few minutes on any card for the default-size
-student ([docs/local-gpu.md](docs/local-gpu.md)), or rent one per compile
-([docs/cloud.md](docs/cloud.md)). Match your torch build to your GPU — old
-and very new cards both need specific wheels ([details](docs/local-gpu.md)).
+The v0.2 package is intentionally a full installation containing all three
+training approaches. The final function wheel contains only the selected
+candidate's runtime dependencies and never depends on Smallbatch.
 
-## Quickstart
-
-A complete runnable example ships in
-[`examples/ticket-priority/`](examples/ticket-priority/) — a support-ticket
-priority classifier with 71 bundled synthetic tickets and a zero-API-key
-teacher config (local Ollama):
+## Workflow
 
 ```bash
-# 1. the teacher labels the items into a train/holdout dataset
-smallbatch label examples/ticket-priority/spec.yaml \
-    --items examples/ticket-priority/items.json
+smallbatch init classifier ticket-priority
 
-# 2. train + quality-check -> artifacts/ticket-priority/<date>/
-smallbatch compile examples/ticket-priority/spec.yaml
+# Inspect/edit the generated prompt, contract, teacher, and candidates.
+smallbatch doctor ticket-priority/spec.yaml \
+  --items ticket-priority/items.json
 
-# 3. call it
-smallbatch run ticket-priority --json '{"subject": "Site down", "body": "...", "product_area": "auth", "customer_tier": "pro"}'
-smallbatch status        # list compiled functions, quality verdicts, staleness
+# Imported decisions skip the teacher. Unlabeled inputs start with calibration.
+smallbatch label ticket-priority/spec.yaml \
+  --items ticket-priority/items.json
+
+# Build every configured candidate and evaluate each through its CPU runtime.
+smallbatch compile ticket-priority/spec.yaml
+
+# Review artifacts/ticket-priority/builds/<build>/report.md, then choose or stop.
+smallbatch select ticket-priority tfidf
+
+smallbatch run ticket-priority \
+  --json '{"title":"Production down","body":"All requests return 503"}'
 ```
 
-Or from Python:
+`compile` never chooses a candidate. `select` builds a **standalone package**:
+an inspectable source project and installable Python wheel that can run without
+Smallbatch. It evaluates that package on the complete held-out evaluation split
+(the examples not used for training or checkpoint selection) before updating
+the active selection.
 
 ```python
-import json, smallbatch
+from smallbatch_functions.ticket_priority import classify, classify_batch, metadata
 
-items = json.load(open("examples/ticket-priority/items.json"))
-smallbatch.label("examples/ticket-priority/spec.yaml", items)
-result = smallbatch.compile("examples/ticket-priority/spec.yaml")   # CompileResult
-fn = smallbatch.load_fn("ticket-priority")
-fn({"subject": "Site down", "body": "...", "product_area": "auth", "customer_tier": "pro"})
-# -> "urgent"
+priority = classify({"title": "Production down", "body": "All requests return 503"})
 ```
 
-## What you get
+The generated package does not import Smallbatch. A LoRA package still requires
+the recorded base model plus Torch, Transformers, and PEFT (the supporting
+parameter-efficient fine-tuning library) at runtime.
 
-- **A spec, not a script.** One diffable YAML file defines the function:
-  input fields, output contract, and the rubric the teacher labels by. The
-  spec (plus any files it references) is content-hashed, so a deployed
-  function knows when its definition has drifted.
-- **Honest quality verdicts.** Every compile is scored against held-out
-  teacher labels and against the untrained base model, and the artifact
-  records a pass/fail verdict; `load_fn` refuses failing adapters by default.
-  Decoding is constrained to the output contract, so the function can't
-  return garbage — only a right or wrong answer.
-  Exit codes are automation-friendly: **0** pass, **2** honest fail, **1**
-  error.
-- **Small artifacts, shared base.** Training uses LoRA adapters — each
-  compiled function is tens of MB layered on one frozen base model, so ten
-  functions don't cost ten models of disk or RAM.
-- **Runs anywhere once compiled.** `smallbatch export <fn>` merges and
-  quantizes the function into a single GGUF file (~230MB for the default
-  base) with an Ollama Modelfile and a llama.cpp grammar generated from the
-  output contract — CPU-only inference where invalid outputs are impossible
-  by construction, no Python required
-  ([details](docs/how-it-works.md#exporting-to-a-zero-pytorch-runtime)).
-- **A model picker built in.** `smallbatch sweep` runs a `(base model) ×
-  (technique)` grid, each cell in an isolated subprocess so one OOM can't
-  poison the rest, and writes a comparison table. Finding the smallest model
-  that clears your bar is a one-command experiment
-  ([details](docs/how-it-works.md#sweeps)).
+## Item Format
 
-## Does it work?
+Unlabeled JSONL records use one envelope:
 
-Results from the pilot task — relevance-scoring news items 0–10 against an
-editorial rubric, teacher = Claude Sonnet, n=22 real-item holdout:
+```json
+{"input":{"title":"Production down","body":"All requests return 503"}}
+```
 
-| student (base model) | agreement ±1 | zero-shot base |
-|---|---|---|
-| LFM2.5-1.2B-Instruct | **81.8%** | 4.6% |
-| MiniCPM5-1B | **81.8%** | 13.6% |
-| Qwen3-0.6B-Base (2m43s on an 11GB card) | 77.3% | 0.0% |
-| Qwen3.5-4B (4-bit, 12GB card) | 77.3% | 18.2% |
+To reuse existing production decisions, add `output` to every record:
 
-- The teacher's own self-agreement ceiling (relabeling the same items) was
-  97.3% — a student at 81.8% has closed most of the gap from a zero-shot
-  floor of ≤13.6%. **Compilation added +68–77 points of agreement.**
-- These runs sat just under a strict 85% bar on a small n=22 holdout (one
-  item ≈ 4.5 points) — the honest conclusion, recorded by the quality check
-  itself, was "accumulate a bigger real holdout," not "ship it."
-- Technique arms (DoRA, rationale distillation) never beat plain fine-tuning
-  on this task. Model-agnosticism held: four different architectures compiled
-  through the identical pipeline with zero code changes.
+```json
+{"input":{"title":"Production down","body":"All requests return 503"},"output":"urgent"}
+```
+
+Files must be entirely labeled or entirely unlabeled. Input fields are required
+and strictly typed as `string`, `integer`, `number`, or `boolean`.
+
+Candidate failures are isolated. A build succeeds when at least one candidate
+fully trains and completes CPU evaluation; unavailable or failed candidates
+remain visible in the report.
+
+## Evidence
+
+Every completed candidate is run over the same held-out evaluation decisions on
+CPU. Reports include:
+
+- Exact and within-one behavior, mean absolute error (MAE), error distribution,
+  p90/max error, signed error, and correlations for bounded integers.
+- Decision agreement, class-averaged and frequency-weighted F1 scores,
+  balanced accuracy, per-class behavior, worst-class recall, and confusion for
+  enums.
+- Joint and per-field results for structured outputs.
+- Cold load, median/tail (p50/p95) single-item latency, peak resident memory
+  (RSS), candidate-owned bytes, required shared/base bytes, runtime
+  dependencies, CPU, OS, and thread count.
+- A train-fitted constant diagnostic and one zero-shot diagnostic, using the
+  unadapted base model, per LoRA base.
+
+Smallbatch may report observed strict dominance, but it never declares a winner
+or PASS/FAIL. Comparing candidates on one evaluation split introduces selection
+bias; v0.2 reports that limitation and does not claim independent confirmation.
+CPU time, memory, and footprint are operating proxies, not energy measurements.
+
+## Case Study
+
+Assign a 0-4 review priority to public CFPB consumer complaints. A
+self-hosted open-weights teacher (`gpt-oss-120b`) labeled 600 frozen inputs;
+Smallbatch trained five local functions on 420 of its decisions and evaluated
+all of them, on the same machine, against the same 120 held-out decisions.
+
+One thing to know before reading the table: the teacher itself is not
+deterministic evidence. Re-labeling the same 120 evaluation rows with the
+shipped rubric (shuffled order, temperature 0), it repeated its own decision
+only 82% of the time — that's the ceiling any student can reliably reach, so
+the table below includes the teacher as a reference row rather than an
+implied 100%.
+
+| | exact agreement | mean error (0-4 scale) | p50 latency | ships as |
+|---|---:|---:|---:|---:|
+| **teacher vs. itself (ceiling)** | **82%** | **0.22** | GPU only | 65 GB |
+| TF-IDF | 54% | 0.60 | 1.2 ms | 27 MB |
+| SetFit (bge-small, 33M) | 57% | 0.55 | 42 ms | 135 MB |
+| LoRA (Qwen3-0.6B) | 63% | 0.45 | 0.8 s | 1.6 GB |
+| LoRA (Qwen3-1.7B) | 64% | 0.43 | 1.9 s | 4.1 GB |
+| LoRA (Qwen3-4B) | 69% | 0.38 | 4.3 s | 8.1 GB |
+
+Consistency numbers are in
+[`teacher_consistency.json`](case-study/cfpb-complaint-priority/results/teacher_consistency.json);
+raw candidate metrics with confidence intervals are in
+[`results.json`](case-study/cfpb-complaint-priority/results/results.json).
+
+The trained functions never see the prompt's rubric — the teacher's
+decisions moved it into their weights. Prompting the same base models with
+the full rubric instead, on the same evaluation rows:
+
+<table>
+<thead>
+<tr><th>base model</th><th colspan="2">rubric in the prompt, no training</th><th colspan="2">trained on 420 decisions, no rubric</th></tr>
+<tr><th></th><th>exact</th><th>p50</th><th>exact</th><th>p50</th></tr>
+</thead>
+<tbody>
+<tr><td>Qwen3-0.6B</td><td>18%</td><td>3.9 s</td><td><strong>63%</strong></td><td><strong>0.8 s</strong></td></tr>
+<tr><td>Qwen3-1.7B</td><td>3%</td><td>7.2 s</td><td><strong>64%</strong></td><td><strong>1.9 s</strong></td></tr>
+<tr><td>Qwen3-4B</td><td>48%</td><td>16.5 s</td><td><strong>69%</strong></td><td><strong>4.3 s</strong></td></tr>
+</tbody>
+</table>
+
+No winner is declared — which row is worth its latency depends on the
+workload, and agreement measures fidelity to the teacher's decisions, not
+correctness. What the tables do show: 420 teacher decisions moved more of the
+rubric into each model's weights than the rubric itself could carry in a
+prompt, and the resulting functions run in milliseconds to seconds on a CPU.
+Protocol, evidence, and the honest caveats:
+[case-study/cfpb-complaint-priority](case-study/cfpb-complaint-priority/README.md).
 
 ## Responsible use
 
-smallbatch trains on teacher outputs, so **your teacher provider's terms
-govern what you may build**. Constrained scorers/classifiers like these fit
-the "specialized, non-competing tool" category that major providers expressly
-allow (e.g. content categorization, sentiment, extraction) — but general
-chatbots or open-ended generators trained on provider outputs are prohibited,
-and some providers require prior authorization for any training use. Using a
-self-hosted open-weights teacher (Ollama/vLLM) sidesteps the question for
-labeling. Read [docs/responsible-use.md](docs/responsible-use.md) before
-pointing a hosted teacher at a dataset.
+Smallbatch trains candidate functions on teacher outputs, so **your teacher
+provider's terms govern what you may build**. Constrained classifiers and
+scorers like these fit the "specialized, non-competing tool" category that
+major providers expressly allow (e.g. content categorization, sentiment) —
+but general chatbots or open-ended generators trained on provider outputs are
+prohibited, and some providers restrict distribution of models trained on
+their outputs. Using a self-hosted open-weights teacher (Ollama/vLLM)
+sidesteps the question for labeling. Read
+[docs/responsible-use.md](docs/responsible-use.md) before pointing a hosted
+teacher at a dataset.
 
-Note also that an adapter inherits its **base model's** license — the default
-student (`LiquidAI/LFM2.5-350M-Base`) ships under the LFM Open License, which
-conditions commercial use above $10M annual revenue; swap the base in one
-YAML line if that matters for you.
+A LoRA adapter remains subject to its **base model's** license. The default
+LoRA student (`ibm-granite/granite-4.0-350m`) is Apache-2.0. The selected
+function's prompt, contract, generated source, and trained state ship in its
+standalone package — review them like code before sharing.
 
-## Docs
+## Commands
 
-| | |
+| Command | Purpose |
 |---|---|
-| [docs/how-it-works.md](docs/how-it-works.md) | Pipeline, spec reference, teacher protocol, training/eval design, artifacts, the Program-as-Weights lineage. |
-| [docs/local-gpu.md](docs/local-gpu.md) | Running on your own GPU: precision auto-select, VRAM sizing, old-GPU (Pascal) pins, OOM knobs. |
-| [docs/cloud.md](docs/cloud.md) | Renting a GPU per compile with SkyPilot; the label-locally/compile-remotely split. |
-| [docs/responsible-use.md](docs/responsible-use.md) | Provider-terms guidance for choosing a teacher. |
-| [examples/ticket-priority/](examples/ticket-priority/) | Complete runnable example. |
-| [ROADMAP.md](ROADMAP.md) | Where this is headed (GGUF export, constrained decoding, drift detection) — and what's deliberately out of scope. |
+| `smallbatch init` | Generate a prompt-first starter project. |
+| `smallbatch doctor` | Validate the contract, data mode, teacher, candidates, and environment. |
+| `smallbatch label` | Import complete decisions or generate them after teacher calibration. |
+| `smallbatch compile` | Train, CPU-evaluate, and compare every configured candidate. |
+| `smallbatch select` | Package and activate one candidate, or clear the active selection. |
+| `smallbatch run` | Call the active function or an explicit build/candidate. |
+| `smallbatch status` | Show builds, failures, integrity, drift, and active selection. |
 
 ## Development
 
 ```bash
-uv venv && source .venv/bin/activate
-uv pip install -e .[dev]
-pytest -q          # CPU-only; no GPU or network needed
+pip install -e '.[dev]'
+pytest -q
+ruff check src tests case-study
+python -m build
 ```
 
-MIT licensed. Inspired by
-[Program-as-Weights (arXiv:2607.02512)](https://arxiv.org/abs/2607.02512) —
-see [docs/how-it-works.md](docs/how-it-works.md#relationship-to-program-as-weights)
-for what smallbatch borrows and what it deliberately doesn't.
+See [docs/how-it-works.md](docs/how-it-works.md) for identities and artifacts,
+[docs/responsible-use.md](docs/responsible-use.md) for decision limitations,
+and [docs/cloud.md](docs/cloud.md) for compiling on a rented GPU.

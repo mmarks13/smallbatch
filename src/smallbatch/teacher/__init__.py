@@ -16,6 +16,10 @@ def make_teacher(cfg: TeacherSpec) -> Teacher:
         from .claude_cli import ClaudeCLITeacher
 
         return ClaudeCLITeacher(model=cfg.model)
+    if cfg.backend == "codex-cli":
+        from .codex_cli import CodexCLITeacher
+
+        return CodexCLITeacher(model=cfg.model, reasoning_effort=cfg.reasoning_effort)
     if cfg.backend == "openai-compatible":
         from .openai_compat import OpenAICompatTeacher
 

@@ -1,22 +1,19 @@
-"""smallbatch — compile a frontier model's ability on one narrow task into a
-small local model (spec -> teacher-labeled data -> LoRA adapter -> local fn)."""
+"""Distill prompt-driven LLM decisions into tested local CPU functions."""
 
-from .api import CompileResult, LabelResult, compile, label
-from .export import ExportResult, export
-from .hub import push
+from .api import CompileResult, LabelResult, SelectionResult, label, select
+from .api import compile as compile  # noqa: A004 - deliberate product verb
 from .runtime import load_fn
 from .spec import load_spec
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "label",
     "compile",
-    "export",
-    "push",
+    "select",
     "load_fn",
     "load_spec",
     "LabelResult",
     "CompileResult",
-    "ExportResult",
+    "SelectionResult",
     "__version__",
 ]

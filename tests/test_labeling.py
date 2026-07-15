@@ -1,80 +1,208 @@
 import json
+import re
 
-from smallbatch.labeling import build_dataset, plan_variant_bands, split_holdout
-from smallbatch.spec import FunctionSpec
+import pytest
 
-SPEC = FunctionSpec(
-    name="toy",
-    description="Score.",
-    input_schema={"title": "str"},
-    output={"type": "int", "range": [0, 4]},
-    rubric="-",
-    teacher={
-        "backend": "claude-cli",
-        "model": "sonnet",
-        "examples": 40,
-        "holdout": 0.2,
-        "batch_size": 50,
-    },
+from conftest import imported_records, make_spec
+from smallbatch.labeling import (
+    build_dataset,
+    dataset_hash,
+    normalize_item_records,
+    read_jsonl,
+    row_id,
 )
 
 
-def rows(scores, origin="real"):
-    return [
-        {"input": {"title": f"t{i}"}, "score": s, "reason": "", "origin": origin}
-        for i, s in enumerate(scores)
-    ]
-
-
-def test_plan_targets_sparse_bands():
-    real = rows([2] * 20 + [3] * 10)
-    plan = plan_variant_bands(SPEC, real, target_total=40)
-    assert sum(plan.values()) in range(9, 12)  # ~10 needed, rounding tolerated
-    assert 2 not in plan  # already over uniform target
-    assert plan.get(0) and plan.get(4)  # empty bands get coverage
-
-
-def test_holdout_real_only_and_stratified():
-    data = rows([0] * 10 + [4] * 10) + rows([2] * 30, origin="variant")
-    train, holdout = split_holdout(data, frac=0.2)
-    assert all(r["origin"] == "real" for r in holdout)
-    assert len(holdout) == 4 and {r["score"] for r in holdout} == {0, 4}
-    assert len(train) + len(holdout) == 50
-
-
 class FakeTeacher:
-    """Labels everything score=1; generates items named v<i>."""
-
-    def __init__(self):
-        self.calls = 0
-
-    def complete(self, prompt: str) -> str:
-        self.calls += 1
-        if "data labeler" in prompt:
-            items = json.loads(prompt[prompt.index("[") :][: self._arr_len(prompt)])
-            return json.dumps([{"id": it["id"], "score": 1, "reason": "r"} for it in items])
-        return json.dumps([{"title": f"v{i}"} for i in range(5)])
-
-    @staticmethod
-    def _arr_len(prompt):
-        text = prompt[prompt.index("[") :]
-        depth = 0
-        for i, c in enumerate(text):
-            depth += c == "["
-            depth -= c == "]"
-            if depth == 0:
-                return i + 1
-        raise ValueError
+    def complete(self, prompt):
+        count = len(re.findall(r'"id":\s*\d+', prompt.split("Reply with", 1)[0]))
+        return json.dumps(
+            [
+                {"id": index, "output": "urgent" if index % 2 else "normal", "reason": "test"}
+                for index in range(count)
+            ]
+        )
 
 
-def test_build_dataset_end_to_end(tmp_path):
-    teacher = FakeTeacher()
-    items = [{"title": f"real{i}"} for i in range(10)]
-    meta = build_dataset(teacher, SPEC, items, tmp_path)
-    assert meta["real"] == 10
-    assert meta["variants"] > 0
-    assert (tmp_path / "train.jsonl").exists() and (tmp_path / "holdout.jsonl").exists()
-    labeled = (tmp_path / "labeled.jsonl").read_text().splitlines()
-    assert len(labeled) == meta["real"] + meta["variants"]
-    first = json.loads(labeled[0])
-    assert first["teacher_model"] and first["origin"] == "real"
+class AugmentationTeacher:
+    def __init__(self, crash_on_label=False):
+        self.crash_on_label = crash_on_label
+        self.generation_calls = 0
+
+    def complete(self, prompt):
+        if prompt.startswith("Generate realistic"):
+            self.generation_calls += 1
+            return json.dumps(
+                [
+                    {
+                        "title": f"generated {self.generation_calls}",
+                        "body": "production outage",
+                    }
+                ]
+            )
+        if self.crash_on_label:
+            raise KeyboardInterrupt
+        count = len(re.findall(r'"id":\s*\d+', prompt.split("Reply with", 1)[0]))
+        return json.dumps(
+            [
+                {"id": index, "output": "urgent", "reason": "test"}
+                for index in range(count)
+            ]
+        )
+
+
+def test_one_envelope_and_all_or_none_decisions():
+    spec = make_spec()
+    inputs, outputs = normalize_item_records(spec, imported_records(2))
+    assert len(inputs) == 2 and outputs == ["normal", "urgent"]
+    with pytest.raises(ValueError, match="cannot mix"):
+        normalize_item_records(
+            spec,
+            [imported_records(1)[0], {"input": {"title": "x", "body": "y"}}],
+        )
+    with pytest.raises(ValueError, match="must use"):
+        normalize_item_records(spec, [{"title": "flat", "body": "record"}])
+
+
+def test_imported_decisions_split_and_metadata(tmp_path):
+    spec = make_spec()
+    meta = build_dataset(spec, imported_records(30), tmp_path)
+    assert meta["decision_source"] == "imported"
+    assert meta["counts"] == {"train": 21, "dev": 3, "eval": 6}
+    assert meta["teacher"] is None
+    rows = read_jsonl(tmp_path / "labeled.jsonl")
+    assert len(rows) == 30
+    assert dataset_hash(rows) == meta["dataset_hash"]
+    assert all(set(row) >= {"id", "input", "output", "origin", "split"} for row in rows)
+
+
+def test_teacher_decisions_use_same_dataset_shape(tmp_path, capsys):
+    spec = make_spec(teacher={"backend": "codex-cli", "model": "test"})
+    records = [{"input": record["input"]} for record in imported_records(20)]
+    meta = build_dataset(spec, records, tmp_path, teacher=FakeTeacher())
+    assert meta["decision_source"] == "teacher"
+    assert meta["counts"] == {"train": 14, "dev": 2, "eval": 4}
+    progress = capsys.readouterr().err
+    assert "teacher real batch=1/1 rows=20 attempt=1/2" in progress
+    assert "teacher real complete rows=20" in progress
+
+
+def test_append_keeps_existing_evaluation_membership(tmp_path):
+    spec = make_spec()
+    build_dataset(spec, imported_records(30), tmp_path)
+    before = {row["id"] for row in read_jsonl(tmp_path / "eval.jsonl")}
+    records = imported_records(30)
+    records.extend(
+        {
+            "input": {"title": f"new {index}", "body": "routine question account"},
+            "output": "normal",
+        }
+        for index in range(10)
+    )
+    build_dataset(spec, records, tmp_path, append=True)
+    after = {row["id"] for row in read_jsonl(tmp_path / "eval.jsonl")}
+    assert before <= after
+
+
+def test_calibration_ids_can_be_forced_to_train(tmp_path):
+    spec = make_spec()
+    records = imported_records(30)
+    forced = {row_id(record["input"]) for record in records[:10]}
+    build_dataset(spec, records, tmp_path, force_train_ids=forced)
+    train = {row["id"] for row in read_jsonl(tmp_path / "train.jsonl")}
+    assert forced <= train
+
+
+def test_completed_augmentation_generation_replays_after_labeling_crash(tmp_path):
+    spec = make_spec(
+        teacher={"backend": "codex-cli", "model": "test"},
+        augmentation={"paraphrase": {"cap": 2}},
+    )
+    with pytest.raises(KeyboardInterrupt):
+        build_dataset(
+            spec,
+            imported_records(30),
+            tmp_path,
+            teacher=AugmentationTeacher(crash_on_label=True),
+            max_variants=2,
+        )
+
+    resumed = AugmentationTeacher()
+    meta = build_dataset(
+        spec,
+        imported_records(30),
+        tmp_path,
+        teacher=resumed,
+        max_variants=2,
+    )
+    assert resumed.generation_calls == 0
+    assert meta["variants"] == 2
+
+
+def test_split_gives_every_split_a_proportional_share_of_rare_classes(tmp_path):
+    """A skewed distribution must not concentrate rare decisions in eval:
+    slicing the class-interleaved head starved dev (breaking early stopping)
+    and train (hiding classes from candidates) in the CFPB case study."""
+    spec = make_spec(output={"type": "int", "range": [0, 4]})
+    records = []
+    for index in range(300):
+        # skewed like real data: two dominant classes, three rare ones
+        output = [0, 4, 1, 2, 3][index % 5] if index < 45 else (2 if index % 2 else 3)
+        records.append(
+            {
+                "input": {"title": f"case {index}", "body": f"details {index}"},
+                "output": output,
+            }
+        )
+    meta = build_dataset(spec, records, tmp_path)
+    assert meta["counts"] == {"train": 210, "dev": 30, "eval": 60}
+    histograms = meta["split_label_histograms"]
+    totals = {}
+    for histogram in histograms.values():
+        for label, count in histogram.items():
+            totals[label] = totals.get(label, 0) + count
+    for label, total in totals.items():
+        eval_share = histograms["eval"].get(label, 0) / total
+        train_share = histograms["train"].get(label, 0) / total
+        assert 0.1 <= eval_share <= 0.4, f"label {label} eval share {eval_share}"
+        assert train_share >= 0.5, f"label {label} train share {train_share}"
+        if total >= 9:
+            assert histograms["dev"].get(label, 0) >= 1, f"label {label} absent from dev"
+
+
+class DropLastTeacher(AugmentationTeacher):
+    """Labels every row in a batch except the last one, on every attempt."""
+
+    def complete(self, prompt):
+        if prompt.startswith("Generate realistic"):
+            return super().complete(prompt)
+        count = len(re.findall(r'"id":\s*\d+', prompt.split("Reply with", 1)[0]))
+        return json.dumps(
+            [
+                {"id": index, "output": "urgent", "reason": "test"}
+                for index in range(count - 1)
+            ]
+        )
+
+
+def test_augmentation_drops_unlabelable_variants_instead_of_aborting(tmp_path, capsys):
+    spec = make_spec(
+        teacher={"backend": "codex-cli", "model": "test"},
+        augmentation={"paraphrase": {"cap": 2}},
+    )
+    meta = build_dataset(
+        spec,
+        imported_records(30),
+        tmp_path,
+        teacher=DropLastTeacher(),
+        max_variants=2,
+    )
+    assert meta["variants"] == 1
+    assert "teacher paraphrase dropped 1 of 2 rows" in capsys.readouterr().err
+
+
+def test_real_decisions_stay_all_or_nothing(tmp_path):
+    spec = make_spec(teacher={"backend": "codex-cli", "model": "test"})
+    records = [{"input": record["input"]} for record in imported_records(4)]
+    with pytest.raises(ValueError, match="failed to return valid decisions"):
+        build_dataset(spec, records, tmp_path, teacher=DropLastTeacher())

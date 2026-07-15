@@ -1,86 +1,156 @@
-# CLAUDE.md
+# Smallbatch Contributor Guide
 
-smallbatch compiles a fuzzy function (score/classify per a rubric) into a
-small local model: YAML spec → teacher labels → fine-tune a small base →
-eval gate against the teacher's holdout → callable local function.
+## Product Contract
 
-If a `CLAUDE.local.md` exists in this checkout, it describes THIS machine's
-hardware constraints — read it before running any training command; it
-overrides the general guidance here.
+This is the authoritative, exact product contract. `README.md` is its concise
+public-facing expression. Product and implementation decisions must remain
+consistent with this section.
 
-## Which doc answers what
+### Tagline
 
-| You need to... | Read |
-|---|---|
-| Understand the pipeline, spec fields, gate semantics, artifacts | `docs/how-it-works.md` |
-| Run a compile on a local GPU (precision, VRAM, old-GPU pins, OOM knobs) | `docs/local-gpu.md` |
-| Run a compile on a rented cloud GPU | `docs/cloud.md` |
-| Judge whether a teacher provider may be used | `docs/responsible-use.md` |
-| See a complete working spec + walkthrough | `examples/ticket-priority/README.md` |
+**Smallbatch distills prompt-driven LLM decisions into small, tested local
+functions that run on a CPU.**
+
+### Value Proposition
+
+**Replace repeated LLM inference with a local CPU function you control, with
+clear evidence about the quality and operating tradeoffs.**
+
+### Contract
+
+**You provide:** A constrained decision prompt and representative inputs,
+either with existing decisions or with a callable LLM teacher whose behavior
+you approve on a sample.
+
+**Smallbatch provides:** CPU-runnable candidates compared on decision
+agreement, error profile, speed, resource use, and portability. You select one
+or none; Smallbatch packages your selection as a shareable Python function
+that does not require Smallbatch at runtime.
+
+**Smallbatch does not:** Validate whether the prompt, imported decisions, or
+teacher behavior is correct.
+
+### Suitability
+
+Smallbatch is for repeated decisions whose prompt, output meaning, and input
+distribution remain consistent long enough to justify compilation.
+
+### Feature Test
+
+A feature belongs in Smallbatch only when it directly helps a user:
+
+1. Define a constrained prompt-driven decision.
+2. Obtain decisions from an approved teacher or reuse existing decisions.
+3. Build and compare CPU-runnable candidates.
+4. Understand behavioral and operating tradeoffs.
+5. Explicitly select one candidate or none.
+6. Package and run the selected local function.
+
+### Explicit Non-Goals
+
+- Gold-label or ground-truth infrastructure.
+- Rubric, policy, prompt, or teacher correctness validation.
+- General-purpose data annotation.
+- Universal acceptance gates or automatic winners.
+- Open-ended text generation.
+- GPU-only runtime artifacts.
+- A general AutoML, experiment-tracking, serving, or deployment platform.
+
+## Product Flow
+
+```text
+prompt + typed inputs
+  -> imported decisions OR calibrated teacher decisions
+  -> deterministic train/dev/eval data
+  -> TF-IDF + SetFit + LoRA candidates
+  -> full CPU evaluation and operating profiles
+  -> user selects one or none
+  -> standalone source package + wheel
+```
+
+The evaluation reference is a supplied decision, not ground truth. There are
+no gold labels, acceptance gates, PASS/FAIL verdicts, or automatic winners.
 
 ## Commands
 
 ```bash
-pytest -q                                   # unit tests: CPU-only, no network, <1s
-smallbatch label <spec> --items items.json  # teacher-label a dataset (network, no GPU)
-smallbatch compile <spec>                   # train + eval + gate (GPU, minutes)
-smallbatch sweep <sweep.yaml>               # grid of model x arm compiles (GPU, long)
-smallbatch run <fn> --json '{...}'          # call a compiled function (GPU/CPU)
-smallbatch export <fn>                      # merged+quantized GGUF + grammar + Modelfile
-                                            #   (needs LLAMA_CPP_DIR + `pip install gguf`)
-smallbatch push <fn> --repo you/name        # upload artifact to HF Hub (private default;
-                                            #   NEVER run without the user asking)
-smallbatch status                           # list artifacts, gates, staleness (instant)
+smallbatch init <classifier|scorer|structured> <name>
+smallbatch doctor <spec> [--items items.json]
+smallbatch label <spec> --items items.json [--append] [--skip-calibration]
+smallbatch compile <spec> [--cpu-threads N]
+smallbatch select <function> <candidate> [--version BUILD]
+smallbatch select <function> --clear
+smallbatch run <function> --json '{...}'
+smallbatch run <function> --version BUILD --candidate ID --json '{...}'
+smallbatch status
 ```
 
-Python API mirrors the CLI: `smallbatch.label(...)`, `smallbatch.compile(...)`,
-`smallbatch.load_fn(...)` (see `src/smallbatch/api.py`).
+Compile exits `0` when at least one candidate completes and `1` on operational
+failure. It never selects. Selection packages and validates the standalone
+runtime before atomically changing `active.json`.
 
-## Exit codes (load-bearing — sweeps and CI depend on them)
+## Module Ownership
 
-`smallbatch compile` returns **0** = gate PASS, **2** = honest gate FAIL (the
-adapter trained fine but didn't clear the bar), **1** = real error. The sweep
-runner treats 0/2 as honest results and records anything else as an error,
-continuing. Never "fix" a 2 by weakening the gate.
+- `spec.py`: prompt-first schema, strict input/output validation, identities.
+- `labeling.py`, `calibration.py`, `journal.py`: decision acquisition and data.
+- `candidates.py`, `setfit_candidate.py`, `training.py`: candidate training.
+- `evaluate.py`, `metrics.py`, `profiling.py`, `report.py`: evidence.
+- `artifacts.py`, `runtime.py`: immutable builds and internal candidate loading.
+- `standalone.py`, `standalone_templates/`: generated no-Smallbatch packages.
+- `api.py`, `cli.py`, `doctor.py`, `init_cmd.py`: public orchestration.
+- `teacher/`: callable LLM backends; keep provider imports lazy.
 
-## Module map
+## Invariants
 
-Torch-free (import-cheap, unit-tested on CPU): `spec.py` (pydantic
-`FunctionSpec`/`TrainSpec`, `extra="forbid"` so typos fail loudly; the
-`teacher` block is required, no defaults), `artifacts.py` (versioned dirs +
-manifests), `sweep.py` (grid math + orchestration), `hardware.py` (precision
-auto-select), `prompts.py`, `labeling.py`, `cli.py`, `api.py` (public
-`label`/`compile`; heavy imports live *inside* the functions — keep them
-lazy so `label`/`status`/`sweep` never import torch).
+1. Specs, items, datasets, manifests, and old artifacts fail closed across the
+   v0.2 schema break. Do not restore legacy aliases.
+2. A file contains either imported decisions for every item or no decisions.
+3. Calibration never edits decisions; it approves, declines, or reviews more.
+4. Evaluation rows remain sticky on append and never feed training or
+   augmentation.
+5. Candidate and diagnostic errors are recorded and isolated. One failed stage
+   must not discard completed work.
+6. Every selectable candidate has completed full CPU evaluation.
+7. Build manifests are immutable evidence. Selection is a separate atomic
+   pointer and history.
+   Re-running a completed build that contains candidate or diagnostic errors
+   creates a new retry revision, reuses completed work, and never repairs the
+   prior build in place.
+8. Generated wheels must not import or depend on `smallbatch` and must reproduce
+   the evaluated candidate or disclose and explicitly accept package drift.
+9. Public evidence contains no inputs, rationales, or raw disagreements.
+10. CPU time, memory, and bytes are proxies; never describe them as measured
+    energy use.
 
-Torch-heavy (imported only when a compile actually runs): `training.py`
-(LoRA/qlora fine-tune), `evaluate.py` (holdout scoring + gate), `runtime.py`
-(loading a compiled adapter for `run`), `export.py`'s merge step (grammar and
-Modelfile generation are torch-free and unit-tested). `teacher/` holds the
-two labeling backends (claude-cli subprocess, openai-compatible stdlib HTTP).
+## Artifact Layout
 
-**Subprocess isolation invariant:** `sweep.py` runs each cell as its own
-`smallbatch compile` process. This is deliberate — it guarantees VRAM is
-released between runs and isolates crashes/OOMs. Do not in-process the loop.
+```text
+data/<function>/
+  train.jsonl dev.jsonl eval.jsonl labeled.jsonl meta.json calibration.json
+  journal/
 
-## Artifact layout
-
+artifacts/<function>/
+  builds/<build-id>/
+    spec.yaml manifest.json build_state.json report.json report.md
+    report_details.local.json evaluation.local.jsonl candidates/<candidate>/
+  packages/<build-id>--<candidate>/
+    source/ dist/*.whl package.json
+  active.json selection-history.jsonl
 ```
-artifacts/<fn>/<date>[-rN]/          # a normal `compile` version
-artifacts/<fn>/<sweep>/<tag>/        # a sweep run (never the deployed version)
-artifacts/<fn>/<sweep>/results.json  # + summary.md, written by the sweep
-data/<fn>/                           # labeled train/holdout JSONL (gitignored)
+
+Files suffixed `.local` never enter standalone packages.
+
+## Verification
+
+```bash
+pytest -q
+ruff check src tests case-study
+python -m build
 ```
 
-`versions()`/`latest()` only look one level under `<fn>`, so sweep runs never
-get deployed by `smallbatch run`. Manifests carry `spec_hash` (spec + all
-`spec_files` contents) for staleness detection.
+CPU-only, offline unit tests are the default. Real SetFit and LoRA release
+checks use cached models; do not make the normal test suite download models or
+call a teacher.
 
-## Conventions
-
-- Defaults must stay generic: no personal paths, no machine-specific pins in
-  tracked files (that's what `CLAUDE.local.md`/`local/` are for — both
-  gitignored).
-- The default base model is `LiquidAI/LFM2.5-350M-Base`; docs note that
-  adapters inherit the base model's license.
-- `pytest -q` must pass on CPU with no network before any commit.
+The repository may be dirty. Preserve user changes and work with compatible
+in-progress edits rather than reverting them.

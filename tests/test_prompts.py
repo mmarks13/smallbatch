@@ -1,58 +1,40 @@
-import textwrap
-
+from conftest import make_spec
 from smallbatch import prompts
-from smallbatch.spec import FunctionSpec
-
-SPEC = FunctionSpec(
-    name="toy",
-    description="Score a thing.",
-    input_schema={"title": "str", "tags": "list[str]"},
-    output={"type": "int", "range": [0, 10]},
-    rubric="10 great, 0 junk",
-    teacher={"backend": "claude-cli", "model": "sonnet"},
-)
-
-ENUM_SPEC = FunctionSpec(
-    name="kind",
-    description="Classify.",
-    input_schema={"title": "str"},
-    output={"type": "enum", "labels": ["paper", "release", "drama"]},
-    rubric="-",
-    teacher={"backend": "claude-cli", "model": "sonnet"},
-)
 
 
-def test_render_input_order_and_lists():
-    text = prompts.render_input({"tags": ["a", "b"], "title": "T"}, SPEC.input_schema)
-    assert text == "title: T\ntags: a, b"
+def test_prompt_is_visible_only_to_teacher_and_zeroshot():
+    spec = make_spec(prompt="PRIVATE DECISION INSTRUCTIONS")
+    item = {"title": "x", "body": "y"}
+    assert "PRIVATE" in prompts.teacher_label_prompt(spec, [item])
+    assert "PRIVATE" in prompts.zeroshot_prompt(spec, item)
+    assert "PRIVATE" not in prompts.student_prompt(spec, item)
 
 
-def test_student_prompt_excludes_rubric():
-    p = prompts.student_prompt(SPEC, {"title": "T", "tags": []})
-    assert "junk" not in p and p.endswith("output:")
-
-
-def test_parse_int_variants():
-    assert prompts.parse_output(SPEC, " 7") == 7
-    assert prompts.parse_output(SPEC, "reason: has 3 caveats\nscore: 9") == 9
-    assert prompts.parse_output(SPEC, "Score: 10") == 10
-    assert prompts.parse_output(SPEC, "42") is None  # out of range
-    assert prompts.parse_output(SPEC, "no number") is None
-
-
-def test_parse_enum():
-    assert prompts.parse_output(ENUM_SPEC, " release\n") == "release"
-    assert prompts.parse_output(ENUM_SPEC, "This is a Paper about X") == "paper"
-    assert prompts.parse_output(ENUM_SPEC, "dunno") is None
-
-
-def test_extract_json_with_fences():
-    fenced = textwrap.dedent(
-        """
-        Here you go:
-        ```json
-        [{"id": 0, "score": 5, "reason": "meh"}]
-        ```
-        """
+def test_canonical_input_serialization_preserves_order_and_types():
+    spec = make_spec(input_schema={"enabled": "boolean", "count": "integer", "text": "string"})
+    text = prompts.render_input(
+        {"enabled": True, "count": 2, "text": "hello"}, spec.input_schema
     )
-    assert prompts.extract_json(fenced) == [{"id": 0, "score": 5, "reason": "meh"}]
+    assert text == 'enabled: true\ncount: 2\ntext: "hello"'
+
+
+def test_scalar_and_structured_parsing_and_completions():
+    integer = make_spec(output={"type": "int", "range": [0, 2]})
+    assert prompts.parse_output(integer, "score: 2") == 2
+    assert prompts.parse_output(integer, "9") is None
+    assert prompts.allowed_completions(integer) == [" 0", " 1", " 2"]
+    overlapping = make_spec(output={"type": "enum", "labels": ["no", "normal"]})
+    assert prompts.parse_output(overlapping, " normal") == "normal"
+    assert prompts.parse_output(overlapping, "reason: no outage\nscore: normal") == "normal"
+    structured = make_spec(
+        output={"priority": {"labels": ["high", "low"]}, "score": {"range": [0, 2]}}
+    )
+    assert prompts.parse_output(structured, "priority: high\nscore: 1") == {
+        "priority": "high",
+        "score": 1,
+    }
+    assert prompts.incomplete_fields(structured, {"priority": "high", "score": None}) == ["score"]
+
+
+def test_extract_json_accepts_fences():
+    assert prompts.extract_json('```json\n[{"id": 0}]\n```') == [{"id": 0}]

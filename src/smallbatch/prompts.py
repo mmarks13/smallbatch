@@ -1,160 +1,220 @@
-"""Prompt rendering and output parsing.
-
-Two prompt families:
-- student prompts are minimal (input only): the spec is compiled INTO the
-  adapter weights, PAW-style, so inference never re-sends the rubric.
-- teacher/zero-shot prompts carry the full spec text, since those models have
-  no adapter to lean on.
-"""
+"""Canonical input serialization, teacher prompts, and constrained parsing."""
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
-from typing import Any, Optional
+from typing import Any
 
-from .spec import FunctionSpec
+from .spec import SCALAR_FIELD, FunctionSpec
 
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
+_MAX_COMPLETIONS = 5000
 
 
 def render_input(item: dict[str, Any], input_schema: dict[str, str]) -> str:
-    lines = []
-    for field in input_schema:
-        v = item.get(field, "")
-        if isinstance(v, (list, tuple)):
-            v = ", ".join(str(x) for x in v)
-        lines.append(f"{field}: {v}")
-    return "\n".join(lines)
+    """Stable text seen by every candidate, in declared field order."""
+    return "\n".join(
+        f"{name}: {json.dumps(item[name], ensure_ascii=False)}" for name in input_schema
+    )
 
 
 def student_prompt(spec: FunctionSpec, item: dict[str, Any]) -> str:
     return f"[{spec.name}]\n{render_input(item, spec.input_schema)}\noutput:"
 
 
-def student_completion(spec: FunctionSpec, score: Any, reason: str = "") -> str:
-    if spec.train.rationale_distillation and reason:
-        return f" reason: {reason}\nscore: {score}"
-    return f" {score}"
+def student_completion(
+    spec: FunctionSpec, output: Any, reason: str = "", rationale: bool = False
+) -> str:
+    if spec.output.is_scalar:
+        if rationale and reason:
+            return f" reason: {reason}\nscore: {output}"
+        return f" {output}"
+    lines = "\n".join(f"{name}: {output[name]}" for name in spec.output.fields)
+    if rationale and reason:
+        return f" rationale: {reason}\n{lines}"
+    return f" {lines}"
 
 
-def allowed_completions(spec: FunctionSpec) -> Optional[list[str]]:
-    """Every completion the student may legally emit (see student_completion),
-    for constrained decoding. None in rationale mode: the free-text reason
-    can't be enumerated, so that path decodes unconstrained and relies on
-    parse_output."""
-    if spec.train.rationale_distillation:
+def allowed_completions(spec: FunctionSpec, rationale: bool = False) -> list[str] | None:
+    if rationale:
         return None
-    if spec.output.type == "int":
-        lo, hi = spec.output.range
-        return [f" {v}" for v in range(lo, hi + 1)]
-    return [f" {lb}" for lb in spec.output.labels]
+    if spec.output.is_scalar:
+        return [f" {value}" for value in spec.output.scalar.values()]
+    total = 1
+    for field in spec.output.fields.values():
+        total *= len(field.values())
+        if total > _MAX_COMPLETIONS:
+            return None
+    names = list(spec.output.fields)
+    combos = itertools.product(*(field.values() for field in spec.output.fields.values()))
+    return [
+        " " + "\n".join(f"{name}: {value}" for name, value in zip(names, combo))
+        for combo in combos
+    ]
+
+
+def _field_instruction(field) -> str:
+    if field.type == "int":
+        return f"an integer from {field.range[0]} to {field.range[1]}"
+    return "exactly one of: " + ", ".join(field.labels)
 
 
 def output_instruction(spec: FunctionSpec) -> str:
-    if spec.output.type == "int":
-        lo, hi = spec.output.range
-        return f"an integer from {lo} to {hi}"
-    return "exactly one of: " + ", ".join(spec.output.labels)
+    if spec.output.is_scalar:
+        return _field_instruction(spec.output.scalar)
+    return "one `name: value` line per field, in this order: " + "; ".join(
+        f"{name}: <{_field_instruction(field)}>"
+        for name, field in spec.output.fields.items()
+    )
 
 
-def zeroshot_prompt(spec: FunctionSpec, item: dict[str, Any], spec_files_text: str) -> str:
-    """The un-tuned base model's best shot: full spec in the prompt."""
-    ref = f"\nReference files:\n{spec_files_text}\n" if spec_files_text else ""
+def zeroshot_prompt(spec: FunctionSpec, item: dict[str, Any]) -> str:
     return (
-        f"Task: {spec.description.strip()}\n"
-        f"Scoring rubric:\n{spec.rubric.strip()}\n{ref}"
+        f"Decision instructions:\n{spec.prompt.strip()}\n\n"
         f"Input:\n{render_input(item, spec.input_schema)}\n"
-        f"Respond with only {output_instruction(spec)}.\n"
-        "output:"
+        f"Respond with only {output_instruction(spec)}.\noutput:"
     )
 
 
 def teacher_label_prompt(
-    spec: FunctionSpec, items: list[dict[str, Any]], spec_files_text: str
+    spec: FunctionSpec,
+    items: list[dict[str, Any]],
+    field_order: list[str] | None = None,
 ) -> str:
-    ref = f"\nReference files:\n{spec_files_text}\n" if spec_files_text else ""
+    order = field_order or list(spec.input_schema)
     numbered = json.dumps(
-        [{"id": i, **{k: it.get(k) for k in spec.input_schema}} for i, it in enumerate(items)],
+        [{"id": index, **{name: item[name] for name in order}} for index, item in enumerate(items)],
         indent=1,
         ensure_ascii=False,
     )
+    if spec.output.is_scalar:
+        form = (
+            '{"id": 0, "output": <'
+            + output_instruction(spec)
+            + '>, "reason": "<one short sentence>"}'
+        )
+    else:
+        inner = ", ".join(
+            f'"{name}": <{_field_instruction(field)}>'
+            for name, field in spec.output.fields.items()
+        )
+        form = f'{{"id": 0, "output": {{{inner}}}, "reason": "<one short sentence>"}}'
     return (
-        "You are a careful data labeler. Label every item below.\n"
-        f"Task: {spec.description.strip()}\n"
-        f"Scoring rubric:\n{spec.rubric.strip()}\n{ref}"
-        f"\nItems:\n{numbered}\n\n"
-        f'Reply with ONLY a JSON array, one entry per item, in the form:\n'
-        f'[{{"id": 0, "score": <{output_instruction(spec)}>, "reason": "<one short sentence>"}}, ...]\n'
-        "Every id above must appear exactly once. No other text."
+        "Apply the decision instructions to every item. Use only the supplied facts.\n"
+        f"Decision instructions:\n{spec.prompt.strip()}\n\n"
+        f"Items:\n{numbered}\n\n"
+        f"Reply with only a JSON array in this form: [{form}, ...].\n"
+        "Every id must appear exactly once."
     )
 
 
 def teacher_variant_prompt(
-    spec: FunctionSpec,
-    examples: list[dict[str, Any]],
-    band: str,
-    count: int,
-    spec_files_text: str,
+    spec: FunctionSpec, examples: list[dict[str, Any]], band: str, count: int
 ) -> str:
-    ref = f"\nReference files:\n{spec_files_text}\n" if spec_files_text else ""
-    ex = json.dumps(
-        [{k: it.get(k) for k in spec.input_schema} for it in examples],
+    rendered = json.dumps(examples, indent=1, ensure_ascii=False)
+    fields = ", ".join(f'"{name}"' for name in spec.input_schema)
+    return (
+        "Generate realistic new inputs in the same distribution as the examples.\n"
+        f"Decision instructions:\n{spec.prompt.strip()}\n\n"
+        f"Examples:\n{rendered}\n\n"
+        f"Write {count} new items likely to receive decision {band}. Reply only with "
+        f"a JSON array of objects containing {fields}."
+    )
+
+
+def teacher_counterfactual_prompt(
+    spec: FunctionSpec,
+    sources: list[dict[str, Any]],
+    band: str,
+    feedback: str | None = None,
+) -> str:
+    numbered = json.dumps(
+        [{"id": index, **item} for index, item in enumerate(sources)],
         indent=1,
         ensure_ascii=False,
     )
-    fields = ", ".join(f'"{k}"' for k in spec.input_schema)
+    fields = ", ".join(f'"{name}"' for name in spec.input_schema)
+    retry = f"\nPrevious attempt feedback: {feedback}\n" if feedback else ""
     return (
-        "You generate realistic synthetic inputs for a labeling task. "
-        "They must be plausible variations in the same style and domain as the "
-        "real examples — not copies, not fantasy.\n"
-        f"Task the labels are for: {spec.description.strip()}\n"
-        f"Scoring rubric:\n{spec.rubric.strip()}\n{ref}"
-        f"\nReal examples of the input distribution:\n{ex}\n\n"
-        f"Write {count} NEW items that would plausibly score around {band} "
-        "under the rubric.\n"
-        f"Reply with ONLY a JSON array of {count} objects, each with keys "
-        f"{fields}. No other text."
+        "Make the smallest realistic edit to each item that would change its decision "
+        f"toward {band}. Preserve irrelevant content.\n"
+        f"Decision instructions:\n{spec.prompt.strip()}\n{retry}\n"
+        f"Items:\n{numbered}\n\nReply only with a JSON array containing the original "
+        f'"id" and fields {fields}.'
     )
 
 
 _SCORE_RE = re.compile(r"score:\s*(-?\d+)", re.IGNORECASE)
+_SCORE_VALUE_RE = re.compile(r"^\s*score\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 _INT_RE = re.compile(r"-?\d+")
 
 
-def parse_output(spec: FunctionSpec, text: str) -> Optional[Any]:
-    """Parse a student/zero-shot generation into a validated output value."""
-    if spec.output.type == "int":
-        m = _SCORE_RE.search(text)
-        if m:
-            val = int(m.group(1))
-        else:
-            m = _INT_RE.search(text)
-            if not m:
-                return None
-            val = int(m.group(0))
-        lo, hi = spec.output.range
-        return val if lo <= val <= hi else None
-    # enum: first label that appears, longest-first to avoid prefix collisions
-    low = text.lower()
+def _parse_field(field, text: str) -> Any | None:
+    if field.type == "int":
+        match = _INT_RE.search(text)
+        if not match:
+            return None
+        value = int(match.group())
+        return value if value in field.values() else None
+    lowered = text.casefold()
     hits = [
-        (low.find(lb.lower()), lb)
-        for lb in sorted(spec.output.labels, key=len, reverse=True)
-        if lb.lower() in low
+        (lowered.find(label.casefold()), -len(label), label)
+        for label in sorted(field.labels, key=len, reverse=True)
+        if label.casefold() in lowered
     ]
-    return min(hits)[1] if hits else None
+    return min(hits)[2] if hits else None
+
+
+def parse_output(spec: FunctionSpec, text: str) -> Any | None:
+    if spec.output.is_scalar:
+        if spec.output.scalar.type == "int":
+            match = _SCORE_RE.search(text)
+            if match and int(match.group(1)) in spec.output.scalar.values():
+                return int(match.group(1))
+        else:
+            match = _SCORE_VALUE_RE.search(text)
+            if match:
+                return _parse_field(spec.output.scalar, match.group(1))
+        return _parse_field(spec.output.scalar, text)
+    output: dict[str, Any] = {}
+    for name, field in spec.output.fields.items():
+        match = re.search(
+            rf"^\s*{re.escape(name)}\s*:\s*(.+)$",
+            text,
+            re.MULTILINE | re.IGNORECASE,
+        )
+        output[name] = _parse_field(field, match.group(1)) if match else None
+    return None if all(value is None for value in output.values()) else output
+
+
+def incomplete_fields(spec: FunctionSpec, output: Any | None) -> list[str]:
+    if output is None:
+        return list(spec.output.fields)
+    if spec.output.is_scalar:
+        return [] if output in spec.output.scalar.values() else [SCALAR_FIELD]
+    if not isinstance(output, dict):
+        return list(spec.output.fields)
+    return [
+        name
+        for name, field in spec.output.fields.items()
+        if output.get(name) not in field.values()
+    ]
+
+
+def completion_budget(spec: FunctionSpec, rationale: bool = False) -> int:
+    base = 8 if spec.output.is_scalar else 8 + 8 * len(spec.output.fields)
+    return base + (72 if rationale else 0)
 
 
 def extract_json(text: str) -> Any:
-    """Pull the first JSON array/object out of teacher output (fences etc.)."""
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\n|\n```$", "", text.strip("`").strip())
     for opener, closer in (("[", "]"), ("{", "}")):
         start = text.find(opener)
-        if start == -1:
-            continue
         end = text.rfind(closer)
-        if end > start:
+        if start >= 0 and end > start:
             return json.loads(text[start : end + 1])
     raise ValueError(f"no JSON found in teacher output: {text[:200]!r}")

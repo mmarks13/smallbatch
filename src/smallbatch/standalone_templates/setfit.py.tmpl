@@ -1,0 +1,62 @@
+import json
+
+from ._common import (
+    FUNCTION,
+    ROOT,
+    metadata,
+    ordinal_predict,
+    render_input,
+    validate_input,
+    validate_output,
+)
+
+_MODELS = None
+
+
+def _load():
+    global _MODELS
+    if _MODELS is None:
+        import skops.io as sio
+        from setfit import SetFitModel
+
+        _MODELS = {}
+        for name in FUNCTION["output"]["fields"]:
+            field = ROOT / "model" / name
+            labels = json.loads((field / "labels.json").read_text())
+            model = SetFitModel.from_pretrained(field / "model", device="cpu")
+            head_path = field / "ordinal_head.skops"
+            head = None
+            if head_path.exists():
+                unknown = sio.get_untrusted_types(file=head_path)
+                if unknown:
+                    raise ValueError(f"standalone ordinal head has unexpected types: {unknown}")
+                head = sio.load(head_path, trusted=[])
+            _MODELS[name] = (model, labels, head)
+    return _MODELS
+
+
+def classify_batch(items):
+    normalized = [validate_input(item) for item in items]
+    if not normalized:
+        return []
+    texts = [render_input(item) for item in normalized]
+    per_field = {}
+    for name, (model, labels, head) in _load().items():
+        if head is not None:
+            indices = ordinal_predict(head, model.encode(texts, show_progress_bar=False))
+        else:
+            raw = model.predict(texts, use_labels=False)
+            indices = raw.tolist() if hasattr(raw, "tolist") else list(raw)
+        per_field[name] = [labels[int(index)] for index in indices]
+    if list(FUNCTION["output"]["fields"]) == ["score"]:
+        outputs = per_field["score"]
+    else:
+        outputs = [
+            {name: per_field[name][index] for name in per_field}
+            for index in range(len(normalized))
+        ]
+    return [validate_output(output) for output in outputs]
+
+
+def classify(item):
+    return classify_batch([item])[0]

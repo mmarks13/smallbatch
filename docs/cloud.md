@@ -1,49 +1,49 @@
-# Compiling in the cloud
+# Cloud Training
 
-The compile step is deliberately just **CLI + plain files** — spec in, data
-dir in, artifact dir out; no daemon, no database. Any box with a CUDA GPU
-works: rsync up, `smallbatch compile`, rsync the ~30MB adapter back.
+Smallbatch does not provide a cloud runner. Run the same CLI inside a machine
+you control, copy in the spec and decision dataset, and copy out the immutable
+build and selected standalone package.
 
-The split that matters: **labeling runs locally** (it needs your teacher
-credentials and is CPU-only); only the GPU-bound compile ships to the cloud.
-Generate `data/<fn>/` first, then launch.
+Only LoRA normally justifies a rented GPU. TF-IDF and SetFit should be tried
+first because Smallbatch's purpose is to find the cheapest acceptable local
+implementation, not to assume an adapted language model.
 
-## Turnkey: SkyPilot
+Recommended sequence:
 
-[`cloud/skypilot.yaml`](../cloud/skypilot.yaml) launches the cheapest
-available spot GPU on whatever clouds you've enabled (AWS/GCP/Azure/RunPod/
-vast.ai/Lambda...), installs smallbatch, compiles, and lets you pull the
-artifact back:
+1. Run `label` locally or import existing decisions.
+2. Transfer `spec.yaml` and `data/<function>/` through an approved channel.
+3. Run `doctor`, then `compile` on the training machine.
+4. Review `report.md`; explicitly run `select` for one candidate or select none.
+5. Transfer the generated wheel or source package, not the decision dataset.
 
-```bash
-pip install "skypilot[aws,gcp]"          # pick your clouds; `sky check` to verify
-sky launch -c sb cloud/skypilot.yaml --env SPEC=examples/ticket-priority/spec.yaml
-rsync -av sb:~/sky_workdir/artifacts/ artifacts/
-sky down sb
-```
+Keep model caches on persistent storage when retrying. Build state and LoRA
+checkpoints resume only when the decision, dataset, and candidate identities
+match.
 
-Practical notes from real use:
+The CPU profile describes the machine that ran `compile` or `select`. If the
+deployment CPU differs materially, run the standalone function's own benchmark
+there before relying on the recorded latency and memory numbers.
 
-- **`spec_files` must exist on the remote.** Keep them inside the repo (they
-  ship with `workdir`) or mirror absolute paths with `file_mounts`.
-- **Artifacts can outlive a dying spot instance.** Every finished compile
-  prints a `MANIFEST::<json>` line to the log; SkyPilot retains job logs, so
-  results survive even if the instance is reclaimed before you rsync. Grep
-  them back with `sky logs sb | grep '^MANIFEST::'`.
-- **Sweeps on rented GPUs** work the same way — put `smallbatch sweep
-  sweeps/your-sweep.yaml` in `run:`. Consider `HF_HUB_OFFLINE=1` with
-  pre-cached weights in `setup:` if the provider's IPs are rate-limited by
-  the HF Hub (common on GPU marketplaces).
-- **Spot etiquette:** `--retry-until-up` for patience, and always
-  `sky down` — a forgotten instance costs more than the compile.
+## Practical notes for rented GPUs
 
-## Manual: any GPU box
+- [`skypilot.yaml`](skypilot.yaml) shows the shape of a launch; any orchestration
+  (SkyPilot, plain SSH, a provider console) works because the artifact
+  directory is the entire interface between machines.
+- Marketplace GPUs (vast.ai and similar) churn minute to minute and their
+  base images are minimal. Expect to pin your own Python environment rather
+  than trusting the image's, and prefer `--retry-until-up`-style patience.
+- The HF Hub sometimes rate-limits marketplace provider IPs. With pre-cached
+  weights, set `HF_HUB_OFFLINE=1` in setup to avoid mid-run surprises.
+- Always tear the instance down after copying artifacts out; a forgotten
+  instance costs more than the compile.
 
-```bash
-rsync -av --exclude .venv . gpubox:smallbatch/
-ssh gpubox 'cd smallbatch && pip install -e . && smallbatch compile examples/ticket-priority/spec.yaml'
-rsync -av gpubox:smallbatch/artifacts/ artifacts/
-```
+## Self-hosted open-weights teachers
 
-There is no orchestration inside smallbatch itself — that's a feature: the
-artifact directory is the entire interface between machines.
+Labeling normally runs locally because it needs your teacher credentials. A
+self-hosted open-weights teacher is the exception worth knowing: serve the
+model with any OpenAI-compatible server (for example vLLM) on a rented GPU,
+tunnel the port to your machine, and point the spec's `openai-compatible`
+teacher at `http://127.0.0.1:<port>/v1`. Labeling, calibration, journals, and
+decisions all stay local; only prompts transit the tunnel. Give reasoning
+models generous context on the server — a truncated response returns no text
+content and the teacher retries it as a failed attempt.

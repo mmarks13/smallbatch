@@ -1,64 +1,77 @@
-import textwrap
-
 import pytest
 
-from smallbatch.spec import load_spec
-
-MINIMAL = """
-name: toy
-description: Score a thing 0-10.
-input_schema: {title: str, summary: str}
-output: {type: int, range: [0, 10]}
-rubric: "10 = great, 0 = junk"
-teacher: {backend: claude-cli, model: sonnet}
-"""
+from conftest import make_spec
+from smallbatch.spec import load_spec, validate_input, validate_output
 
 
-def write_spec(tmp_path, body=MINIMAL):
-    p = tmp_path / "toy.yaml"
-    p.write_text(textwrap.dedent(body))
-    return p
+def test_prompt_first_spec_and_identities(tmp_path):
+    spec = make_spec()
+    assert spec.name == "ticket-priority"
+    assert spec.decision_hash() != spec.build_hash()
+    changed = make_spec(candidates={"other": {"type": "tfidf"}})
+    assert changed.decision_hash() == spec.decision_hash()
+    assert changed.build_hash() != spec.build_hash()
 
 
-def test_defaults(tmp_path):
-    spec = load_spec(write_spec(tmp_path))
-    assert spec.teacher.backend == "claude-cli"
-    assert spec.gate.agreement_pm1 == 0.85
-    assert spec.train.alpha == 2 * spec.train.lora_r
-    assert spec.output.range == (0, 10)
+def test_legacy_spec_rejected_with_migration_help(tmp_path):
+    path = tmp_path / "spec.yaml"
+    path.write_text("name: old\nrubric: old instructions\ngate: {}\n")
+    with pytest.raises(ValueError, match="legacy pre-v0.2"):
+        load_spec(path)
 
 
-def test_teacher_block_required(tmp_path):
-    body = MINIMAL.replace("teacher: {backend: claude-cli, model: sonnet}\n", "")
-    with pytest.raises(ValueError, match="responsible-use"):
-        load_spec(write_spec(tmp_path, body))
+def test_ids_are_lowercase_kebab():
+    with pytest.raises(ValueError, match="lowercase kebab-case"):
+        make_spec(name="Ticket_Priority")
+    with pytest.raises(ValueError, match="candidate id"):
+        make_spec(candidates={"BGE_small": {"type": "tfidf"}})
 
 
-def test_teacher_model_required(tmp_path):
-    body = MINIMAL.replace(
-        "teacher: {backend: claude-cli, model: sonnet}",
-        "teacher: {backend: claude-cli}",
+def test_strict_input_contract():
+    spec = make_spec()
+    assert validate_input(spec, {"title": "x", "body": "y"}) == {"title": "x", "body": "y"}
+    with pytest.raises(ValueError, match="missing fields"):
+        validate_input(spec, {"title": "x"})
+    with pytest.raises(ValueError, match="unexpected fields"):
+        validate_input(spec, {"title": "x", "body": "y", "extra": "z"})
+    with pytest.raises(ValueError, match="must be string"):
+        validate_input(spec, {"title": 1, "body": "y"})
+
+
+def test_strict_output_contract_scalar_and_structured():
+    spec = make_spec()
+    assert validate_output(spec, "urgent") == "urgent"
+    with pytest.raises(ValueError, match="outside the contract"):
+        validate_output(spec, "other")
+    structured = make_spec(
+        output={"priority": {"labels": ["urgent", "normal"]}, "score": {"range": [0, 4]}}
     )
-    with pytest.raises(ValueError, match="backend: openai-compatible"):
-        load_spec(write_spec(tmp_path, body))
+    assert validate_output(structured, {"priority": "urgent", "score": 3}) == {
+        "priority": "urgent",
+        "score": 3,
+    }
+    with pytest.raises(ValueError, match="structured output mismatch"):
+        validate_output(structured, {"priority": "urgent"})
 
 
-def test_int_requires_range(tmp_path):
-    bad = MINIMAL.replace("{type: int, range: [0, 10]}", "{type: int}")
-    with pytest.raises(ValueError):
-        load_spec(write_spec(tmp_path, bad))
-
-
-def test_hash_tracks_spec_files(tmp_path):
-    ref = tmp_path / "prefs.yaml"
-    ref.write_text("likes: cats")
-    body = MINIMAL + "spec_files: [prefs.yaml]\n"
-    spec = load_spec(write_spec(tmp_path, body))
-    h1 = spec.spec_hash()
-    ref.write_text("likes: dogs")
-    assert load_spec(tmp_path / "toy.yaml").spec_hash() != h1
-
-
-def test_extra_keys_rejected(tmp_path):
-    with pytest.raises(ValueError):
-        load_spec(write_spec(tmp_path, MINIMAL + "surprise: true\n"))
+def test_setfit_managed_training_args_rejected():
+    with pytest.raises(ValueError, match="managed by smallbatch"):
+        make_spec(
+            candidates={
+                "bge-small": {
+                    "type": "setfit",
+                    "model": "BAAI/bge-small-en-v1.5",
+                    "training_args": {"output_dir": "/tmp/no"},
+                }
+            }
+        )
+    with pytest.raises(ValueError, match="managed by smallbatch"):
+        make_spec(
+            candidates={
+                "bge-small": {
+                    "type": "setfit",
+                    "model": "BAAI/bge-small-en-v1.5",
+                    "training_args": {"save_strategy": "steps"},
+                }
+            }
+        )
