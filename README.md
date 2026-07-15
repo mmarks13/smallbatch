@@ -220,4 +220,5 @@ python -m build
 
 See [docs/how-it-works.md](docs/how-it-works.md) for identities and artifacts,
 [docs/responsible-use.md](docs/responsible-use.md) for decision limitations,
-and [ROADMAP.md](ROADMAP.md) for deliberately deferred features.
+[docs/cloud.md](docs/cloud.md) for compiling on a rented GPU, and
+[ROADMAP.md](ROADMAP.md) for deliberately deferred features.

@@ -1,12 +1,14 @@
 # Compile a smallbatch function on the cheapest available cloud GPU.
 #
 #   pip install skypilot[aws,gcp,azure]   # pick your clouds
-#   sky launch -c sb cloud/skypilot.yaml --env SPEC=examples/ticket-priority/spec.yaml
+#   sky launch -c sb docs/skypilot.yaml --env SPEC=your-function/spec.yaml
 #   rsync -av sb:~/sky_workdir/artifacts/ artifacts/
 #   sky down sb
 #
-# Labeling happens locally (it needs your teacher credentials); only the
-# GPU-bound compile step ships to the cloud, so `data/` must exist first.
+# SPEC is the spec.yaml from `smallbatch init` (with its data/ already
+# labeled). Labeling happens locally because it needs your teacher
+# credentials; only the GPU-bound compile step ships to the cloud, so
+# `data/<function>/` must exist first.
 
 resources:
   accelerators: { L4: 1 }   # any modern GPU works; L4 spot is usually cheapest
@@ -15,7 +17,7 @@ resources:
 workdir: .
 
 envs:
-  SPEC: examples/ticket-priority/spec.yaml
+  SPEC: your-function/spec.yaml
 
 setup: |
   pip install -e .

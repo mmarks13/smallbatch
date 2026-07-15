@@ -26,7 +26,7 @@ there before relying on the recorded latency and memory numbers.
 
 ## Practical notes for rented GPUs
 
-- `cloud/skypilot.yaml` shows the shape of a launch; any orchestration
+- [`skypilot.yaml`](skypilot.yaml) shows the shape of a launch; any orchestration
   (SkyPilot, plain SSH, a provider console) works because the artifact
   directory is the entire interface between machines.
 - Marketplace GPUs (vast.ai and similar) churn minute to minute and their
