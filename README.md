@@ -147,19 +147,23 @@ self-hosted open-weights teacher (`gpt-oss-120b`) labeled 600 frozen inputs;
 Smallbatch trained five local functions on 420 of its decisions and evaluated
 all of them, on the same machine, against the same 120 held-out decisions.
 
-| local function | of the teacher's own consistency* | avg. rungs off | p50 CPU latency | ships as |
-|---|---:|---:|---:|---:|
-| TF-IDF | 66% | 0.60 | 1.2 ms | 27 MB |
-| SetFit (bge-small, 33M) | 69% | 0.55 | 42 ms | 135 MB |
-| LoRA (Qwen3-0.6B) | 78% | 0.45 | 0.8 s | 1.6 GB |
-| LoRA (Qwen3-1.7B) | 79% | 0.43 | 1.9 s | 4.1 GB |
-| LoRA (Qwen3-4B) | 85% | 0.38 | 4.3 s | 8.1 GB |
+One thing to know before reading the table: the teacher itself is not
+deterministic evidence. Re-labeling the same 120 evaluation rows with the
+shipped rubric (shuffled order, temperature 0), it repeated its own decision
+only 82% of the time — that's the ceiling any student can reliably reach, so
+the table below includes the teacher as a reference row rather than an
+implied 100%.
 
-\* A student cannot reliably agree with the teacher more than the teacher
-agrees with itself. Re-labeling the same 120 evaluation rows twice with the
-shipped rubric (shuffled order, temperature 0), the teacher repeated its own
-decision 82% of the time — the ceiling here, so the 4B student's 69% exact
-agreement is 85% of it. Consistency numbers are in
+| | exact agreement | mean error (0-4 scale) | p50 latency | ships as |
+|---|---:|---:|---:|---:|
+| **teacher vs. itself (ceiling)** | **82%** | **0.22** | GPU only | 65 GB |
+| TF-IDF | 54% | 0.60 | 1.2 ms | 27 MB |
+| SetFit (bge-small, 33M) | 57% | 0.55 | 42 ms | 135 MB |
+| LoRA (Qwen3-0.6B) | 63% | 0.45 | 0.8 s | 1.6 GB |
+| LoRA (Qwen3-1.7B) | 64% | 0.43 | 1.9 s | 4.1 GB |
+| LoRA (Qwen3-4B) | 69% | 0.38 | 4.3 s | 8.1 GB |
+
+Consistency numbers are in
 [`teacher_consistency.json`](case-study/cfpb-complaint-priority/results/teacher_consistency.json);
 raw candidate metrics with confidence intervals are in
 [`results.json`](case-study/cfpb-complaint-priority/results/results.json).
@@ -168,15 +172,24 @@ The trained functions never see the prompt's rubric — the teacher's
 decisions moved it into their weights. Prompting the same base models with
 the full rubric instead, on the same evaluation rows:
 
-| base model | rubric in the prompt, no training | trained on 420 decisions, no rubric |
-|---|---|---|
-| Qwen3-0.6B | 18% exact · 3.9 s | 63% exact · 0.8 s |
-| Qwen3-1.7B | 3% exact · 7.2 s | 64% exact · 1.9 s |
-| Qwen3-4B | 48% exact · 16.5 s | 69% exact · 4.3 s |
+<table>
+<thead>
+<tr><th>base model</th><th colspan="2">rubric in the prompt, no training</th><th colspan="2">trained on 420 decisions, no rubric</th></tr>
+<tr><th></th><th>exact</th><th>p50</th><th>exact</th><th>p50</th></tr>
+</thead>
+<tbody>
+<tr><td>Qwen3-0.6B</td><td>18%</td><td>3.9 s</td><td><strong>63%</strong></td><td><strong>0.8 s</strong></td></tr>
+<tr><td>Qwen3-1.7B</td><td>3%</td><td>7.2 s</td><td><strong>64%</strong></td><td><strong>1.9 s</strong></td></tr>
+<tr><td>Qwen3-4B</td><td>48%</td><td>16.5 s</td><td><strong>69%</strong></td><td><strong>4.3 s</strong></td></tr>
+</tbody>
+</table>
 
-Which row is worth its latency depends on the workload, so no winner is
-declared, and agreement measures fidelity to the teacher's decisions, not
-correctness. Protocol, evidence, and the honest caveats:
+No winner is declared — which row is worth its latency depends on the
+workload, and agreement measures fidelity to the teacher's decisions, not
+correctness. What the tables do show: 420 teacher decisions moved more of the
+rubric into each model's weights than the rubric itself could carry in a
+prompt, and the resulting functions run in milliseconds to seconds on a CPU.
+Protocol, evidence, and the honest caveats:
 [case-study/cfpb-complaint-priority](case-study/cfpb-complaint-priority/README.md).
 
 ## Responsible use
