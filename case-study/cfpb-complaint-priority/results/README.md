@@ -11,6 +11,8 @@ Evidence from the frozen protocol run of 2026-07-14 (build
   candidate statuses, and `explicit_selection` (null: no candidate selected).
 - `thread_scaling.json` — every candidate re-profiled at 4/8/16/30 threads
   on the same machine.
+- `teacher_consistency.json` — the teacher's own repeat-run agreement with
+  the shipped rubric, the reference ceiling for the candidate metrics.
 
 These files contain aggregate evidence only: no complaint text, no teacher
 decisions, no per-row disagreements.

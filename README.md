@@ -149,17 +149,19 @@ all of them, on the same machine, against the same 120 held-out decisions.
 
 | local function | of the teacher's own consistency* | avg. rungs off | p50 CPU latency | ships as |
 |---|---:|---:|---:|---:|
-| TF-IDF | ~71% | 0.60 | 1.2 ms | 27 MB |
-| SetFit (bge-small, 33M) | ~75% | 0.55 | 42 ms | 135 MB |
-| LoRA (Qwen3-0.6B) | ~83% | 0.45 | 0.8 s | 1.6 GB |
-| LoRA (Qwen3-1.7B) | ~84% | 0.43 | 1.9 s | 4.1 GB |
-| LoRA (Qwen3-4B) | ~90% | 0.38 | 4.3 s | 8.1 GB |
+| TF-IDF | 66% | 0.60 | 1.2 ms | 27 MB |
+| SetFit (bge-small, 33M) | 69% | 0.55 | 42 ms | 135 MB |
+| LoRA (Qwen3-0.6B) | 78% | 0.45 | 0.8 s | 1.6 GB |
+| LoRA (Qwen3-1.7B) | 79% | 0.43 | 1.9 s | 4.1 GB |
+| LoRA (Qwen3-4B) | 85% | 0.38 | 4.3 s | 8.1 GB |
 
 \* A student cannot reliably agree with the teacher more than the teacher
-agrees with itself: re-labeling the same 100 complaints twice, the teacher
-repeated its own decision 76-77% of the time (rubric probes, earlier
-drafts). That repeat rate is the ceiling here, so the 4B student's 69%
-exact agreement is ~90% of it. Raw metrics with confidence intervals are in
+agrees with itself. Re-labeling the same 120 evaluation rows twice with the
+shipped rubric (shuffled order, temperature 0), the teacher repeated its own
+decision 82% of the time — the ceiling here, so the 4B student's 69% exact
+agreement is 85% of it. Consistency numbers are in
+[`teacher_consistency.json`](case-study/cfpb-complaint-priority/results/teacher_consistency.json);
+raw candidate metrics with confidence intervals are in
 [`results.json`](case-study/cfpb-complaint-priority/results/results.json).
 
 The trained functions never see the prompt's rubric — the teacher's

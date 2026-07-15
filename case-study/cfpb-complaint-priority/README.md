@@ -69,14 +69,26 @@ rights over its outputs.
 
 Because there are no gold labels, the only measurable property of a rubric
 draft is whether the teacher applies it the same way twice. Each draft was
-probed by labeling the same 100 frozen complaints twice and comparing the
-runs (`work/rubric-probe/`, local): draft r1 repeated itself on 77% of
-complaints with flips concentrated at the 0/1 boundary; r2 fixed that
-boundary but wobbled at 3/4 (76% repeat-exact); r3 tightened level 4 to
-require a stated date, deadline, or present inability to pay for basics.
-Interactive calibration on the final rubric showed 90% repeat-exact and 100%
-repeat-within-one on the reviewed batch, and the maintainer approved.
-Calibration approves or declines teacher behavior; it never edits decisions.
+probed by labeling the same 100 frozen complaints twice — the second pass
+with shuffled row order and reversed input fields, at temperature 0, so any
+disagreement is presentation sensitivity rather than sampling noise
+(`work/rubric-probe/`, local). Draft r1 repeated itself on 77% of complaints
+with flips concentrated at the 0/1 boundary; r2 fixed that boundary but
+wobbled at 3/4 (76% repeat-exact); r3 tightened level 4 to require a stated
+date, deadline, or present inability to pay for basics, and repeated itself
+on 76% of the same 100 complaints with the 0/1 flips resolved. Interactive
+calibration on the final rubric showed 90% repeat-exact on the reviewed
+batch, and the maintainer approved. Calibration approves or declines teacher
+behavior; it never edits decisions.
+
+The shipped rubric's consistency was then measured on the exact 120
+evaluation rows the candidates are scored against: labeling them twice, the
+teacher repeated its own decision **82% of the time** (within one rung 97%,
+MAE 0.22; aggregates in
+[`results/teacher_consistency.json`](results/teacher_consistency.json)). That
+82% is the reference ceiling for the report below — a student cannot reliably
+reproduce the teacher's decisions more often than the teacher reproduces them
+itself, so the 4B student's 69% exact agreement is 85% of what is achievable.
 
 The approved teacher labeled all 600 complaints. The label distribution is
 concentrated: 0:3, 1:269, 2:168, 3:148, 4:12. That concentration shapes what
