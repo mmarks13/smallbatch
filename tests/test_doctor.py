@@ -28,3 +28,65 @@ def test_data_identity_and_files(tmp_path):
 def test_spec_lists_candidate_requirements():
     findings = inspect_spec(make_spec())
     assert ("ok", "tfidf: CPU TF-IDF candidate") in findings
+
+
+class WordTokenizer:
+    model_max_length = 512
+
+    def __call__(self, text, add_special_tokens=True):
+        return {"input_ids": list(range(len(text.split()) + 2))}
+
+
+def setfit_spec():
+    return make_spec(
+        candidates={"bge-small": {"type": "setfit", "model": "BAAI/bge-small-en-v1.5"}}
+    )
+
+
+def test_truncation_check_warns_when_items_exceed_the_encoder_window(monkeypatch):
+    from smallbatch import doctor
+
+    monkeypatch.setattr(doctor, "_encoder_tokenizer", lambda model: WordTokenizer())
+    monkeypatch.setattr(doctor, "_encoder_sequence_limit", lambda model: 16)
+    records = imported_records(4)
+    records[0]["input"]["body"] = "word " * 40
+
+    findings = doctor.inspect_setfit_truncation(setfit_spec(), records)
+    assert len(findings) == 1
+    level, message = findings[0]
+    assert level == "warn"
+    assert "1/4 items exceed its 16-token window" in message
+    assert "silently truncated" in message
+
+
+def test_truncation_check_passes_items_that_fit(monkeypatch):
+    from smallbatch import doctor
+
+    monkeypatch.setattr(doctor, "_encoder_tokenizer", lambda model: WordTokenizer())
+    monkeypatch.setattr(doctor, "_encoder_sequence_limit", lambda model: None)
+
+    findings = doctor.inspect_setfit_truncation(setfit_spec(), imported_records(4))
+    # limit falls back to the tokenizer's own claim (512)
+    assert findings == [
+        (
+            "ok",
+            findings[0][1],
+        )
+    ]
+    assert "512-token window" in findings[0][1]
+
+
+def test_truncation_check_stays_offline_when_the_encoder_is_not_cached(monkeypatch):
+    from smallbatch import doctor
+
+    monkeypatch.setattr(doctor, "_encoder_tokenizer", lambda model: None)
+    findings = doctor.inspect_setfit_truncation(setfit_spec(), imported_records(4))
+    assert findings == [
+        ("warn", "BAAI/bge-small-en-v1.5: not cached locally; cannot check input truncation")
+    ]
+
+
+def test_truncation_check_skips_specs_without_setfit_candidates():
+    from smallbatch import doctor
+
+    assert doctor.inspect_setfit_truncation(make_spec(), imported_records(4)) == []

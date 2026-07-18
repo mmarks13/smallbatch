@@ -26,6 +26,97 @@ def inspect_spec(spec: FunctionSpec) -> list[Finding]:
     return findings
 
 
+def _encoder_tokenizer(model_id: str):
+    """The encoder's tokenizer from local files only — doctor never downloads."""
+    try:
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(model_id, local_files_only=True)
+    except Exception:
+        return None
+
+
+def _encoder_sequence_limit(model_id: str) -> int | None:
+    """The SentenceTransformer input window (its own config truncates harder
+    than the tokenizer's limit on some models), from local files only."""
+    config_name = "sentence_bert_config.json"
+    try:
+        local = Path(model_id) / config_name
+        if local.exists():
+            value = json.loads(local.read_text()).get("max_seq_length")
+            return int(value) if value else None
+        from huggingface_hub import try_to_load_from_cache
+
+        cached = try_to_load_from_cache(model_id, config_name)
+        if isinstance(cached, str):
+            value = json.loads(Path(cached).read_text()).get("max_seq_length")
+            return int(value) if value else None
+    except Exception:
+        return None
+    return None
+
+
+def inspect_setfit_truncation(spec: FunctionSpec, records: list[dict]) -> list[Finding]:
+    """SetFit encoders truncate silently: an item longer than the encoder's
+    window loses its tail with no error anywhere, while TF-IDF reads all of
+    it. Doctor is the only place that says so before training."""
+    from . import prompts
+
+    models = sorted(
+        {
+            candidate.model
+            for candidate in spec.candidates.values()
+            if isinstance(candidate, SetFitCandidateSpec)
+        }
+    )
+    if not models or not records:
+        return []
+    try:
+        inputs, _outputs = normalize_item_records(spec, records)
+    except ValueError:
+        return []  # inspect_items already failed these records
+    texts = [prompts.render_input(item, spec.input_schema) for item in inputs]
+    findings: list[Finding] = []
+    for model_id in models:
+        tokenizer = _encoder_tokenizer(model_id)
+        if tokenizer is None:
+            findings.append(
+                ("warn", f"{model_id}: not cached locally; cannot check input truncation")
+            )
+            continue
+        limit = _encoder_sequence_limit(model_id)
+        if limit is None:
+            claimed = int(getattr(tokenizer, "model_max_length", 0) or 0)
+            limit = claimed if 0 < claimed < 100_000 else None
+        if limit is None:
+            findings.append(
+                ("warn", f"{model_id}: encoder input window unknown; cannot check truncation")
+            )
+            continue
+        lengths = [
+            len(tokenizer(text, add_special_tokens=True)["input_ids"]) for text in texts
+        ]
+        truncated = sum(length > limit for length in lengths)
+        if truncated:
+            findings.append(
+                (
+                    "warn",
+                    f"{model_id}: {truncated}/{len(lengths)} items exceed its "
+                    f"{limit}-token window and would be silently truncated "
+                    f"(longest {max(lengths)} tokens)",
+                )
+            )
+        else:
+            findings.append(
+                (
+                    "ok",
+                    f"{model_id}: all items fit its {limit}-token window "
+                    f"(longest {max(lengths)} tokens)",
+                )
+            )
+    return findings
+
+
 def inspect_items(spec: FunctionSpec, records: list[dict]) -> list[Finding]:
     try:
         _inputs, outputs = normalize_item_records(spec, records)
@@ -103,6 +194,7 @@ def run_doctor(
     findings = inspect_spec(spec)
     if items is not None:
         findings.extend(inspect_items(spec, items))
+        findings.extend(inspect_setfit_truncation(spec, items))
     if data_dir is not None:
         findings.extend(inspect_data(spec, data_dir))
     findings.extend(inspect_environment(spec))
