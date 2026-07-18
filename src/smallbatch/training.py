@@ -138,15 +138,16 @@ def _ordinal_trainer_class(spec: FunctionSpec, tokenizer):
     Token cross-entropy treats "3" and "4" as unrelated symbols, so a student
     is punished the same for a near miss and a far one. Here the logits at the
     deciding position are renormalized over the legal levels into a proper
-    distribution, and the loss combines class NLL with the ranked probability
-    score (RPS), which accumulates error across the ordered levels and so
-    penalizes distant predictions more than adjacent ones. It costs one
-    ordinary forward pass: everything the completions share cancels in the
-    softmax, so nothing is gained by scoring them one at a time.
+    distribution and trained with the shared ordinal objective
+    (`heads.ordinal_loss`) — the same loss every candidate family's ordinal
+    head uses. It costs one ordinary forward pass: everything the completions
+    share cancels in the softmax, so nothing is gained by scoring them one at
+    a time.
     """
     import torch
-    import torch.nn.functional as F
     from trl import SFTTrainer
+
+    from .heads import ordinal_loss
 
     decision = ordinal_decision_tokens(spec, tokenizer)
     if decision is None:
@@ -156,7 +157,6 @@ def _ordinal_trainer_class(spec: FunctionSpec, tokenizer):
             "ranges within 0-9 or set objective: token"
         )
     prefix, legal_ids = decision
-    classes = len(legal_ids)
 
     class OrdinalSFTTrainer(SFTTrainer):
         def compute_loss(
@@ -181,15 +181,7 @@ def _ordinal_trainer_class(spec: FunctionSpec, tokenizer):
             class_logits = logits[rows, decides_at - 1][:, ids]
             answers = input_ids[rows, decides_at]
             target = (answers.unsqueeze(1) == ids.unsqueeze(0)).float().argmax(dim=1)
-
-            nll = F.cross_entropy(class_logits, target)
-            probabilities = F.softmax(class_logits, dim=-1)
-            cumulative = probabilities.cumsum(dim=-1)
-            steps = (
-                torch.arange(classes, device=device).unsqueeze(0) >= target.unsqueeze(1)
-            ).to(cumulative.dtype)
-            rps = ((cumulative - steps) ** 2).sum(dim=-1).mean() / max(classes - 1, 1)
-            return nll + rps
+            return ordinal_loss(class_logits, target)
 
     return OrdinalSFTTrainer
 
