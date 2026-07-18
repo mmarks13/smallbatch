@@ -36,6 +36,15 @@ class Model:
     def predict(self, texts, use_labels=False):
         return [0 if "outage" in text else 1 for text in texts]
 
+    def encode(self, texts, show_progress_bar=False):
+        import numpy as np
+
+        # one feature that counts severity words, so an ordered head can
+        # recover the level from it deterministically
+        return np.array(
+            [[float(sum(word in text for word in ("slow", "down")))] for text in texts]
+        )
+
 
 class Trainer:
     def __init__(self, **kwargs):
@@ -93,6 +102,62 @@ def test_setfit_trains_and_predicts_each_field(tmp_path, monkeypatch):
         [rows[0]["input"], rows[1]["input"]],
     )
     assert predictions == ["normal", "urgent"]
+
+
+def test_setfit_ordinal_head_gets_a_dev_selected_decoder(tmp_path, monkeypatch):
+    install_fake_setfit(monkeypatch)
+    spec = make_spec(
+        output={"type": "int", "range": [0, 2]},
+        candidates={"bge-small": {"type": "setfit", "model": "BAAI/bge-small-en-v1.5"}},
+    )
+    bodies = {0: "calm question", 1: "slow response", 2: "slow down failure"}
+    rows = [
+        {"input": {"title": f"case {index}", "body": bodies[level]}, "output": level}
+        for level in bodies
+        for index in range(8)
+    ]
+
+    metadata = train_setfit(spec, spec.candidates["bge-small"], rows, rows, tmp_path)
+
+    training = metadata["field_training"]["score"]
+    assert training["objective"] == "ordinal"
+    assert training["decode"] in ("argmax", "median", "within_one")
+    assert training["dev_decode_comparison"]["selected"] == training["decode"]
+    assert training["dev_decode_comparison"]["metric"] == "within_one"
+
+    # the persisted head carries the selected decoder and predictions round-trip
+    predictions = predict_setfit(
+        tmp_path,
+        spec,
+        [{"title": "new", "body": bodies[0]}, {"title": "new", "body": bodies[2]}],
+    )
+    assert predictions == [0, 2]
+
+
+def test_setfit_ordinal_pinned_decoder_skips_the_comparison(tmp_path, monkeypatch):
+    install_fake_setfit(monkeypatch)
+    spec = make_spec(
+        output={"type": "int", "range": [0, 2]},
+        candidates={
+            "bge-small": {
+                "type": "setfit",
+                "model": "BAAI/bge-small-en-v1.5",
+                "decode": "median",
+            }
+        },
+    )
+    bodies = {0: "calm question", 1: "slow response", 2: "slow down failure"}
+    rows = [
+        {"input": {"title": f"case {index}", "body": bodies[level]}, "output": level}
+        for level in bodies
+        for index in range(8)
+    ]
+
+    metadata = train_setfit(spec, spec.candidates["bge-small"], rows, [], tmp_path)
+
+    training = metadata["field_training"]["score"]
+    assert training["decode"] == "median"
+    assert training["dev_decode_comparison"] is None
 
 
 def test_setfit_bounds_embedding_rows_but_trains_head_on_all_rows(tmp_path, monkeypatch):

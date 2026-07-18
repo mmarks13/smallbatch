@@ -54,7 +54,9 @@ def render_input(item):
 
 def ordinal_predict(head, features):
     """Class values from an ordered head: each step scores P(y > level), the
-    chain is forced monotonic, and differencing gives the class distribution."""
+    chain is forced monotonic, and differencing gives the class distribution.
+    The head's dev-selected decode rule reads a level out of each row; heads
+    persisted without one decode as argmax, as they were evaluated."""
     import numpy as np
 
     values = head["values"]
@@ -69,7 +71,17 @@ def ordinal_predict(head, features):
         above[:, index] = probabilities[:, classes.index(1)]
     above = np.minimum.accumulate(above, axis=1)
     padded = np.concatenate([np.ones((rows, 1)), above, np.zeros((rows, 1))], axis=1)
-    chosen = (padded[:, :-1] - padded[:, 1:]).argmax(axis=1)
+    probabilities = padded[:, :-1] - padded[:, 1:]
+    decoder = head.get("decoder", "argmax")
+    if decoder == "median":
+        chosen = (probabilities.cumsum(axis=1) >= 0.5).argmax(axis=1)
+    elif decoder == "within_one":
+        window = probabilities.copy()
+        window[:, :-1] += probabilities[:, 1:]
+        window[:, 1:] += probabilities[:, :-1]
+        chosen = window.argmax(axis=1)
+    else:
+        chosen = probabilities.argmax(axis=1)
     return [values[int(index)] for index in chosen]
 
 

@@ -119,8 +119,10 @@ def test_ordered_head_persists_as_stock_sklearn_only(tmp_path):
     assert loaded["score"]["head"]["kind"] == ordinal.KIND
 
 
-def test_predict_matches_the_standalone_template_chain():
-    """The generated package reimplements the chain; the two must agree."""
+@pytest.mark.parametrize("decoder", [None, "argmax", "median", "within_one"])
+def test_predict_matches_the_standalone_template_chain(decoder):
+    """The generated package reimplements the chain; the two must agree for
+    every decode rule and for heads persisted before the decoder key existed."""
     template = (
         __import__("pathlib")
         .Path("src/smallbatch/standalone_templates/common.py.tmpl")
@@ -139,6 +141,8 @@ def test_predict_matches_the_standalone_template_chain():
             {"above": 0.1, "model": None},
         ],
     }
+    if decoder is not None:
+        head["decoder"] = decoder
     features = np.zeros((2, 1))
     assert namespace["ordinal_predict"](head, features) == ordinal.predict(head, features)
 
@@ -171,6 +175,110 @@ def test_class_distribution_matches_the_differenced_chain():
     }
     distribution = ordinal.class_distribution(head, np.zeros((1, 1)))
     assert np.allclose(distribution, [[0.1, 0.5, 0.4]])
+
+
+# class distribution [0.40, 0.05, 0.25, 0.30, 0.00]: the three decode rules
+# each read a different level (argmax 0, within_one 1, median 2)
+SPLIT_MASS_HEAD = {
+    "kind": ordinal.KIND,
+    "values": [0, 1, 2, 3, 4],
+    "steps": [
+        {"above": 0.60, "model": None},
+        {"above": 0.55, "model": None},
+        {"above": 0.30, "model": None},
+        {"above": 0.00, "model": None},
+    ],
+}
+
+
+def test_select_decoder_keeps_the_best_within_one_rule_on_dev():
+    head = dict(SPLIT_MASS_HEAD)
+    comparison = ordinal.select_decoder(head, np.zeros((4, 1)), [2, 2, 2, 2])
+    # median reads 2 (exact); within_one reads 1 (still within one); argmax
+    # reads 0 (two off) — median wins the tie by coming first
+    assert head["decoder"] == "median"
+    assert comparison["selected"] == "median"
+    assert comparison["metric"] == "within_one"
+    assert comparison["decoders"]["median"]["within_one"] == 1.0
+    assert comparison["decoders"]["argmax"]["within_one"] == 0.0
+
+
+def test_select_decoder_ties_resolve_to_the_stable_default():
+    head = dict(SPLIT_MASS_HEAD)
+    # references at 0: argmax is exact, within_one lands within one — both
+    # score 1.0 on the selection metric, and argmax (listed first) wins
+    comparison = ordinal.select_decoder(head, np.zeros((4, 1)), [0, 0, 0, 0])
+    assert head["decoder"] == "argmax"
+    assert comparison["decoders"]["within_one"]["within_one"] == 1.0
+
+
+def test_select_decoder_pinned_setting_skips_the_dev_comparison():
+    head = dict(SPLIT_MASS_HEAD)
+    assert ordinal.select_decoder(head, np.zeros((1, 1)), [2], "median") is None
+    assert head["decoder"] == "median"
+
+
+def test_select_decoder_without_dev_rows_keeps_argmax():
+    head = dict(SPLIT_MASS_HEAD)
+    assert ordinal.select_decoder(head, None, []) is None
+    assert head["decoder"] == "argmax"
+
+
+def test_predict_honors_the_persisted_decoder():
+    head = dict(SPLIT_MASS_HEAD)
+    assert ordinal.predict(head, np.zeros((1, 1))) == [0]  # no key: argmax
+    head["decoder"] = "median"
+    assert ordinal.predict(head, np.zeros((1, 1))) == [2]
+    head["decoder"] = "within_one"
+    assert ordinal.predict(head, np.zeros((1, 1))) == [1]
+
+
+def test_tfidf_selects_and_persists_a_decoder(tmp_path):
+    import skops.io as sio
+
+    from smallbatch.candidates import train_tfidf
+
+    spec = make_spec(output={"type": "int", "range": [0, 2]})
+    rows = []
+    for level, text in ((0, "routine question"), (1, "delayed response"), (2, "money withheld")):
+        for index in range(8):
+            rows.append(
+                {
+                    "id": f"{level}-{index}",
+                    "input": {"title": f"case {index}", "body": text},
+                    "output": level,
+                    "origin": "real",
+                }
+            )
+    record = train_tfidf(spec, rows, tmp_path, dev_rows=rows)
+    assert record["decode"]["score"] in ("argmax", "median", "within_one")
+    assert record["dev_decode_comparison"]["score"]["selected"] == record["decode"]["score"]
+
+    # the decoder key persists inside the head under skops' strict trust policy
+    loaded = sio.load(tmp_path / "model.skops", trusted=[])
+    assert loaded["score"]["head"]["decoder"] == record["decode"]["score"]
+
+
+def test_tfidf_pinned_decoder_needs_no_dev_rows(tmp_path):
+    import skops.io as sio
+
+    from smallbatch.candidates import train_tfidf
+
+    spec = make_spec(output={"type": "int", "range": [0, 1]})
+    rows = [
+        {
+            "id": str(index),
+            "input": {"title": f"t{index}", "body": "withheld" if index % 2 else "asked"},
+            "output": index % 2,
+            "origin": "real",
+        }
+        for index in range(10)
+    ]
+    record = train_tfidf(spec, rows, tmp_path, decode="median")
+    assert record["decode"] == {"score": "median"}
+    assert record["dev_decode_comparison"] == {}
+    loaded = sio.load(tmp_path / "model.skops", trusted=[])
+    assert loaded["score"]["head"]["decoder"] == "median"
 
 
 def test_boundary_probabilities_expose_the_unrepaired_chain():

@@ -72,12 +72,51 @@ def class_distribution(head: dict, features):
 
 
 def predict(head: dict, features) -> list[Any]:
-    """Class values via the cumulative chain, one row per feature row."""
+    """Class values via the cumulative chain, one row per feature row.
+
+    Heads persisted before decoder selection existed carry no `decoder` key
+    and decode as argmax — exactly what they were evaluated with.
+    """
     from . import decode
 
     return decode.decode_levels(
-        class_distribution(head, features), head["values"], "argmax"
+        class_distribution(head, features),
+        head["values"],
+        head.get("decoder", "argmax"),
     )
+
+
+def select_decoder(head: dict, features, references: list, setting: str = "auto") -> dict | None:
+    """Pick the decode rule for this head and persist it inside the head.
+
+    A pinned setting is recorded as-is. `auto` measures every rule on the
+    development rows — never the evaluation split — and keeps the one with the
+    best within-one agreement, ties resolving to the stable default (argmax,
+    listed first). With no development rows the head keeps argmax. Returns the
+    development comparison when one was run, for the candidate record.
+    """
+    from . import decode
+
+    if setting != "auto":
+        head["decoder"] = setting
+        return None
+    if references is None or not len(references):
+        head["decoder"] = "argmax"
+        return None
+    distribution = class_distribution(head, features)
+    comparison: dict[str, dict[str, float]] = {}
+    for name in decode.DECODERS:
+        predictions = decode.decode_levels(distribution, head["values"], name)
+        errors = [abs(p - r) for p, r in zip(predictions, references)]
+        n = len(errors)
+        comparison[name] = {
+            "exact": round(sum(e == 0 for e in errors) / n, 4),
+            "within_one": round(sum(e <= 1 for e in errors) / n, 4),
+            "mae": round(sum(errors) / n, 4),
+        }
+    chosen = max(decode.DECODERS, key=lambda name: comparison[name]["within_one"])
+    head["decoder"] = chosen
+    return {"selected": chosen, "metric": "within_one", "decoders": comparison}
 
 
 def applies(spec, field_name: str) -> bool:

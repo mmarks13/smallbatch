@@ -138,6 +138,8 @@ def train_setfit(
                 args=args,
             )
         objective = "multinomial"
+        decoder = None
+        dev_decode_comparison = None
         if ordinal.applies(spec, field_name):
             # SetFit's own head is multinomial over unrelated symbols. Fit the
             # ordered head on the same tuned embeddings instead, and persist it
@@ -152,6 +154,13 @@ def train_setfit(
                 train_labels,
                 lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
             )
+            dev_decode_comparison = ordinal.select_decoder(
+                head,
+                model.encode(dev_texts, show_progress_bar=False) if dev_rows else None,
+                dev_labels,
+                config.decode,
+            )
+            decoder = head["decoder"]
             field_dir.mkdir(parents=True, exist_ok=True)
             sio.dump(head, field_dir / ORDINAL_HEAD_FILE)
             objective = "ordinal"
@@ -168,6 +177,8 @@ def train_setfit(
             "embedding_status": embedding_status,
             "classifier_train_rows": len(train_rows),
             "objective": objective,
+            "decode": decoder,
+            "dev_decode_comparison": dev_decode_comparison,
             "resolved_args": resolved,
         }
     return {

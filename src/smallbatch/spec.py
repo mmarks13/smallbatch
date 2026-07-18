@@ -163,6 +163,10 @@ class TeacherSpec(BaseModel):
 
 class TfidfCandidateSpec(BaseModel):
     type: Literal["tfidf"]
+    # ordered scales only: which point of the head's level distribution each
+    # integer field reports (argmax / median / within_one, as documented on
+    # LoraCandidateSpec.decode). auto lets the development split decide.
+    decode: Literal["auto", "argmax", "median", "within_one"] = "auto"
     model_config = {"extra": "forbid"}
 
 
@@ -171,6 +175,10 @@ class SetFitCandidateSpec(BaseModel):
     model: str
     embedding_samples_per_class: int = Field(default=8, ge=1)
     training_args: dict[str, Any] = Field(default_factory=dict)
+    # ordered scales only: which point of the head's level distribution each
+    # integer field reports (argmax / median / within_one, as documented on
+    # LoraCandidateSpec.decode). auto lets the development split decide.
+    decode: Literal["auto", "argmax", "median", "within_one"] = "auto"
     model_config = {"extra": "forbid"}
 
     @field_validator("training_args")

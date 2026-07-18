@@ -41,11 +41,18 @@ def _check_class_coverage(spec: FunctionSpec, train_rows: list[Row]) -> None:
             )
 
 
-def train_tfidf(spec: FunctionSpec, train_rows: list[Row], out_dir: Path) -> dict[str, Any]:
+def train_tfidf(
+    spec: FunctionSpec,
+    train_rows: list[Row],
+    out_dir: Path,
+    dev_rows: list[Row] | None = None,
+    decode: str = "auto",
+) -> dict[str, Any]:
     """Fit a TF-IDF vectorizer plus one head per output field and persist with
     skops. Integer scales get an ordered head (`P(y > level)` per boundary) so
-    the levels train as a scale; enum labels get a multinomial classifier.
-    Returns format metadata for the candidate record."""
+    the levels train as a scale, with its decode rule selected on the
+    development rows; enum labels get a multinomial classifier. Returns format
+    metadata for the candidate record."""
     import sklearn
     import skops
     import skops.io as sio
@@ -56,8 +63,11 @@ def train_tfidf(spec: FunctionSpec, train_rows: list[Row], out_dir: Path) -> dic
 
     _check_class_coverage(spec, train_rows)
     texts = _texts(spec, train_rows)
+    dev_texts = _texts(spec, dev_rows) if dev_rows else []
     models: dict[str, Any] = {}
     objectives: dict[str, str] = {}
+    decoders: dict[str, str] = {}
+    dev_decode_comparison: dict[str, Any] = {}
     for name, field in spec.output.fields.items():
         outs = [row_output(spec, r) for r in train_rows]
         labels = [out[name] if isinstance(out, dict) else out for out in outs]
@@ -70,6 +80,16 @@ def train_tfidf(spec: FunctionSpec, train_rows: list[Row], out_dir: Path) -> dic
                 labels,
                 lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
             )
+            dev_outs = [row_output(spec, r) for r in dev_rows or []]
+            comparison = ordinal.select_decoder(
+                head,
+                vectorizer.transform(dev_texts) if dev_texts else None,
+                [out[name] if isinstance(out, dict) else out for out in dev_outs],
+                decode,
+            )
+            decoders[name] = head["decoder"]
+            if comparison is not None:
+                dev_decode_comparison[name] = comparison
             objectives[name] = "ordinal"
         else:
             head = LogisticRegression(max_iter=1000).fit(features, labels)
@@ -84,6 +104,8 @@ def train_tfidf(spec: FunctionSpec, train_rows: list[Row], out_dir: Path) -> dic
         "skops_version": skops.__version__,
         "fields": list(spec.output.fields),
         "objective": objectives,
+        "decode": decoders,
+        "dev_decode_comparison": dev_decode_comparison,
     }
 
 
