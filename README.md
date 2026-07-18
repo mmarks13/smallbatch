@@ -41,7 +41,7 @@ the same CPU evaluation, and reports the quality and operating tradeoffs.
 | Approach | What it is | Why it might fit |
 |---|---|---|
 | **TF-IDF** (term frequency-inverse document frequency) | A conventional classifier driven mostly by which words and phrases appear in the input. | Usually the fastest and smallest option. It works well for literal wording patterns but may miss similar meanings expressed in different language. |
-| **SetFit** | A small model that learns useful sentence representations, often called embeddings, and trains a classifier on top of them. | A middle tier that can recognize semantic similarity without running a generative language model locally. |
+| **SetFit** | A small model that learns useful sentence representations, often called embeddings, and trains a classifier on top of them. By default it fine-tunes on every training row, and scored rubrics train the embedding to respect the scale's ordering. | A middle tier that can recognize semantic similarity without running a generative language model locally. |
 | **LoRA** (low-rank adaptation) | An efficient fine-tuning method that adapts a small foundation language model by training a relatively small set of additional weights, called an adapter. | The heaviest option, but potentially useful for subtler decisions. It takes more training resources and produces a larger, slower CPU function. |
 
 The options are a ladder, not a required progression. A TF-IDF candidate may
@@ -209,7 +209,7 @@ standalone package — review them like code before sharing.
 | Command | Purpose |
 |---|---|
 | `smallbatch init` | Generate a prompt-first starter project. |
-| `smallbatch doctor` | Validate the contract, data mode, teacher, candidates, and environment. |
+| `smallbatch doctor` | Validate the contract, data mode, teacher, candidates, environment, and whether items fit each SetFit encoder's input window. |
 | `smallbatch label` | Import complete decisions or generate them after teacher calibration. |
 | `smallbatch compile` | Train, CPU-evaluate, and compare every configured candidate. |
 | `smallbatch select` | Package and activate one candidate, or clear the active selection. |
