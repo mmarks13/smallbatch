@@ -196,6 +196,64 @@ def write_report(build: Path, report: dict, details: dict) -> Path:
     return path
 
 
+def _decoder_evidence(record: dict) -> list[tuple[str, str, dict | None, dict | None]]:
+    """(field, selected decoder, dev comparison, head diagnostics) per ordinal
+    field, across the three backends' record shapes."""
+    entries: list[tuple[str, str, dict | None, dict | None]] = []
+    backend = record.get("backend")
+    if backend == "lora" and record.get("decode"):
+        training = record.get("training") or {}
+        entries.append(("decode", record["decode"], training.get("dev_decode_comparison"), None))
+    elif backend == "tfidf":
+        for field, selected in (record.get("decode") or {}).items():
+            entries.append(
+                (
+                    field,
+                    selected,
+                    (record.get("dev_decode_comparison") or {}).get(field),
+                    (record.get("head_diagnostics") or {}).get(field),
+                )
+            )
+    elif backend == "setfit":
+        for field, training in (record.get("field_training") or {}).items():
+            if training.get("decode"):
+                entries.append(
+                    (
+                        field,
+                        training["decode"],
+                        training.get("dev_decode_comparison"),
+                        training.get("head_diagnostics"),
+                    )
+                )
+    return entries
+
+
+def _decoder_lines(record: dict) -> list[str]:
+    lines: list[str] = []
+    for field, selected, comparison, diagnostics in _decoder_evidence(record):
+        lines.append("")
+        source = "dev-selected" if comparison else "pinned"
+        lines.append(f"Decode `{field}`: **{selected}** ({source})")
+        if comparison:
+            decoders = comparison.get("decoders", comparison)
+            lines.extend(["", "| decoder | exact | within_one | mae |", "|---|---:|---:|---:|"])
+            for name, values in decoders.items():
+                marker = " *" if name == selected else ""
+                lines.append(
+                    f"| {name}{marker} | {_number(values.get('exact'))} | "
+                    f"{_number(values.get('within_one'))} | {_number(values.get('mae'))} |"
+                )
+        if diagnostics:
+            violations = diagnostics["monotonicity_violations"]
+            lines.append(
+                f"\nOrdinal head on dev: monotonicity violations in "
+                f"{_number(violations['row_rate'])} of rows "
+                f"(max magnitude {_number(violations['max_magnitude'])}); repair changed "
+                f"{_number(diagnostics['repair_changed_prediction_rate'])} of predictions."
+            )
+    return lines
+
+
 def render_markdown(report: dict) -> str:
     lines = [
         f"# {report['function']} evidence",
@@ -219,6 +277,7 @@ def render_markdown(report: dict) -> str:
         )
         if record.get("metrics"):
             lines.extend(["", f"### {name} metrics", "", "```json", json.dumps(record["metrics"], indent=2), "```"])
+        lines.extend(_decoder_lines(record))
         if record.get("error"):
             lines.append(f"\nError: `{record['error']}`")
     lines.extend(["", "## Interpretation", "", report["selection_bias_note"]])

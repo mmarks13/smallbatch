@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,37 @@ from .spec import FunctionSpec
 
 MODEL_FILE = "model.skops"
 TFIDF_DIR = "tfidf"
+DEV_DISTRIBUTIONS_FILE = "dev_distributions.local.json"
+
+
+def dev_distribution_rows(
+    head: dict, features, rows: list[Row], references: list, levels: list | None = None
+) -> dict:
+    """Per-row development class distributions, for local diagnostics only."""
+    from . import ordinal
+
+    distribution = ordinal.class_distribution(head, features)
+    return {
+        "levels": head["values"] if levels is None else levels,
+        "decoder": head.get("decoder", "argmax"),
+        "rows": [
+            {
+                "id": row.get("id"),
+                "reference": reference,
+                "distribution": [round(float(p), 4) for p in probabilities],
+            }
+            for row, reference, probabilities in zip(rows, references, distribution)
+        ],
+    }
+
+
+def write_dev_distributions(out_dir: Path, per_field: dict) -> None:
+    """Row-level distributions carry decision evidence, so they live in a
+    `.local` file that packaging refuses to ship."""
+    if per_field:
+        (out_dir / DEV_DISTRIBUTIONS_FILE).write_text(
+            json.dumps(per_field, indent=2, ensure_ascii=False)
+        )
 
 
 def _texts(spec: FunctionSpec, rows: list[Row]) -> list[str]:
@@ -68,6 +100,8 @@ def train_tfidf(
     objectives: dict[str, str] = {}
     decoders: dict[str, str] = {}
     dev_decode_comparison: dict[str, Any] = {}
+    head_diagnostics: dict[str, Any] = {}
+    dev_distributions: dict[str, Any] = {}
     for name, field in spec.output.fields.items():
         outs = [row_output(spec, r) for r in train_rows]
         labels = [out[name] if isinstance(out, dict) else out for out in outs]
@@ -81,15 +115,19 @@ def train_tfidf(
                 lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
             )
             dev_outs = [row_output(spec, r) for r in dev_rows or []]
-            comparison = ordinal.select_decoder(
-                head,
-                vectorizer.transform(dev_texts) if dev_texts else None,
-                [out[name] if isinstance(out, dict) else out for out in dev_outs],
-                decode,
-            )
+            dev_references = [out[name] if isinstance(out, dict) else out for out in dev_outs]
+            dev_features = vectorizer.transform(dev_texts) if dev_texts else None
+            comparison = ordinal.select_decoder(head, dev_features, dev_references, decode)
             decoders[name] = head["decoder"]
             if comparison is not None:
                 dev_decode_comparison[name] = comparison
+            if dev_features is not None and dev_references:
+                head_diagnostics[name] = ordinal.head_diagnostics(
+                    head, dev_features, dev_references
+                )
+                dev_distributions[name] = dev_distribution_rows(
+                    head, dev_features, dev_rows, dev_references
+                )
             objectives[name] = "ordinal"
         else:
             head = LogisticRegression(max_iter=1000).fit(features, labels)
@@ -98,6 +136,7 @@ def train_tfidf(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     sio.dump(models, out_dir / MODEL_FILE)
+    write_dev_distributions(out_dir, dev_distributions)
     return {
         "format": "skops",
         "sklearn_version": sklearn.__version__,
@@ -106,6 +145,7 @@ def train_tfidf(
         "objective": objectives,
         "decode": decoders,
         "dev_decode_comparison": dev_decode_comparison,
+        "head_diagnostics": head_diagnostics,
     }
 
 

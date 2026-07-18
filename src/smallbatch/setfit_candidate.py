@@ -140,12 +140,15 @@ def train_setfit(
         objective = "multinomial"
         decoder = None
         dev_decode_comparison = None
+        head_diagnostics = None
         if ordinal.applies(spec, field_name):
             # SetFit's own head is multinomial over unrelated symbols. Fit the
             # ordered head on the same tuned embeddings instead, and persist it
             # as stock sklearn parts so packages need no Smallbatch class.
             import skops.io as sio
             from sklearn.linear_model import LogisticRegression
+
+            from .candidates import dev_distribution_rows, write_dev_distributions
 
             embeddings = model.encode(train_texts, show_progress_bar=False)
             head = ordinal.build(
@@ -154,14 +157,30 @@ def train_setfit(
                 train_labels,
                 lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
             )
+            dev_embeddings = (
+                model.encode(dev_texts, show_progress_bar=False) if dev_rows else None
+            )
             dev_decode_comparison = ordinal.select_decoder(
-                head,
-                model.encode(dev_texts, show_progress_bar=False) if dev_rows else None,
-                dev_labels,
-                config.decode,
+                head, dev_embeddings, dev_labels, config.decode
             )
             decoder = head["decoder"]
             field_dir.mkdir(parents=True, exist_ok=True)
+            if dev_embeddings is not None and dev_labels:
+                head_diagnostics = ordinal.head_diagnostics(
+                    head, dev_embeddings, dev_labels, levels=values
+                )
+                write_dev_distributions(
+                    field_dir,
+                    {
+                        field_name: dev_distribution_rows(
+                            head,
+                            dev_embeddings,
+                            dev_rows,
+                            [values[index] for index in dev_labels],
+                            levels=values,
+                        )
+                    },
+                )
             sio.dump(head, field_dir / ORDINAL_HEAD_FILE)
             objective = "ordinal"
         else:
@@ -179,6 +198,7 @@ def train_setfit(
             "objective": objective,
             "decode": decoder,
             "dev_decode_comparison": dev_decode_comparison,
+            "head_diagnostics": head_diagnostics,
             "resolved_args": resolved,
         }
     return {

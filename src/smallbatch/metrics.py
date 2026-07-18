@@ -74,6 +74,27 @@ def int_field_metrics(field: FieldSpec, predictions: list, references: list) -> 
     )
     pearson = pearson_r([p for p, _ in valid], [r for _, r in valid])
     spearman = spearman_rho([p for p, _ in valid], [r for _, r in valid])
+    # prediction bias and error by rubric level: support against predicted
+    # counts shows where a candidate leans; signed error shows which way
+    per_level: dict[str, dict[str, Any]] = {}
+    for level in field.values():
+        at_level = [(p, r) for p, r in valid if r == level]
+        level_errors = [abs(p - r) for p, r in at_level]
+        per_level[str(level)] = {
+            "support": sum(r == level for r in references),
+            "predicted": sum(p == level for p, _ in valid),
+            "exact": round(sum(e == 0 for e in level_errors) / len(at_level), 4)
+            if at_level
+            else None,
+            "within_one": round(sum(e <= 1 for e in level_errors) / len(at_level), 4)
+            if at_level
+            else None,
+            "mean_signed_error": round(
+                sum(p - r for p, r in at_level) / len(at_level), 4
+            )
+            if at_level
+            else None,
+        }
     return {
         "n": n,
         "valid_n": len(valid),
@@ -91,6 +112,7 @@ def int_field_metrics(field: FieldSpec, predictions: list, references: list) -> 
         "mean_signed_error": round(sum(signed) / len(signed), 4) if signed else None,
         "pearson_r": round(pearson, 4) if pearson is not None else None,
         "spearman_rho": round(spearman, 4) if spearman is not None else None,
+        "per_level": per_level,
     }
 
 

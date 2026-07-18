@@ -27,13 +27,18 @@ def deployable_size(path: Path, backend: str) -> int:
         file.stat().st_size
         for file in path.rglob("*")
         if file.is_file()
+        and ".local" not in file.name
         and not (backend == "setfit" and "checkpoints" in file.relative_to(path).parts)
     )
 
 
 def copy_deployable_model(source: Path, destination: Path, backend: str) -> None:
-    ignore = shutil.ignore_patterns("checkpoints") if backend == "setfit" else None
-    shutil.copytree(source, destination, ignore=ignore)
+    # `.local` files never enter standalone packages — enforced here so no
+    # trainer can leak diagnostics into a deployable model by construction
+    patterns = ["*.local.json", "*.local.jsonl"]
+    if backend == "setfit":
+        patterns.append("checkpoints")
+    shutil.copytree(source, destination, ignore=shutil.ignore_patterns(*patterns))
 
 
 def _version_key(path: Path) -> tuple[str, int]:

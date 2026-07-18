@@ -45,6 +45,70 @@ def test_public_report_redacts_inputs_and_local_details_keep_them(tmp_path):
     assert json.loads(path.read_text())["selection_bias_note"]
 
 
+def test_markdown_shows_decoder_selection_and_head_diagnostics(tmp_path):
+    from smallbatch.report import render_markdown
+
+    comparison = {
+        "selected": "median",
+        "metric": "within_one",
+        "decoders": {
+            "argmax": {"exact": 0.5, "within_one": 0.7, "mae": 0.9},
+            "median": {"exact": 0.45, "within_one": 0.8, "mae": 0.7},
+            "within_one": {"exact": 0.4, "within_one": 0.8, "mae": 0.8},
+        },
+    }
+    diagnostics = {
+        "rows": 40,
+        "decoder": "median",
+        "monotonicity_violations": {"row_rate": 0.1, "mean_magnitude": 0.02, "max_magnitude": 0.05},
+        "repair_changed_prediction_rate": 0.025,
+        "boundaries": [],
+    }
+    tfidf = candidate([1])
+    tfidf["decode"] = {"score": "median"}
+    tfidf["dev_decode_comparison"] = {"score": comparison}
+    tfidf["head_diagnostics"] = {"score": diagnostics}
+    setfit = candidate([1])
+    setfit["backend"] = "setfit"
+    setfit["field_training"] = {
+        "score": {
+            "decode": "argmax",
+            "dev_decode_comparison": None,
+            "head_diagnostics": None,
+        }
+    }
+    lora = candidate([1])
+    lora["backend"] = "lora"
+    lora["decode"] = "median"
+    lora["training"] = {
+        "dev_decode_comparison": {
+            "argmax": {"exact": 0.5, "within_one": 0.7, "mae": 0.9},
+            "median": {"exact": 0.45, "within_one": 0.8, "mae": 0.7},
+        }
+    }
+    enum_lora = candidate([1])
+    enum_lora["backend"] = "lora"
+    enum_lora["decode"] = None  # enum output: no level distribution exists
+
+    spec = make_spec(output={"type": "int", "range": [0, 4]})
+    report, _ = build_report(
+        spec,
+        [{"input": {"title": "t", "body": "b"}, "output": 1}],
+        {"tfidf": tfidf, "setfit": setfit, "lora": lora, "enum": enum_lora},
+        {},
+    )
+    markdown = render_markdown(report)
+
+    assert "Decode `score`: **median** (dev-selected)" in markdown
+    assert "| median * | 0.4500 | 0.8000 | 0.7000 |" in markdown
+    assert "Decode `score`: **argmax** (pinned)" in markdown
+    assert "Decode `decode`: **median** (dev-selected)" in markdown
+    assert "monotonicity violations in 0.1000 of rows" in markdown
+    assert "repair changed 0.0250 of predictions" in markdown
+    # a candidate with no level distribution shows no decode line
+    assert markdown.count("Decode ") == 3
+
+
 def test_integer_evidence_summary_includes_quality_and_operating_metrics():
     record = candidate([1, 2])
     record["metrics"] = {

@@ -16,6 +16,30 @@ def test_integer_metrics_are_descriptive_and_named():
     assert "agreement" not in metrics
 
 
+def test_integer_metrics_break_out_each_rubric_level():
+    spec = make_spec(output={"type": "int", "range": [0, 2]})
+    metrics = compare(spec, [0, 0, 1, 2, None], [0, 1, 1, 1, 2])
+
+    level_0 = metrics["per_level"]["0"]
+    assert level_0 == {
+        "support": 1,
+        "predicted": 2,
+        "exact": 1.0,
+        "within_one": 1.0,
+        "mean_signed_error": 0.0,
+    }
+    level_1 = metrics["per_level"]["1"]
+    assert level_1["support"] == 3
+    assert level_1["predicted"] == 1
+    assert level_1["exact"] == 0.3333
+    assert level_1["within_one"] == 1.0
+    assert level_1["mean_signed_error"] == 0.0
+    # the invalid prediction leaves level 2 with no valid pairs to score
+    level_2 = metrics["per_level"]["2"]
+    assert level_2["support"] == 1
+    assert level_2["exact"] is None
+
+
 def test_enum_metrics_cover_all_classes():
     spec = make_spec(output={"type": "enum", "labels": ["a", "b", "c"]})
     metrics = compare(spec, ["a", "a", None], ["a", "b", "b"])

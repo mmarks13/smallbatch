@@ -119,6 +119,66 @@ def select_decoder(head: dict, features, references: list, setting: str = "auto"
     return {"selected": chosen, "metric": "within_one", "decoders": comparison}
 
 
+def head_diagnostics(
+    head: dict, features, references: list, levels: list | None = None
+) -> dict:
+    """Aggregate development diagnostics for the cumulative head.
+
+    Everything here is a summary — no inputs, no per-row values — so it can
+    sit in public evidence. Violations are rows where an independently fitted
+    later boundary scored above an earlier one before repair; the repair rate
+    is how often forcing the chain monotonic changed the decoded level. Each
+    boundary's mean predicted `P(y > v)` next to the observed rate shows
+    calibration in the large.
+
+    `references` live in the head's own value space; `levels` relabels the
+    reported boundaries for heads that train on indices of the real scale.
+    """
+    import numpy as np
+
+    from . import decode
+
+    raw = boundary_probabilities(head, features)
+    rows = raw.shape[0]
+    values = head["values"]
+    decoder = head.get("decoder", "argmax")
+
+    rises = np.diff(raw, axis=1).clip(min=0.0)
+    per_row = rises.max(axis=1, initial=0.0)
+    violating = per_row > 1e-9
+
+    padded = np.concatenate([np.ones((rows, 1)), raw, np.zeros((rows, 1))], axis=1)
+    unrepaired = padded[:, :-1] - padded[:, 1:]
+    before = decode.decode_levels(unrepaired, values, decoder)
+    after = decode.decode_levels(class_distribution(head, features), values, decoder)
+    changed = sum(one != two for one, two in zip(before, after))
+
+    labels = values if levels is None else levels
+    boundaries = [
+        {
+            "boundary": labels[index],
+            "mean_predicted": round(float(raw[:, index].mean()), 4),
+            "observed_rate": round(
+                sum(reference > value for reference in references) / len(references), 4
+            ),
+        }
+        for index, value in enumerate(values[:-1])
+    ]
+    return {
+        "rows": rows,
+        "decoder": decoder,
+        "monotonicity_violations": {
+            "row_rate": round(float(violating.mean()), 4),
+            "mean_magnitude": round(float(per_row[violating].mean()), 4)
+            if violating.any()
+            else 0.0,
+            "max_magnitude": round(float(per_row.max(initial=0.0)), 4),
+        },
+        "repair_changed_prediction_rate": round(changed / rows, 4),
+        "boundaries": boundaries,
+    }
+
+
 def applies(spec, field_name: str) -> bool:
     """Ordered levels exist only for integer ranges, not for enum labels."""
     return spec.output.fields[field_name].type == "int"

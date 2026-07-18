@@ -128,7 +128,7 @@ def load_candidate(build: Path, candidate: str) -> CandidateFunction:
     model.eval()
     rationale = bool(record.get("rationale_distillation"))
     levels = None if rationale else decode.scale_levels(spec)
-    decoder = record.get("decode", "argmax")
+    decoder = record.get("decode") or "argmax"
 
     def predict(items: list[dict]) -> list[Any]:
         texts = [prompts.student_prompt(spec, item) for item in items]

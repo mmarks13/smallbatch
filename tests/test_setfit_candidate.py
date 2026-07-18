@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 from pathlib import Path
@@ -124,6 +125,15 @@ def test_setfit_ordinal_head_gets_a_dev_selected_decoder(tmp_path, monkeypatch):
     assert training["decode"] in ("argmax", "median", "within_one")
     assert training["dev_decode_comparison"]["selected"] == training["decode"]
     assert training["dev_decode_comparison"]["metric"] == "within_one"
+
+    # aggregate head diagnostics in the record; per-row evidence local-only
+    diagnostics = training["head_diagnostics"]
+    assert diagnostics["rows"] == len(rows)
+    assert diagnostics["boundaries"][0]["boundary"] == 0
+    local = json.loads((tmp_path / "score" / "dev_distributions.local.json").read_text())
+    assert local["score"]["levels"] == [0, 1, 2]
+    assert local["score"]["rows"][0]["reference"] == 0
+    assert len(local["score"]["rows"]) == len(rows)
 
     # the persisted head carries the selected decoder and predictions round-trip
     predictions = predict_setfit(

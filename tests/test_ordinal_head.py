@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from sklearn.linear_model import LogisticRegression
@@ -292,3 +294,93 @@ def test_boundary_probabilities_expose_the_unrepaired_chain():
     assert np.allclose(raw, [[0.30, 0.80]])  # the violation survives here
     repaired = ordinal.class_distribution(head, np.zeros((1, 1)))
     assert np.allclose(repaired, [[0.70, 0.0, 0.30]])
+
+
+def test_head_diagnostics_measure_violations_and_repair_effect():
+    head = {
+        "kind": ordinal.KIND,
+        "values": [0, 1, 2],
+        "steps": [{"above": 0.30, "model": None}, {"above": 0.80, "model": None}],
+    }
+    diagnostics = ordinal.head_diagnostics(head, np.zeros((2, 1)), [1, 2])
+
+    violations = diagnostics["monotonicity_violations"]
+    assert violations["row_rate"] == 1.0
+    assert violations["mean_magnitude"] == 0.5
+    assert violations["max_magnitude"] == 0.5
+    # unrepaired chain decodes 2 (mass [0.7, -0.5, 0.8]); repaired decodes 0
+    assert diagnostics["repair_changed_prediction_rate"] == 1.0
+    assert diagnostics["rows"] == 2
+    assert diagnostics["decoder"] == "argmax"
+    assert diagnostics["boundaries"] == [
+        {"boundary": 0, "mean_predicted": 0.30, "observed_rate": 1.0},
+        {"boundary": 1, "mean_predicted": 0.80, "observed_rate": 0.5},
+    ]
+
+
+def test_head_diagnostics_report_a_clean_chain_as_clean():
+    head = dict(SPLIT_MASS_HEAD)
+    diagnostics = ordinal.head_diagnostics(head, np.zeros((4, 1)), [0, 1, 2, 2])
+    violations = diagnostics["monotonicity_violations"]
+    assert violations["row_rate"] == 0.0
+    assert violations["mean_magnitude"] == 0.0
+    assert diagnostics["repair_changed_prediction_rate"] == 0.0
+
+
+def test_head_diagnostics_relabel_boundaries_for_index_space_heads():
+    """SetFit heads train on indices of the real scale; the report must show
+    the scale's own levels."""
+    head = {
+        "kind": ordinal.KIND,
+        "values": [0, 1],  # indices
+        "steps": [{"above": 0.5, "model": None}],
+    }
+    diagnostics = ordinal.head_diagnostics(head, np.zeros((2, 1)), [0, 1], levels=[3, 4])
+    assert diagnostics["boundaries"][0]["boundary"] == 3
+
+
+def test_tfidf_records_head_diagnostics_and_local_distributions(tmp_path):
+    from smallbatch.candidates import DEV_DISTRIBUTIONS_FILE, train_tfidf
+
+    spec = make_spec(output={"type": "int", "range": [0, 2]})
+    rows = []
+    for level, text in ((0, "routine question"), (1, "delayed response"), (2, "money withheld")):
+        for index in range(8):
+            rows.append(
+                {
+                    "id": f"{level}-{index}",
+                    "input": {"title": f"case {index}", "body": text},
+                    "output": level,
+                    "origin": "real",
+                }
+            )
+    record = train_tfidf(spec, rows, tmp_path, dev_rows=rows)
+
+    diagnostics = record["head_diagnostics"]["score"]
+    assert diagnostics["rows"] == len(rows)
+    assert {"monotonicity_violations", "repair_changed_prediction_rate", "boundaries"} <= set(
+        diagnostics
+    )
+
+    local = json.loads((tmp_path / DEV_DISTRIBUTIONS_FILE).read_text())
+    assert local["score"]["levels"] == [0, 1, 2]
+    first = local["score"]["rows"][0]
+    assert first["id"] == "0-0"
+    assert first["reference"] == 0
+    assert len(first["distribution"]) == 3
+    # per-row distributions are decision evidence: local file only, never the record
+    assert "dev_distributions" not in json.dumps(record)
+
+
+def test_deployable_copy_refuses_local_files(tmp_path):
+    from smallbatch.artifacts import copy_deployable_model, deployable_size
+
+    source = tmp_path / "model"
+    source.mkdir()
+    (source / "model.skops").write_text("weights")
+    (source / "dev_distributions.local.json").write_text("{}")
+
+    copy_deployable_model(source, tmp_path / "deployed", "tfidf")
+    assert (tmp_path / "deployed" / "model.skops").exists()
+    assert not (tmp_path / "deployed" / "dev_distributions.local.json").exists()
+    assert deployable_size(source, "tfidf") == len("weights")

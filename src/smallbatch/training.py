@@ -414,7 +414,7 @@ def train(
 
 def _select_decoder(
     spec: FunctionSpec, config: LoraCandidateSpec, model, tokenizer, dev_rows
-) -> tuple[str, dict | None]:
+) -> tuple[str | None, dict | None]:
     """Which point of the level distribution to report, decided on dev.
 
     The mode maximizes exact agreement and the median minimizes absolute error;
@@ -428,7 +428,9 @@ def _select_decoder(
 
     levels = decode.scale_levels(spec)
     if levels is None or config.rationale_distillation:
-        return "argmax", None
+        # no level distribution exists to decode: record no decoder at all,
+        # so reports and packages don't disclose a rule that never runs
+        return None, None
     if config.decode != "auto":
         return config.decode, None
     if not dev_rows:
