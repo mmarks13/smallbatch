@@ -98,6 +98,78 @@ def test_decision_tokens_find_the_one_token_that_decides():
     assert ids == [100, 101, 102, 103, 104]
 
 
+class _Output:
+    def __init__(self, logits):
+        self.logits = logits
+
+
+class FullLogitsModel:
+    """A model without the logits_to_keep contract: unknown kwargs raise."""
+
+    def __init__(self, logits):
+        self._logits = logits
+
+    def __call__(self, input_ids, attention_mask=None):
+        return _Output(self._logits)
+
+
+class KeepLogitsModel:
+    """Projects only the requested positions, like transformers causal LMs."""
+
+    def __init__(self, logits):
+        self._logits = logits
+        self.kept = None
+
+    def __call__(self, input_ids, attention_mask=None, logits_to_keep=None):
+        self.kept = logits_to_keep
+        if logits_to_keep is None:
+            return _Output(self._logits)
+        return _Output(self._logits[:, logits_to_keep, :])
+
+
+class IgnoresKwargModel:
+    """Accepts arbitrary kwargs but returns full logits regardless."""
+
+    def __init__(self, logits):
+        self._logits = logits
+
+    def __call__(self, input_ids, attention_mask=None, **kwargs):
+        return _Output(self._logits)
+
+
+def test_compute_loss_reads_only_deciding_positions_however_logits_arrive():
+    """The trainer asks the model to project only the deciding positions
+    (the full sequence-by-vocabulary logits are what OOM small cards), and
+    must produce the identical loss when a model returns full logits instead,
+    whether by raising on the kwarg or by silently ignoring it."""
+    from smallbatch.training import _ordinal_trainer_class
+
+    trainer_cls = _ordinal_trainer_class(int_spec(), FakeTokenizer())
+    # two rows with different deciding positions, right-padded to length 5:
+    # row 0 answers at position 2 with " 3", row 1 at position 3 with " 1"
+    inputs = {
+        "input_ids": torch.tensor([[1, 2, 103, 99, 0], [1, 2, 3, 101, 99]]),
+        "labels": torch.tensor(
+            [[-100, -100, 103, 99, -100], [-100, -100, -100, 101, 99]]
+        ),
+    }
+    logits = torch.zeros(2, 5, 200)
+    logits[0, 1, 100:105] = torch.tensor([0.5, 0.0, 1.0, 4.0, 0.0])
+    logits[1, 2, 100:105] = torch.tensor([1.0, 3.0, 0.0, 0.0, 2.0])
+    expected = _rps_loss(
+        torch.stack([logits[0, 1, 100:105], logits[1, 2, 100:105]]),
+        torch.tensor([3, 1]),
+    )
+
+    keep_model = KeepLogitsModel(logits)
+    for model in (keep_model, FullLogitsModel(logits), IgnoresKwargModel(logits)):
+        loss = trainer_cls.compute_loss(None, model, inputs)
+        assert float(loss) == pytest.approx(float(expected), abs=1e-6)
+    # the supporting model really was asked for just the deciding positions
+    assert keep_model.kept is not None
+    assert keep_model.kept.tolist() == [1, 2]
+
+
 def test_scales_wider_than_one_digit_are_refused_by_the_spec():
     """A level must be one token to be trained and scored as an ordered choice,
     so an integer range has to fit in 0-9: a 0-10 scale would split "10" into

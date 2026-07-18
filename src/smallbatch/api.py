@@ -274,6 +274,12 @@ def compile(  # noqa: A001
     from .profiling import profile_candidate, profile_zeroshot
     from .report import build_report, evidence_summary, write_report
 
+    # near-full cards fail contiguous requests while holding plenty of
+    # reserved-but-unallocated memory; expandable segments lets the CUDA
+    # allocator grow segments instead. Must be set before torch initializes
+    # CUDA, and an explicit user setting always wins.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     compile_started = time.perf_counter()
     spec = _as_spec(spec)
     data = Path(data_dir or f"data/{spec.name}")

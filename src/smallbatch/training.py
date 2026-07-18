@@ -170,15 +170,31 @@ def _ordinal_trainer_class(spec: FunctionSpec, tokenizer):
             if not bool(supervised.any()):
                 return input_ids.sum() * 0.0
 
-            logits = model(
-                input_ids=input_ids, attention_mask=inputs.get("attention_mask")
-            ).logits.float()
             rows = torch.arange(input_ids.size(0), device=device)
             ids = torch.tensor(legal_ids, device=device)
             # the completions diverge `prefix` tokens into the answer; the logits
             # one step earlier are the ones that predict the deciding token
             decides_at = supervised.float().argmax(dim=1) + prefix
-            class_logits = logits[rows, decides_at - 1][:, ids]
+            attention_mask = inputs.get("attention_mask")
+            # only the deciding positions are ever read, so ask the model to
+            # project just those: the full sequence-by-vocabulary logits (and
+            # their gradient) are what evict 1B+ fp32 students from 11GB cards
+            try:
+                logits = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    logits_to_keep=decides_at - 1,
+                ).logits
+            except TypeError:  # model predates the logits_to_keep contract
+                logits = model(
+                    input_ids=input_ids, attention_mask=attention_mask
+                ).logits
+            if logits.size(1) == input_ids.size(1):
+                # full logits: the fallback ran, or the model ignored the kwarg
+                class_logits = logits[rows, decides_at - 1].float()[:, ids]
+            else:
+                # kept logits: column k holds position decides_at[k] - 1
+                class_logits = logits[rows, rows].float()[:, ids]
             answers = input_ids[rows, decides_at]
             target = (answers.unsqueeze(1) == ids.unsqueeze(0)).float().argmax(dim=1)
             return ordinal_loss(class_logits, target)
