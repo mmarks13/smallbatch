@@ -156,3 +156,31 @@ def test_class_probabilities_are_a_distribution(levels):
     }
     predicted = ordinal.predict(head, np.zeros((3, 1)))
     assert all(value in values for value in predicted)
+
+    distribution = ordinal.class_distribution(head, np.zeros((3, 1)))
+    assert distribution.shape == (3, levels)
+    assert np.allclose(distribution.sum(axis=1), 1.0)
+    assert (distribution >= 0).all()
+
+
+def test_class_distribution_matches_the_differenced_chain():
+    head = {
+        "kind": ordinal.KIND,
+        "values": [0, 1, 2],
+        "steps": [{"above": 0.9, "model": None}, {"above": 0.4, "model": None}],
+    }
+    distribution = ordinal.class_distribution(head, np.zeros((1, 1)))
+    assert np.allclose(distribution, [[0.1, 0.5, 0.4]])
+
+
+def test_boundary_probabilities_expose_the_unrepaired_chain():
+    """Diagnostics need the raw crossing, not the repaired one."""
+    head = {
+        "kind": ordinal.KIND,
+        "values": [0, 1, 2],
+        "steps": [{"above": 0.30, "model": None}, {"above": 0.80, "model": None}],
+    }
+    raw = ordinal.boundary_probabilities(head, np.zeros((1, 1)))
+    assert np.allclose(raw, [[0.30, 0.80]])  # the violation survives here
+    repaired = ordinal.class_distribution(head, np.zeros((1, 1)))
+    assert np.allclose(repaired, [[0.70, 0.0, 0.30]])

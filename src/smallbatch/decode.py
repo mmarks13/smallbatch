@@ -11,15 +11,21 @@ distribution to report.
 decoding returns and what minimizes exact disagreement. `median` returns the
 first level whose cumulative probability reaches one half, which minimizes
 absolute error, so it is the better reading when a near miss matters more than
-an exact hit. The candidate's `decode` setting picks one, and `auto` lets the
-development split decide.
+an exact hit. `within_one` returns the level whose ±1 neighborhood holds the
+most mass, which maximizes the chance of landing within one level. The
+candidate's `decode` setting picks one, and `auto` lets the development split
+decide.
+
+The decode step is backend-neutral: any candidate that can produce a
+distribution over the ordered levels — a student's renormalized logits, a
+differenced cumulative head — reads a decision out of it the same way.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-DECODERS = ("argmax", "median")
+DECODERS = ("argmax", "median", "within_one")
 
 
 def scale_levels(spec) -> list[Any] | None:
@@ -64,11 +70,24 @@ def score_levels(model, tokenizer, spec, texts: list[str], batch_size: int = 16)
 
 
 def decode_levels(distributions, levels: list[Any], decoder: str) -> list[Any]:
-    """Read one level per row out of the distributions."""
+    """Read one level per row out of an array of level distributions.
+
+    Accepts anything numpy can view as a rows-by-levels array (a CPU torch
+    tensor included). Adjacent columns must be adjacent levels, which integer
+    scales guarantee; ties resolve to the lower level.
+    """
+    import numpy as np
+
     if decoder not in DECODERS:
         raise ValueError(f"unknown decoder {decoder!r}; use one of {DECODERS}")
+    probabilities = np.asarray(distributions, dtype=float)
     if decoder == "argmax":
-        return [levels[int(index)] for index in distributions.argmax(dim=-1)]
-    cumulative = distributions.cumsum(dim=-1)
-    reached = (cumulative >= 0.5).float().argmax(dim=-1)
-    return [levels[int(index)] for index in reached]
+        chosen = probabilities.argmax(axis=1)
+    elif decoder == "median":
+        chosen = (probabilities.cumsum(axis=1) >= 0.5).argmax(axis=1)
+    else:  # within_one: the level whose ±1 window holds the most mass
+        window = probabilities.copy()
+        window[:, :-1] += probabilities[:, 1:]
+        window[:, 1:] += probabilities[:, :-1]
+        chosen = window.argmax(axis=1)
+    return [levels[int(index)] for index in chosen]

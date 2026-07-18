@@ -38,11 +38,10 @@ def build(values: list[Any], features, labels: list[Any], fit_binary) -> dict:
     return {"kind": KIND, "values": list(values), "steps": steps}
 
 
-def predict(head: dict, features) -> list[Any]:
-    """Class values via the cumulative chain, one row per feature row."""
+def boundary_probabilities(head: dict, features):
+    """Raw `P(y > v)` per boundary, before any monotonic repair."""
     import numpy as np
 
-    values = head["values"]
     rows = features.shape[0]
     above = np.empty((rows, len(head["steps"])), dtype=float)
     for index, step in enumerate(head["steps"]):
@@ -52,17 +51,33 @@ def predict(head: dict, features) -> list[Any]:
         probabilities = step["model"].predict_proba(features)
         classes = list(step["model"].classes_)
         above[:, index] = probabilities[:, classes.index(1)]
+    return above
+
+
+def class_distribution(head: dict, features):
+    """Per-row probability of every level, after monotonic repair."""
+    import numpy as np
+
+    above = boundary_probabilities(head, features)
 
     # P(y > v) cannot rise as v rises; binary models are fit independently, so
     # enforce the monotonicity the scale guarantees before differencing.
     above = np.minimum.accumulate(above, axis=1)
 
+    rows = features.shape[0]
     padded = np.concatenate(
         [np.ones((rows, 1)), above, np.zeros((rows, 1))], axis=1
     )
-    class_probabilities = padded[:, :-1] - padded[:, 1:]
-    chosen = class_probabilities.argmax(axis=1)
-    return [values[int(index)] for index in chosen]
+    return padded[:, :-1] - padded[:, 1:]
+
+
+def predict(head: dict, features) -> list[Any]:
+    """Class values via the cumulative chain, one row per feature row."""
+    from . import decode
+
+    return decode.decode_levels(
+        class_distribution(head, features), head["values"], "argmax"
+    )
 
 
 def applies(spec, field_name: str) -> bool:

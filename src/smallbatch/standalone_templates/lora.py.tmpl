@@ -218,8 +218,14 @@ def _classify_levels(tokenizer, model, prompts, levels):
     with torch.no_grad():
         logits = model(**encoded).logits[:, -1, :].float()
     probabilities = torch.softmax(logits[:, torch.tensor(ids)], dim=-1)
-    if FUNCTION["runtime"].get("decode") == "median":
+    decoder = FUNCTION["runtime"].get("decode")
+    if decoder == "median":
         chosen = (probabilities.cumsum(dim=-1) >= 0.5).float().argmax(dim=-1)
+    elif decoder == "within_one":
+        window = probabilities.clone()
+        window[:, :-1] += probabilities[:, 1:]
+        window[:, 1:] += probabilities[:, :-1]
+        chosen = window.argmax(dim=-1)
     else:
         chosen = probabilities.argmax(dim=-1)
     return [levels[int(index)] for index in chosen]

@@ -214,10 +214,11 @@ class LoraCandidateSpec(BaseModel):
     # auto uses it for scalar integer decisions without rationale distillation.
     objective: Literal["auto", "token", "ordinal"] = "auto"
     # which point of the level distribution to report: the mode (argmax, the
-    # level constrained generation would emit) or the median (the first level
+    # level constrained generation would emit), the median (the first level
     # whose cumulative probability reaches one half, which trades exact hits
-    # for smaller misses). auto lets the development split decide.
-    decode: Literal["auto", "argmax", "median"] = "auto"
+    # for smaller misses), or within_one (the level whose ±1 window holds the
+    # most mass). auto lets the development split decide.
+    decode: Literal["auto", "argmax", "median", "within_one"] = "auto"
     # recompute activations in the backward pass instead of holding them: buys
     # a large amount of GPU memory for roughly a third more compute, which is
     # what lets a bigger student train on a small card
