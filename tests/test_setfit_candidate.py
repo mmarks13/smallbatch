@@ -79,7 +79,19 @@ def stub_graded_embeddings(monkeypatch):
     """The fake model has no SentenceTransformer body; capture the call."""
     calls = []
 
-    def fake(model, texts, labels, span, batch_size, pair_budget, checkpoint_dir, seed):
+    def fake(
+        model,
+        texts,
+        labels,
+        span,
+        batch_size,
+        pair_budget,
+        checkpoint_dir,
+        seed,
+        epochs=1,
+        dev_texts=None,
+        dev_labels=None,
+    ):
         calls.append(
             {
                 "rows": len(texts),
@@ -87,9 +99,18 @@ def stub_graded_embeddings(monkeypatch):
                 "span": span,
                 "pair_budget": pair_budget,
                 "seed": seed,
+                "epochs": epochs,
+                "dev_rows": len(dev_texts or []),
             }
         )
-        return pair_budget
+        return {
+            "pairs": pair_budget,
+            "curve": [
+                {"epoch": 0, "dev_within_one": 0.5},
+                {"epoch": 1, "dev_within_one": 0.75},
+            ],
+            "best_epoch": 1,
+        }
 
     monkeypatch.setattr("smallbatch.setfit_candidate._train_graded_embeddings", fake)
     return calls
@@ -273,9 +294,14 @@ def test_setfit_ordinal_embeddings_train_graded_not_contrastive(tmp_path, monkey
     assert calls[0]["rows"] == 24  # every training row, no few-shot cap
     assert calls[0]["span"] == 2
     assert calls[0]["pair_budget"] > 0
+    assert calls[0]["dev_rows"] == 24  # the full dev split scores each epoch
     training = metadata["field_training"]["score"]
     assert training["embedding_status"] == "trained"
     assert training["embedding_loss"] == "graded-cosine"
+    # the record carries the epoch curve and which weights survived
+    assert training["embedding_pairs"] == calls[0]["pair_budget"]
+    assert training["embedding_curve"][0] == {"epoch": 0, "dev_within_one": 0.5}
+    assert training["embedding_best_epoch"] == 1
 
 
 def test_setfit_enum_embeddings_keep_binary_contrastive_pairs(tmp_path, monkeypatch):

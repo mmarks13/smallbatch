@@ -84,20 +84,31 @@ def _train_graded_embeddings(
     pair_budget: int,
     checkpoint_dir: Path,
     seed: int,
-) -> int:
+    epochs: int = 1,
+    dev_texts: list[str] | None = None,
+    dev_labels: list[int] | None = None,
+) -> dict[str, Any]:
     """Fine-tune the SentenceTransformer body with graded cosine targets.
 
     Binary same/different pairs push adjacent levels apart exactly as hard as
     opposite ends of the scale, which destroys the very ordering the ordinal
     head must recover from the embedding. Cosine targets that decay with level
-    distance train the space to keep the scale's geometry instead. Returns the
-    number of pairs trained on."""
+    distance train the space to keep the scale's geometry instead.
+
+    With development rows, every epoch — including epoch 0, the frozen body —
+    is scored by fitting a throwaway ordered head and measuring dev within-one
+    agreement, and the best-scoring weights are what survives, the same
+    snapshot-best protection the LoRA path has. A frozen body that beats its
+    own fine-tuning is kept, and the curve says so."""
     from datasets import Dataset
     from sentence_transformers import (
         SentenceTransformerTrainer,
         SentenceTransformerTrainingArguments,
     )
     from sentence_transformers.losses import CosineSimilarityLoss
+    from transformers import TrainerCallback
+
+    from . import ordinal
 
     pairs = _graded_pairs(texts, labels, span, pair_budget, seed)
     dataset = Dataset.from_dict(
@@ -108,9 +119,52 @@ def _train_graded_embeddings(
         }
     )
     body = model.model_body
+    select = bool(dev_texts) and bool(dev_labels)
+    curve: list[dict[str, Any]] = []
+    best: dict[str, Any] = {"epoch": None, "score": None, "state": None}
+
+    def dev_within_one() -> float:
+        from sklearn.linear_model import LogisticRegression
+
+        head = ordinal.build(
+            list(range(span + 1)),
+            body.encode(texts, show_progress_bar=False),
+            labels,
+            lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
+        )
+        predictions = ordinal.predict(
+            head, body.encode(dev_texts, show_progress_bar=False)
+        )
+        return sum(
+            abs(prediction - reference) <= 1
+            for prediction, reference in zip(predictions, dev_labels)
+        ) / len(dev_labels)
+
+    def snapshot(epoch: int) -> None:
+        value = dev_within_one()
+        curve.append({"epoch": epoch, "dev_within_one": round(value, 4)})
+        print(
+            f"[smallbatch] embedding epoch {epoch}: dev_within_one={value:.4f}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if best["score"] is None or value > best["score"]:
+            best["epoch"] = epoch
+            best["score"] = value
+            best["state"] = {
+                key: tensor.detach().cpu().clone()
+                for key, tensor in body.state_dict().items()
+            }
+
+    class KeepBest(TrainerCallback):
+        def on_epoch_end(self, args, state, control, **kwargs):
+            snapshot(int(round(state.epoch)))
+
+    if select:
+        snapshot(0)
     st_args = SentenceTransformerTrainingArguments(
         output_dir=str(checkpoint_dir),
-        num_train_epochs=1,
+        num_train_epochs=epochs,
         per_device_train_batch_size=batch_size,
         save_strategy="no",
         logging_strategy="no",
@@ -123,9 +177,16 @@ def _train_graded_embeddings(
         args=st_args,
         train_dataset=dataset,
         loss=CosineSimilarityLoss(body),
+        callbacks=[KeepBest()] if select else None,
     )
     trainer.train()
-    return len(pairs)
+    if select and best["epoch"] != curve[-1]["epoch"]:
+        body.load_state_dict(best["state"])
+    return {
+        "pairs": len(pairs),
+        "curve": curve or None,
+        "best_epoch": best["epoch"],
+    }
 
 
 def _resolved_args(
@@ -227,6 +288,7 @@ def train_setfit(
             train_dataset=train_dataset,
             eval_dataset=eval_dataset if dev_rows else None,
         )
+        embedding_training = None
         if embedding_train and is_ordinal:
             iterations = resolved.get("num_iterations")
             pair_budget = (
@@ -237,7 +299,7 @@ def train_setfit(
                     2 * MAX_PAIR_ITERATIONS * len(embedding_train),
                 )
             )
-            _train_graded_embeddings(
+            embedding_training = _train_graded_embeddings(
                 model,
                 [train_texts[index] for index in embedding_train],
                 [train_labels[index] for index in embedding_train],
@@ -246,6 +308,9 @@ def train_setfit(
                 pair_budget=pair_budget,
                 checkpoint_dir=checkpoint_dir,
                 seed=default_seed,
+                epochs=int(getattr(args, "embedding_num_epochs", None) or 1),
+                dev_texts=dev_texts if dev_rows else None,
+                dev_labels=dev_labels if dev_rows else None,
             )
         elif embedding_train:
             trainer.train_embeddings(
@@ -313,6 +378,9 @@ def train_setfit(
             "embedding_eval_rows": len(embedding_eval),
             "embedding_status": embedding_status,
             "embedding_loss": embedding_loss,
+            "embedding_pairs": (embedding_training or {}).get("pairs"),
+            "embedding_curve": (embedding_training or {}).get("curve"),
+            "embedding_best_epoch": (embedding_training or {}).get("best_epoch"),
             "classifier_train_rows": len(train_rows),
             "objective": objective,
             "decode": decoder,
