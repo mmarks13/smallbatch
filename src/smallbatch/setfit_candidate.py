@@ -49,6 +49,85 @@ def _has_positive_pair(labels: list[int], indices: list[int]) -> bool:
     return any(count >= 2 for count in Counter(labels[index] for index in indices).values())
 
 
+def _graded_pairs(
+    texts: list[str], labels: list[int], span: int, budget: int, seed: int
+) -> list[tuple[str, str, float]]:
+    """Level-stratified pairs with cosine targets of `1 - |Δlevel| / span`.
+
+    Both endpoints draw a level uniformly from the observed ones before
+    drawing a row, so every level distance — including zero — appears at a
+    rate independent of class imbalance."""
+    rng = random.Random(seed)
+    by_level: dict[int, list[int]] = defaultdict(list)
+    for index, label in enumerate(labels):
+        by_level[label].append(index)
+    levels = sorted(by_level)
+    pairs: list[tuple[str, str, float]] = []
+    for _ in range(budget):
+        first_level, second_level = rng.choice(levels), rng.choice(levels)
+        first = rng.choice(by_level[first_level])
+        second = rng.choice(by_level[second_level])
+        if first == second:
+            continue  # a row paired with itself teaches nothing
+        pairs.append(
+            (texts[first], texts[second], 1.0 - abs(first_level - second_level) / span)
+        )
+    return pairs
+
+
+def _train_graded_embeddings(
+    model,
+    texts: list[str],
+    labels: list[int],
+    span: int,
+    batch_size: int,
+    pair_budget: int,
+    checkpoint_dir: Path,
+    seed: int,
+) -> int:
+    """Fine-tune the SentenceTransformer body with graded cosine targets.
+
+    Binary same/different pairs push adjacent levels apart exactly as hard as
+    opposite ends of the scale, which destroys the very ordering the ordinal
+    head must recover from the embedding. Cosine targets that decay with level
+    distance train the space to keep the scale's geometry instead. Returns the
+    number of pairs trained on."""
+    from datasets import Dataset
+    from sentence_transformers import (
+        SentenceTransformerTrainer,
+        SentenceTransformerTrainingArguments,
+    )
+    from sentence_transformers.losses import CosineSimilarityLoss
+
+    pairs = _graded_pairs(texts, labels, span, pair_budget, seed)
+    dataset = Dataset.from_dict(
+        {
+            "sentence_1": [pair[0] for pair in pairs],
+            "sentence_2": [pair[1] for pair in pairs],
+            "label": [pair[2] for pair in pairs],
+        }
+    )
+    body = model.model_body
+    st_args = SentenceTransformerTrainingArguments(
+        output_dir=str(checkpoint_dir),
+        num_train_epochs=1,
+        per_device_train_batch_size=batch_size,
+        save_strategy="no",
+        logging_strategy="no",
+        report_to="none",
+        seed=seed,
+        disable_tqdm=True,
+    )
+    trainer = SentenceTransformerTrainer(
+        model=body,
+        args=st_args,
+        train_dataset=dataset,
+        loss=CosineSimilarityLoss(body),
+    )
+    trainer.train()
+    return len(pairs)
+
+
 def _resolved_args(
     config: SetFitCandidateSpec, output_dir: Path, embedding_rows: int
 ):
@@ -110,8 +189,16 @@ def train_setfit(
         embedding_eval = _embedding_indices(
             dev_labels, config.embedding_samples_per_class, default_seed
         )
-        if not _has_positive_pair(train_labels, embedding_train):
-            embedding_train = []
+        is_ordinal = ordinal.applies(spec, field_name)
+        if is_ordinal:
+            # graded pairs need two distinct levels, not two same-level rows
+            if len({train_labels[index] for index in embedding_train}) < 2:
+                embedding_train = []
+            skip_reason = "skipped-single-level"
+        else:
+            if not _has_positive_pair(train_labels, embedding_train):
+                embedding_train = []
+            skip_reason = "skipped-no-positive-pair"
         if not _has_positive_pair(dev_labels, embedding_eval):
             embedding_eval = []
         model = SetFitModel.from_pretrained(
@@ -121,12 +208,16 @@ def train_setfit(
         checkpoint_dir = field_dir / "checkpoints"
         args = _resolved_args(config, checkpoint_dir, max(1, len(embedding_train)))
         resolved = json.loads(json.dumps(args.to_dict(), default=str))
-        embedding_status = "trained" if embedding_train else "skipped-no-positive-pair"
+        embedding_status = "trained" if embedding_train else skip_reason
+        embedding_loss = None
+        if embedding_train:
+            embedding_loss = "graded-cosine" if is_ordinal else "contrastive-pairs"
         print(
             f"[smallbatch] SetFit field={field_name} "
             f"embedding_train={len(embedding_train)} "
             f"embedding_eval={len(embedding_eval)} classifier_train={len(train_rows)} "
-            f"pair_iterations={resolved.get('num_iterations')} status={embedding_status}",
+            f"pair_iterations={resolved.get('num_iterations')} status={embedding_status}"
+            + (f" loss={embedding_loss}" if embedding_loss else ""),
             file=sys.stderr,
             flush=True,
         )
@@ -136,7 +227,27 @@ def train_setfit(
             train_dataset=train_dataset,
             eval_dataset=eval_dataset if dev_rows else None,
         )
-        if embedding_train:
+        if embedding_train and is_ordinal:
+            iterations = resolved.get("num_iterations")
+            pair_budget = (
+                2 * int(iterations) * len(embedding_train)
+                if iterations
+                else min(
+                    TARGET_CONTRASTIVE_PAIRS,
+                    2 * MAX_PAIR_ITERATIONS * len(embedding_train),
+                )
+            )
+            _train_graded_embeddings(
+                model,
+                [train_texts[index] for index in embedding_train],
+                [train_labels[index] for index in embedding_train],
+                span=len(values) - 1,
+                batch_size=int(getattr(args, "embedding_batch_size", None) or 16),
+                pair_budget=pair_budget,
+                checkpoint_dir=checkpoint_dir,
+                seed=default_seed,
+            )
+        elif embedding_train:
             trainer.train_embeddings(
                 [train_texts[index] for index in embedding_train],
                 [train_labels[index] for index in embedding_train],
@@ -148,7 +259,7 @@ def train_setfit(
         decoder = None
         dev_decode_comparison = None
         head_diagnostics = None
-        if ordinal.applies(spec, field_name):
+        if is_ordinal:
             # SetFit's own head is multinomial over unrelated symbols. Fit the
             # ordered head on the same tuned embeddings instead, and persist it
             # as stock sklearn parts so packages need no Smallbatch class.
@@ -201,6 +312,7 @@ def train_setfit(
             "embedding_train_rows": len(embedding_train),
             "embedding_eval_rows": len(embedding_eval),
             "embedding_status": embedding_status,
+            "embedding_loss": embedding_loss,
             "classifier_train_rows": len(train_rows),
             "objective": objective,
             "decode": decoder,
