@@ -168,9 +168,11 @@ def test_setfit_ordinal_head_gets_a_dev_selected_decoder(tmp_path, monkeypatch):
     assert training["dev_decode_comparison"]["selected"] == training["decode"]
     assert training["dev_decode_comparison"]["metric"] == "within_one"
 
-    # the boundary models tried the regularization grid on dev
+    # the head tried the capacity grid on dev
     assert training["head_tuning"]["metric"] == "within_one"
-    assert training["head_tuning"]["selected"]["C"] in (0.1, 1.0, 10.0)
+    assert {"hidden", "dropout", "weight_decay", "seed"} <= set(
+        training["head_tuning"]["selected"]
+    )
 
     # the frozen-vs-tuned delta comes straight from the embedding curve
     assert training["frozen_vs_tuned"] == {
@@ -183,7 +185,7 @@ def test_setfit_ordinal_head_gets_a_dev_selected_decoder(tmp_path, monkeypatch):
     # aggregate head diagnostics in the record; per-row evidence local-only
     diagnostics = training["head_diagnostics"]
     assert diagnostics["rows"] == len(rows)
-    assert diagnostics["boundaries"][0]["boundary"] == 0
+    assert [entry["level"] for entry in diagnostics["levels"]] == [0, 1, 2]
     local = json.loads((tmp_path / "score" / "dev_distributions.local.json").read_text())
     assert local["score"]["levels"] == [0, 1, 2]
     assert local["score"]["rows"][0]["reference"] == 0

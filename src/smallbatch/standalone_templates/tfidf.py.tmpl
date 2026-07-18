@@ -37,7 +37,7 @@ def classify_batch(items):
     for name, model in _load().items():
         features = model["vectorizer"].transform(texts)
         head = model["head"]
-        if isinstance(head, dict) and head.get("kind") == "ordinal-cumulative":
+        if isinstance(head, dict) and head.get("kind") == "ordinal-softmax":
             values = ordinal_predict(head, features)
         else:
             values = head.predict(features)

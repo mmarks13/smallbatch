@@ -60,9 +60,12 @@ def test_markdown_shows_decoder_selection_and_head_diagnostics(tmp_path):
     diagnostics = {
         "rows": 40,
         "decoder": "median",
-        "monotonicity_violations": {"row_rate": 0.1, "mean_magnitude": 0.02, "max_magnitude": 0.05},
-        "repair_changed_prediction_rate": 0.025,
-        "boundaries": [],
+        "hidden": 64,
+        "mean_confidence": 0.72,
+        "levels": [
+            {"level": 0, "mean_probability": 0.2, "observed_rate": 0.25},
+            {"level": 1, "mean_probability": 0.8, "observed_rate": 0.75},
+        ],
     }
     tfidf = candidate([1])
     tfidf["decode"] = {"score": "median"}
@@ -109,8 +112,8 @@ def test_markdown_shows_decoder_selection_and_head_diagnostics(tmp_path):
     assert "| median * | 0.4500 | 0.8000 | 0.7000 |" in markdown
     assert "Decode `score`: **argmax** (pinned)" in markdown
     assert "Decode `decode`: **median** (dev-selected)" in markdown
-    assert "monotonicity violations in 0.1000 of rows" in markdown
-    assert "repair changed 0.0250 of predictions" in markdown
+    assert "Ordinal head on dev: 64-hidden capacity, mean confidence 0.7200." in markdown
+    assert "| 0 | 0.2000 | 0.2500 |" in markdown
     assert (
         "Embedding `score`: frozen 0.7000 -> best 0.8500 dev within-one "
         "(delta 0.1500, kept epoch 1)" in markdown

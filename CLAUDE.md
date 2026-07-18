@@ -94,8 +94,9 @@ runtime before atomically changing `active.json`.
 - `spec.py`: prompt-first schema, strict input/output validation, identities.
 - `labeling.py`, `calibration.py`, `journal.py`: decision acquisition and data.
 - `candidates.py`, `setfit_candidate.py`, `training.py`: candidate training.
-- `ordinal.py`, `decode.py`: ordered-scale heads and distribution decoding,
-  shared across candidates; decoder and head tuning use dev, never eval.
+- `heads.py`, `decode.py`: the shared softmax ordinal head, its single CE+RPS
+  objective, and distribution decoding, shared across candidates; decoder,
+  capacity, and seed tuning use dev, never eval.
 - `evaluate.py`, `metrics.py`, `profiling.py`, `report.py`: evidence.
 - `artifacts.py`, `runtime.py`: immutable builds and internal candidate loading.
 - `standalone.py`, `standalone_templates/`: generated no-Smallbatch packages.

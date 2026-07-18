@@ -1,77 +1,49 @@
+"""TF-IDF candidate integration with the shared softmax ordinal head.
+
+Unit coverage for the head itself lives in test_heads.py; these tests exercise
+the candidate path — training, persistence, decoding, diagnostics, and the
+generated package's reimplementation.
+"""
+
 from __future__ import annotations
 
 import json
 
 import numpy as np
 import pytest
-from sklearn.linear_model import LogisticRegression
 
 from conftest import make_spec
-from smallbatch import ordinal
+from smallbatch import heads
 
 
-def fit_binary(features, targets):
-    return LogisticRegression(max_iter=1000).fit(features, targets)
+@pytest.fixture(autouse=True)
+def fast_training(monkeypatch):
+    """Unit tests exercise selection logic, not convergence budgets."""
+    monkeypatch.setattr(heads, "MAX_EPOCHS", 200)
+    monkeypatch.setattr(heads, "NO_DEV_EPOCHS", 200)
+    monkeypatch.setattr(heads, "PATIENCE", 30)
+    monkeypatch.setattr(heads, "SEEDS", (0,))
 
 
-def test_applies_only_to_integer_scales():
-    assert ordinal.applies(make_spec(output={"type": "int", "range": [0, 4]}), "score")
-    assert not ordinal.applies(make_spec(), "score")  # enum labels have no order
-
-
-def test_chain_recovers_the_ordered_levels():
-    """One feature that increases with the level: the ordered head must map it
-    back to the right level, which is the ordering a multinomial head ignores."""
-    values = [0, 1, 2, 3, 4]
-    features = np.array([[float(level)] for level in values for _ in range(12)])
-    labels = [level for level in values for _ in range(12)]
-    head = ordinal.build(values, features, labels, fit_binary)
-
-    predicted = ordinal.predict(head, np.array([[0.0], [2.0], [4.0]]))
-    assert predicted == [0, 2, 4]
-
-
-def test_a_level_with_no_rows_is_a_constant_step_not_a_crash():
-    """CFPB produced a scale where one level had almost no rows; a boundary with
-    only one observed side has nothing to learn and must not fail training."""
-    values = [0, 1, 2]
-    features = np.array([[0.0]] * 10 + [[1.0]] * 10)
-    labels = [1] * 10 + [2] * 10  # level 0 never occurs
-    head = ordinal.build(values, features, labels, fit_binary)
-
-    assert head["steps"][0]["model"] is None
-    assert head["steps"][0]["above"] == 1.0
-    assert ordinal.predict(head, np.array([[0.0], [1.0]])) == [1, 2]
-
-
-def test_predictions_stay_monotonic_when_binary_models_disagree():
-    """The per-boundary models are fit independently, so P(y>1) can exceed
-    P(y>0) on some row; differencing that directly would yield a negative
-    probability, so the chain is forced monotonic first."""
-    head = {
-        "kind": ordinal.KIND,
-        "values": [0, 1, 2],
-        "steps": [{"above": 0.30, "model": None}, {"above": 0.80, "model": None}],
-    }
-    assert ordinal.predict(head, np.zeros((1, 1))) == [0]
+def scale_rows(levels=3):
+    texts = ("routine question", "delayed response", "money withheld")
+    return [
+        {
+            "id": f"{level}-{index}",
+            "input": {"title": f"case {index}", "body": texts[level]},
+            "output": level,
+            "origin": "real",
+        }
+        for level in range(levels)
+        for index in range(8)
+    ]
 
 
 def test_tfidf_trains_an_ordered_head_and_round_trips(tmp_path):
     from smallbatch.candidates import predict_tfidf, train_tfidf
 
     spec = make_spec(output={"type": "int", "range": [0, 2]})
-    rows = []
-    for level, text in ((0, "routine question"), (1, "delayed response"), (2, "money withheld")):
-        for index in range(8):
-            rows.append(
-                {
-                    "id": f"{level}-{index}",
-                    "input": {"title": f"case {index}", "body": text},
-                    "output": level,
-                    "origin": "real",
-                }
-            )
-    record = train_tfidf(spec, rows, tmp_path)
+    record = train_tfidf(spec, scale_rows(), tmp_path)
     assert record["objective"] == {"score": "ordinal"}
 
     predictions = predict_tfidf(
@@ -97,9 +69,9 @@ def test_enum_output_keeps_the_multinomial_head(tmp_path):
     assert record["objective"] == {"score": "multinomial"}
 
 
-def test_ordered_head_persists_as_stock_sklearn_only(tmp_path):
+def test_ordered_head_persists_as_plain_numpy_only(tmp_path):
     """Artifacts must load under skops' strict policy and carry no Smallbatch
-    class, or generated packages could not unpickle them without smallbatch."""
+    class — and no torch — or generated packages could not unpickle them."""
     import skops.io as sio
 
     from smallbatch.candidates import train_tfidf
@@ -118,13 +90,32 @@ def test_ordered_head_persists_as_stock_sklearn_only(tmp_path):
     path = tmp_path / "model.skops"
     assert sio.get_untrusted_types(file=path) == []
     loaded = sio.load(path, trusted=[])
-    assert loaded["score"]["head"]["kind"] == ordinal.KIND
+    head = loaded["score"]["head"]
+    assert head["kind"] == heads.KIND
+    assert all(isinstance(layer["weight"], np.ndarray) for layer in head["layers"])
+
+
+def test_a_cumulative_head_from_an_old_build_fails_closed():
+    """v0.2 builds persisted a boundary-chain head; running one must refuse
+    with direction, not decode garbage or crash mid-arithmetic."""
+    from smallbatch.candidates import predict_tfidf_pipelines
+
+    class IdentityVectorizer:
+        def transform(self, texts):
+            return np.zeros((len(texts), 1))
+
+    spec = make_spec(output={"type": "int", "range": [0, 2]})
+    old_head = {"kind": "ordinal-cumulative", "values": [0, 1, 2], "steps": []}
+    pipelines = {"score": {"vectorizer": IdentityVectorizer(), "head": old_head}}
+    with pytest.raises(ValueError, match="predates the v0.3 softmax head"):
+        predict_tfidf_pipelines(pipelines, spec, [{"title": "t", "body": "b"}])
 
 
 @pytest.mark.parametrize("decoder", [None, "argmax", "median", "within_one"])
-def test_predict_matches_the_standalone_template_chain(decoder):
-    """The generated package reimplements the chain; the two must agree for
-    every decode rule and for heads persisted before the decoder key existed."""
+def test_predict_matches_the_standalone_template_arithmetic(decoder):
+    """The generated package reimplements the head in a few lines of numpy;
+    the two must agree for every decode rule and for heads persisted before
+    the decoder key existed."""
     template = (
         __import__("pathlib")
         .Path("src/smallbatch/standalone_templates/common.py.tmpl")
@@ -134,129 +125,17 @@ def test_predict_matches_the_standalone_template_chain(decoder):
     body = template.split("def ordinal_predict", 1)[1]
     exec("def ordinal_predict" + body.split("\ndef metadata", 1)[0], namespace)
 
-    head = {
-        "kind": ordinal.KIND,
-        "values": [0, 1, 2, 3],
-        "steps": [
-            {"above": 0.9, "model": None},
-            {"above": 0.7, "model": None},
-            {"above": 0.1, "model": None},
-        ],
-    }
+    rng = np.random.default_rng(0)
+    features = np.array(
+        [[float(level) + rng.normal(0, 0.1)] for level in (0, 1, 2, 3) for _ in range(8)]
+    )
+    labels = [level for level in (0, 1, 2, 3) for _ in range(8)]
+    head, _ = heads.fit_head([0, 1, 2, 3], features, labels)
     if decoder is not None:
         head["decoder"] = decoder
-    features = np.zeros((2, 1))
-    assert namespace["ordinal_predict"](head, features) == ordinal.predict(head, features)
 
-
-@pytest.mark.parametrize("levels", [2, 5, 11])
-def test_class_probabilities_are_a_distribution(levels):
-    values = list(range(levels))
-    head = {
-        "kind": ordinal.KIND,
-        "values": values,
-        "steps": [
-            {"above": 1.0 - (index + 1) / levels, "model": None}
-            for index in range(levels - 1)
-        ],
-    }
-    predicted = ordinal.predict(head, np.zeros((3, 1)))
-    assert all(value in values for value in predicted)
-
-    distribution = ordinal.class_distribution(head, np.zeros((3, 1)))
-    assert distribution.shape == (3, levels)
-    assert np.allclose(distribution.sum(axis=1), 1.0)
-    assert (distribution >= 0).all()
-
-
-def test_class_distribution_matches_the_differenced_chain():
-    head = {
-        "kind": ordinal.KIND,
-        "values": [0, 1, 2],
-        "steps": [{"above": 0.9, "model": None}, {"above": 0.4, "model": None}],
-    }
-    distribution = ordinal.class_distribution(head, np.zeros((1, 1)))
-    assert np.allclose(distribution, [[0.1, 0.5, 0.4]])
-
-
-# class distribution [0.40, 0.05, 0.25, 0.30, 0.00]: the three decode rules
-# each read a different level (argmax 0, within_one 1, median 2)
-SPLIT_MASS_HEAD = {
-    "kind": ordinal.KIND,
-    "values": [0, 1, 2, 3, 4],
-    "steps": [
-        {"above": 0.60, "model": None},
-        {"above": 0.55, "model": None},
-        {"above": 0.30, "model": None},
-        {"above": 0.00, "model": None},
-    ],
-}
-
-
-def test_select_decoder_keeps_the_best_within_one_rule_on_dev():
-    head = dict(SPLIT_MASS_HEAD)
-    comparison = ordinal.select_decoder(head, np.zeros((4, 1)), [2, 2, 2, 2])
-    # median reads 2 (exact); within_one reads 1 (still within one); argmax
-    # reads 0 (two off) — median wins the tie by coming first
-    assert head["decoder"] == "median"
-    assert comparison["selected"] == "median"
-    assert comparison["metric"] == "within_one"
-    assert comparison["decoders"]["median"]["within_one"] == 1.0
-    assert comparison["decoders"]["argmax"]["within_one"] == 0.0
-
-
-def test_select_decoder_ties_resolve_to_the_stable_default():
-    head = dict(SPLIT_MASS_HEAD)
-    # references at 0: argmax is exact, within_one lands within one — both
-    # score 1.0 on the selection metric, and argmax (listed first) wins
-    comparison = ordinal.select_decoder(head, np.zeros((4, 1)), [0, 0, 0, 0])
-    assert head["decoder"] == "argmax"
-    assert comparison["decoders"]["within_one"]["within_one"] == 1.0
-
-
-def test_select_decoder_pinned_setting_skips_the_dev_comparison():
-    head = dict(SPLIT_MASS_HEAD)
-    assert ordinal.select_decoder(head, np.zeros((1, 1)), [2], "median") is None
-    assert head["decoder"] == "median"
-
-
-def test_select_decoder_without_dev_rows_keeps_argmax():
-    head = dict(SPLIT_MASS_HEAD)
-    assert ordinal.select_decoder(head, None, []) is None
-    assert head["decoder"] == "argmax"
-
-
-def test_predict_honors_the_persisted_decoder():
-    head = dict(SPLIT_MASS_HEAD)
-    assert ordinal.predict(head, np.zeros((1, 1))) == [0]  # no key: argmax
-    head["decoder"] = "median"
-    assert ordinal.predict(head, np.zeros((1, 1))) == [2]
-    head["decoder"] = "within_one"
-    assert ordinal.predict(head, np.zeros((1, 1))) == [1]
-
-
-def test_fit_head_without_dev_rows_is_the_default_fit():
-    features = np.array([[float(level)] for level in (0, 1, 2) for _ in range(8)])
-    labels = [level for level in (0, 1, 2) for _ in range(8)]
-    head, tuning = ordinal.fit_head([0, 1, 2], features, labels)
-    assert tuning is None
-    assert ordinal.predict(head, np.array([[0.0], [2.0]])) == [0, 2]
-
-
-def test_fit_head_tries_the_grid_on_dev_and_keeps_the_best():
-    features = np.array([[float(level)] for level in (0, 1, 2) for _ in range(8)])
-    labels = [level for level in (0, 1, 2) for _ in range(8)]
-    head, tuning = ordinal.fit_head([0, 1, 2], features, labels, features, labels)
-
-    assert tuning["metric"] == "within_one"
-    assert len(tuning["trials"]) == len(ordinal.HEAD_GRID)
-    assert {trial["C"] for trial in tuning["trials"]} == {0.1, 1.0, 10.0}
-    assert tuning["selected"] in [
-        {"C": c, "class_weight": weight} for c, weight in ordinal.HEAD_GRID
-    ]
-    # a perfectly separable dev split ties every trial at 1.0: the default wins
-    assert tuning["selected"] == {"C": 1.0, "class_weight": None}
-    assert ordinal.predict(head, np.array([[1.0]])) == [1]
+    probe = np.array([[0.3], [1.6], [3.2]])
+    assert namespace["ordinal_predict"](head, probe) == heads.predict(head, probe)
 
 
 def test_tfidf_selects_and_persists_a_decoder(tmp_path):
@@ -265,17 +144,7 @@ def test_tfidf_selects_and_persists_a_decoder(tmp_path):
     from smallbatch.candidates import train_tfidf
 
     spec = make_spec(output={"type": "int", "range": [0, 2]})
-    rows = []
-    for level, text in ((0, "routine question"), (1, "delayed response"), (2, "money withheld")):
-        for index in range(8):
-            rows.append(
-                {
-                    "id": f"{level}-{index}",
-                    "input": {"title": f"case {index}", "body": text},
-                    "output": level,
-                    "origin": "real",
-                }
-            )
+    rows = scale_rows()
     record = train_tfidf(spec, rows, tmp_path, dev_rows=rows)
     assert record["decode"]["score"] in ("argmax", "median", "within_one")
     assert record["dev_decode_comparison"]["score"]["selected"] == record["decode"]["score"]
@@ -307,88 +176,21 @@ def test_tfidf_pinned_decoder_needs_no_dev_rows(tmp_path):
     assert loaded["score"]["head"]["decoder"] == "median"
 
 
-def test_boundary_probabilities_expose_the_unrepaired_chain():
-    """Diagnostics need the raw crossing, not the repaired one."""
-    head = {
-        "kind": ordinal.KIND,
-        "values": [0, 1, 2],
-        "steps": [{"above": 0.30, "model": None}, {"above": 0.80, "model": None}],
-    }
-    raw = ordinal.boundary_probabilities(head, np.zeros((1, 1)))
-    assert np.allclose(raw, [[0.30, 0.80]])  # the violation survives here
-    repaired = ordinal.class_distribution(head, np.zeros((1, 1)))
-    assert np.allclose(repaired, [[0.70, 0.0, 0.30]])
-
-
-def test_head_diagnostics_measure_violations_and_repair_effect():
-    head = {
-        "kind": ordinal.KIND,
-        "values": [0, 1, 2],
-        "steps": [{"above": 0.30, "model": None}, {"above": 0.80, "model": None}],
-    }
-    diagnostics = ordinal.head_diagnostics(head, np.zeros((2, 1)), [1, 2])
-
-    violations = diagnostics["monotonicity_violations"]
-    assert violations["row_rate"] == 1.0
-    assert violations["mean_magnitude"] == 0.5
-    assert violations["max_magnitude"] == 0.5
-    # unrepaired chain decodes 2 (mass [0.7, -0.5, 0.8]); repaired decodes 0
-    assert diagnostics["repair_changed_prediction_rate"] == 1.0
-    assert diagnostics["rows"] == 2
-    assert diagnostics["decoder"] == "argmax"
-    assert diagnostics["boundaries"] == [
-        {"boundary": 0, "mean_predicted": 0.30, "observed_rate": 1.0},
-        {"boundary": 1, "mean_predicted": 0.80, "observed_rate": 0.5},
-    ]
-
-
-def test_head_diagnostics_report_a_clean_chain_as_clean():
-    head = dict(SPLIT_MASS_HEAD)
-    diagnostics = ordinal.head_diagnostics(head, np.zeros((4, 1)), [0, 1, 2, 2])
-    violations = diagnostics["monotonicity_violations"]
-    assert violations["row_rate"] == 0.0
-    assert violations["mean_magnitude"] == 0.0
-    assert diagnostics["repair_changed_prediction_rate"] == 0.0
-
-
-def test_head_diagnostics_relabel_boundaries_for_index_space_heads():
-    """SetFit heads train on indices of the real scale; the report must show
-    the scale's own levels."""
-    head = {
-        "kind": ordinal.KIND,
-        "values": [0, 1],  # indices
-        "steps": [{"above": 0.5, "model": None}],
-    }
-    diagnostics = ordinal.head_diagnostics(head, np.zeros((2, 1)), [0, 1], levels=[3, 4])
-    assert diagnostics["boundaries"][0]["boundary"] == 3
-
-
-def test_tfidf_records_head_diagnostics_and_local_distributions(tmp_path):
+def test_tfidf_records_head_tuning_diagnostics_and_local_distributions(tmp_path):
     from smallbatch.candidates import DEV_DISTRIBUTIONS_FILE, train_tfidf
 
     spec = make_spec(output={"type": "int", "range": [0, 2]})
-    rows = []
-    for level, text in ((0, "routine question"), (1, "delayed response"), (2, "money withheld")):
-        for index in range(8):
-            rows.append(
-                {
-                    "id": f"{level}-{index}",
-                    "input": {"title": f"case {index}", "body": text},
-                    "output": level,
-                    "origin": "real",
-                }
-            )
+    rows = scale_rows()
     record = train_tfidf(spec, rows, tmp_path, dev_rows=rows)
 
     tuning = record["head_tuning"]["score"]
-    assert tuning["selected"]["C"] in (0.1, 1.0, 10.0)
-    assert len(tuning["trials"]) == len(ordinal.HEAD_GRID)
+    assert {"hidden", "dropout", "weight_decay", "seed"} <= set(tuning["selected"])
+    assert len(tuning["trials"]) == len(heads.HEAD_GRID) * len(heads.SEEDS)
 
     diagnostics = record["head_diagnostics"]["score"]
     assert diagnostics["rows"] == len(rows)
-    assert {"monotonicity_violations", "repair_changed_prediction_rate", "boundaries"} <= set(
-        diagnostics
-    )
+    assert [entry["level"] for entry in diagnostics["levels"]] == [0, 1, 2]
+    assert 0.0 <= diagnostics["mean_confidence"] <= 1.0
 
     local = json.loads((tmp_path / DEV_DISTRIBUTIONS_FILE).read_text())
     assert local["score"]["levels"] == [0, 1, 2]

@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from . import ordinal, prompts
+from . import heads, prompts
 from .candidates import _check_class_coverage
 from .labeling import Row, row_output
 from .spec import FunctionSpec, SetFitCandidateSpec
@@ -96,10 +96,10 @@ def _train_graded_embeddings(
     distance train the space to keep the scale's geometry instead.
 
     With development rows, every epoch — including epoch 0, the frozen body —
-    is scored by fitting a throwaway ordered head and measuring dev within-one
-    agreement, and the best-scoring weights are what survives, the same
-    snapshot-best protection the LoRA path has. A frozen body that beats its
-    own fine-tuning is kept, and the curve says so."""
+    is scored by the shared head's fixed probe on dev within-one agreement,
+    and the best-scoring weights are what survives, the same snapshot-best
+    protection the LoRA path has. A frozen body that beats its own fine-tuning
+    is kept, and the curve says so."""
     from datasets import Dataset
     from sentence_transformers import (
         SentenceTransformerTrainer,
@@ -107,8 +107,6 @@ def _train_graded_embeddings(
     )
     from sentence_transformers.losses import CosineSimilarityLoss
     from transformers import TrainerCallback
-
-    from . import ordinal
 
     pairs = _graded_pairs(texts, labels, span, pair_budget, seed)
     dataset = Dataset.from_dict(
@@ -124,21 +122,13 @@ def _train_graded_embeddings(
     best: dict[str, Any] = {"epoch": None, "score": None, "state": None}
 
     def dev_within_one() -> float:
-        from sklearn.linear_model import LogisticRegression
-
-        head = ordinal.build(
+        return heads.probe_within_one(
             list(range(span + 1)),
             body.encode(texts, show_progress_bar=False),
             labels,
-            lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
+            body.encode(dev_texts, show_progress_bar=False),
+            dev_labels,
         )
-        predictions = ordinal.predict(
-            head, body.encode(dev_texts, show_progress_bar=False)
-        )
-        return sum(
-            abs(prediction - reference) <= 1
-            for prediction, reference in zip(predictions, dev_labels)
-        ) / len(dev_labels)
 
     def snapshot(epoch: int) -> None:
         value = dev_within_one()
@@ -250,7 +240,7 @@ def train_setfit(
         embedding_eval = _embedding_indices(
             dev_labels, config.embedding_samples_per_class, default_seed
         )
-        is_ordinal = ordinal.applies(spec, field_name)
+        is_ordinal = heads.applies(spec, field_name)
         if is_ordinal:
             # graded pairs need two distinct levels, not two same-level rows
             if len({train_labels[index] for index in embedding_train}) < 2:
@@ -327,8 +317,9 @@ def train_setfit(
         head_tuning = None
         if is_ordinal:
             # SetFit's own head is multinomial over unrelated symbols. Fit the
-            # ordered head on the same tuned embeddings instead, and persist it
-            # as stock sklearn parts so packages need no Smallbatch class.
+            # shared softmax ordinal head on the same tuned embeddings instead,
+            # and persist it as plain numpy arrays so packages need no
+            # Smallbatch class — and no torch beyond the encoder's own.
             import skops.io as sio
 
             from .candidates import dev_distribution_rows, write_dev_distributions
@@ -337,20 +328,20 @@ def train_setfit(
             dev_embeddings = (
                 model.encode(dev_texts, show_progress_bar=False) if dev_rows else None
             )
-            head, head_tuning = ordinal.fit_head(
+            head, head_tuning = heads.fit_head(
                 list(range(len(values))),
                 embeddings,
                 train_labels,
                 dev_embeddings,
                 dev_labels,
             )
-            dev_decode_comparison = ordinal.select_decoder(
+            dev_decode_comparison = heads.select_decoder(
                 head, dev_embeddings, dev_labels, config.decode
             )
             decoder = head["decoder"]
             field_dir.mkdir(parents=True, exist_ok=True)
             if dev_embeddings is not None and dev_labels:
-                head_diagnostics = ordinal.head_diagnostics(
+                head_diagnostics = heads.head_diagnostics(
                     head, dev_embeddings, dev_labels, levels=values
                 )
                 write_dev_distributions(
@@ -442,6 +433,11 @@ def load_setfit_models(model_dir: Path, spec: FunctionSpec, device: str = "cpu")
                     f"refusing to load {head_path}: unexpected types {sorted(untrusted)}"
                 )
             head = sio.load(head_path, trusted=[])
+            if not isinstance(head, dict) or head.get("kind") != heads.KIND:
+                raise ValueError(
+                    f"unsupported ordinal head kind in {head_path}: this build "
+                    "predates the v0.3 softmax head; re-run compile"
+                )
         loaded[field_name] = (model, values, head)
     return loaded
 
@@ -454,7 +450,7 @@ def predict_setfit_models(models: dict, spec: FunctionSpec, items: list[dict]) -
     for field_name, (model, values, head) in models.items():
         if head is not None:
             embeddings = model.encode(texts, show_progress_bar=False)
-            indices = ordinal.predict(head, embeddings)
+            indices = heads.predict(head, embeddings)
         else:
             raw = model.predict(texts, use_labels=False)
             indices = raw.tolist() if hasattr(raw, "tolist") else list(raw)

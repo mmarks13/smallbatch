@@ -244,13 +244,27 @@ def _decoder_lines(record: dict) -> list[str]:
                     f"{_number(values.get('within_one'))} | {_number(values.get('mae'))} |"
                 )
         if diagnostics:
-            violations = diagnostics["monotonicity_violations"]
-            lines.append(
-                f"\nOrdinal head on dev: monotonicity violations in "
-                f"{_number(violations['row_rate'])} of rows "
-                f"(max magnitude {_number(violations['max_magnitude'])}); repair changed "
-                f"{_number(diagnostics['repair_changed_prediction_rate'])} of predictions."
+            capacity = "linear" if not diagnostics.get("hidden") else (
+                f"{diagnostics['hidden']}-hidden"
             )
+            lines.append(
+                f"\nOrdinal head on dev: {capacity} capacity, mean confidence "
+                f"{_number(diagnostics.get('mean_confidence'))}."
+            )
+            levels = diagnostics.get("levels") or []
+            if levels:
+                lines.extend(
+                    [
+                        "",
+                        "| level | mean probability | observed rate |",
+                        "|---|---:|---:|",
+                    ]
+                )
+                lines.extend(
+                    f"| {entry['level']} | {_number(entry['mean_probability'])} | "
+                    f"{_number(entry['observed_rate'])} |"
+                    for entry in levels
+                )
     return lines
 
 

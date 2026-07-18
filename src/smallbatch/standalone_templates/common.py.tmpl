@@ -53,25 +53,27 @@ def render_input(item):
 
 
 def ordinal_predict(head, features):
-    """Class values from an ordered head: each step scores P(y > level), the
-    chain is forced monotonic, and differencing gives the class distribution.
-    The head's dev-selected decode rule reads a level out of each row; heads
-    persisted without one decode as argmax, as they were evaluated."""
+    """Class values from the softmax ordinal head: scale, one or two affine
+    layers, softmax over the levels — plain numpy arrays are the whole
+    runtime, no torch and no Smallbatch. The head's dev-selected decode rule
+    reads a level out of each row; heads persisted without one decode as
+    argmax, as they were evaluated."""
     import numpy as np
 
     values = head["values"]
-    rows = features.shape[0]
-    above = np.empty((rows, len(head["steps"])), dtype=float)
-    for index, step in enumerate(head["steps"]):
-        if step["model"] is None:
-            above[:, index] = step["above"]
-            continue
-        probabilities = step["model"].predict_proba(features)
-        classes = list(step["model"].classes_)
-        above[:, index] = probabilities[:, classes.index(1)]
-    above = np.minimum.accumulate(above, axis=1)
-    padded = np.concatenate([np.ones((rows, 1)), above, np.zeros((rows, 1))], axis=1)
-    probabilities = padded[:, :-1] - padded[:, 1:]
+    scaler = head.get("scaler")
+    x = features
+    if scaler is not None:
+        x = (np.asarray(x, dtype="float64") - scaler["mean"]) / scaler["scale"]
+    layers = head["layers"]
+    out = x @ layers[0]["weight"].T + layers[0]["bias"]
+    out = np.asarray(out, dtype="float64")
+    if len(layers) > 1:
+        out = np.maximum(out, 0.0)
+        out = out @ layers[1]["weight"].T + layers[1]["bias"]
+    out -= out.max(axis=1, keepdims=True)
+    probabilities = np.exp(out)
+    probabilities /= probabilities.sum(axis=1, keepdims=True)
     decoder = head.get("decoder", "argmax")
     if decoder == "median":
         chosen = (probabilities.cumsum(axis=1) >= 0.5).argmax(axis=1)

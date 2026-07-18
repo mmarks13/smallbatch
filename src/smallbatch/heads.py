@@ -297,6 +297,29 @@ def fit_head(
     }
 
 
+def probe_within_one(
+    values: list[Any], features, labels: list[Any], dev_features, dev_references: list
+) -> float:
+    """Score a feature space by the default head's dev within-one agreement.
+
+    The embedding fine-tune snapshots the epoch whose space decodes best. That
+    needs a fast probe whose score is comparable across epochs — the default
+    linear entry with one seed — not the full capacity search, which the
+    winning space gets exactly once afterwards.
+    """
+    scaler = _fit_scaler(features)
+    _, value = _train_one(
+        _apply_scaler(scaler, features),
+        labels,
+        _apply_scaler(scaler, dev_features),
+        dev_references,
+        values,
+        HEAD_GRID[0],
+        SEEDS[0],
+    )
+    return value
+
+
 def class_distribution(head: dict, features):
     """Per-row probability of every level — plain numpy, no torch.
 

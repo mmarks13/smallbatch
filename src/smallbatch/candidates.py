@@ -19,9 +19,9 @@ def dev_distribution_rows(
     head: dict, features, rows: list[Row], references: list, levels: list | None = None
 ) -> dict:
     """Per-row development class distributions, for local diagnostics only."""
-    from . import ordinal
+    from . import heads
 
-    distribution = ordinal.class_distribution(head, features)
+    distribution = heads.class_distribution(head, features)
     return {
         "levels": head["values"] if levels is None else levels,
         "decoder": head.get("decoder", "argmax"),
@@ -81,17 +81,18 @@ def train_tfidf(
     decode: str = "auto",
 ) -> dict[str, Any]:
     """Fit a TF-IDF vectorizer plus one head per output field and persist with
-    skops. Integer scales get an ordered head (`P(y > level)` per boundary) so
-    the levels train as a scale, with its decode rule selected on the
-    development rows; enum labels get a multinomial classifier. Returns format
-    metadata for the candidate record."""
+    skops. Integer scales get the shared softmax ordinal head — trained with
+    the same CE+RPS objective as every other candidate family, its capacity
+    and decode rule selected on the development rows; enum labels get a
+    multinomial classifier. Returns format metadata for the candidate
+    record."""
     import sklearn
     import skops
     import skops.io as sio
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.linear_model import LogisticRegression
 
-    from . import ordinal
+    from . import heads
 
     _check_class_coverage(spec, train_rows)
     texts = _texts(spec, train_rows)
@@ -108,21 +109,21 @@ def train_tfidf(
         labels = [out[name] if isinstance(out, dict) else out for out in outs]
         vectorizer = TfidfVectorizer(sublinear_tf=True, ngram_range=(1, 2))
         features = vectorizer.fit_transform(texts)
-        if ordinal.applies(spec, name):
+        if heads.applies(spec, name):
             dev_outs = [row_output(spec, r) for r in dev_rows or []]
             dev_references = [out[name] if isinstance(out, dict) else out for out in dev_outs]
             dev_features = vectorizer.transform(dev_texts) if dev_texts else None
-            head, tuning = ordinal.fit_head(
+            head, tuning = heads.fit_head(
                 field.values(), features, labels, dev_features, dev_references
             )
             if tuning is not None:
                 head_tuning[name] = tuning
-            comparison = ordinal.select_decoder(head, dev_features, dev_references, decode)
+            comparison = heads.select_decoder(head, dev_features, dev_references, decode)
             decoders[name] = head["decoder"]
             if comparison is not None:
                 dev_decode_comparison[name] = comparison
             if dev_features is not None and dev_references:
-                head_diagnostics[name] = ordinal.head_diagnostics(
+                head_diagnostics[name] = heads.head_diagnostics(
                     head, dev_features, dev_references
                 )
                 dev_distributions[name] = dev_distribution_rows(
@@ -179,7 +180,7 @@ def predict_tfidf_pipelines(
     pipelines: dict[str, Any], spec: FunctionSpec, items: list[dict]
 ) -> list[Any]:
     """Predict with already-loaded models for honest batch-one timing."""
-    from . import ordinal
+    from . import heads
 
     texts = [prompts.render_input(it, spec.input_schema) for it in items]
     if not texts:
@@ -188,8 +189,13 @@ def predict_tfidf_pipelines(
     for name, model in pipelines.items():
         features = model["vectorizer"].transform(texts)
         head = model["head"]
-        if isinstance(head, dict) and head.get("kind") == ordinal.KIND:
-            per_field[name] = ordinal.predict(head, features)
+        if isinstance(head, dict):
+            if head.get("kind") != heads.KIND:
+                raise ValueError(
+                    f"unsupported ordinal head kind {head.get('kind')!r}: this "
+                    "build predates the v0.3 softmax head; re-run compile"
+                )
+            per_field[name] = heads.predict(head, features)
         else:
             per_field[name] = list(head.predict(features))
     if spec.output.is_scalar:
