@@ -54,14 +54,17 @@ Optional augmentation uses training rows only and requires a callable teacher.
   base model remains frozen.
 
 An integer output is an **ordered scale**, not a set of unrelated categories,
-and every candidate is trained that way: predicting 4 when the decision was 0
-costs more than predicting 1. TF-IDF and SetFit fit one model per boundary of
-the scale (`P(level > k)`) and difference the chain into a distribution; the
-boundary models try a small regularization grid — with and without balanced
-class weights, for the rare extreme levels — and keep the best development
-within-one agreement. A LoRA student renormalizes the logits of the legal
-levels and optimizes class likelihood plus the ranked probability score. Enum
-labels have no order to exploit and keep an ordinary multinomial head.
+and every candidate is trained the same way: a softmax distribution over the
+levels, optimized with class likelihood plus the ranked probability score, so
+predicting 4 when the decision was 0 costs more than predicting 1. A LoRA
+student reads that distribution from the logits of the legal levels; TF-IDF
+and SetFit train the shared softmax head on their own features — a linear
+layer, or one hidden layer when the development split says the extra capacity
+earns its keep. The head tries a small capacity grid, with the training seed
+searched alongside, and keeps the best development within-one agreement;
+`head: linear` or `head: mlp` pins the family when the search should not
+decide. Enum labels have no order to exploit and keep an ordinary multinomial
+head.
 
 Integer ranges must lie within **0-9**, so each level is a single token and the
 decision is one ordered choice a student can be trained and scored on. A wider
@@ -71,7 +74,7 @@ or SetFit head per field and return one validated object.
 
 Every ordered scale therefore ends in a distribution over the levels — a LoRA
 student reads it from a single forward pass with no decoding loop, and the
-sklearn heads difference their boundary chain into one. That exposes a choice
+softmax heads compute it with a few lines of numpy. That exposes a choice
 shared by all three candidates: `decode: argmax` reports the most likely
 level, which maximizes exact agreement; `decode: median` reports the first
 level whose cumulative probability reaches one half, which trades exact hits
@@ -80,12 +83,11 @@ neighborhood holds the most probability. The default, `auto`, measures all
 three on the development split and keeps the best within-one agreement, ties
 resolving to argmax; the evaluation split never decides it. The selected
 decoder and the full comparison are recorded with the candidate, and the
-sklearn heads persist the selection inside the head artifact — heads built
-before decoder selection existed decode as argmax, exactly as they were
-evaluated. The report also carries head diagnostics: how often independently
-fitted boundaries cross before monotonic repair, how large the crossings are,
-how often repair changes the decoded level, and each boundary's mean predicted
-rate against the observed one.
+softmax heads persist the selection inside the head artifact. The report also
+carries head diagnostics: the selected capacity, the head's mean confidence,
+and each level's mean predicted probability against its observed rate — the
+view that shows a rare extreme level being starved of probability mass on the
+development split, before it surfaces as tail bias in evaluation.
 
 Completed stages are durable. An interrupted build resumes in place, including
 LoRA trainer checkpoints and completed zero-shot diagnostics. Re-running a
