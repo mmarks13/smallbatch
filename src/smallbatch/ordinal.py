@@ -19,6 +19,62 @@ from typing import Any
 KIND = "ordinal-cumulative"
 
 
+# the default first: ties resolve to it, and without dev rows it is the head
+HEAD_GRID = (
+    (1.0, None),
+    (0.1, None),
+    (10.0, None),
+    (1.0, "balanced"),
+    (0.1, "balanced"),
+    (10.0, "balanced"),
+)
+
+
+def fit_head(
+    values: list[Any],
+    features,
+    labels: list[Any],
+    dev_features=None,
+    dev_references: list | None = None,
+) -> tuple[dict, dict | None]:
+    """Fit the cumulative head, choosing boundary regularization on dev rows.
+
+    A fixed C=1.0 leaves accuracy on the table when a scale is imbalanced —
+    a rubric's extreme levels are usually rare — so with development rows the
+    boundary models try a small C grid with and without balanced class
+    weights, scored by dev within-one agreement under the argmax read (the
+    decode rule is selected afterwards, on the winning head). Without dev
+    rows the default fit stands. Returns (head, tuning record or None).
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    def build_with(c: float, weight: str | None) -> dict:
+        return build(
+            values,
+            features,
+            labels,
+            lambda x, y: LogisticRegression(
+                max_iter=1000, C=c, class_weight=weight
+            ).fit(x, y),
+        )
+
+    if dev_features is None or not dev_references:
+        return build_with(*HEAD_GRID[0]), None
+    trials: list[dict[str, Any]] = []
+    best: tuple[float, dict, dict] | None = None
+    for c, weight in HEAD_GRID:
+        head = build_with(c, weight)
+        predictions = predict(head, dev_features)
+        value = sum(
+            abs(prediction - reference) <= 1
+            for prediction, reference in zip(predictions, dev_references)
+        ) / len(dev_references)
+        trials.append({"C": c, "class_weight": weight, "dev_within_one": round(value, 4)})
+        if best is None or value > best[0]:
+            best = (value, head, {"C": c, "class_weight": weight})
+    return best[1], {"selected": best[2], "metric": "within_one", "trials": trials}
+
+
 def build(values: list[Any], features, labels: list[Any], fit_binary) -> dict:
     """Fit `P(y > v)` for every boundary except the last value.
 

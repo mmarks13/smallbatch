@@ -324,24 +324,25 @@ def train_setfit(
         decoder = None
         dev_decode_comparison = None
         head_diagnostics = None
+        head_tuning = None
         if is_ordinal:
             # SetFit's own head is multinomial over unrelated symbols. Fit the
             # ordered head on the same tuned embeddings instead, and persist it
             # as stock sklearn parts so packages need no Smallbatch class.
             import skops.io as sio
-            from sklearn.linear_model import LogisticRegression
 
             from .candidates import dev_distribution_rows, write_dev_distributions
 
             embeddings = model.encode(train_texts, show_progress_bar=False)
-            head = ordinal.build(
+            dev_embeddings = (
+                model.encode(dev_texts, show_progress_bar=False) if dev_rows else None
+            )
+            head, head_tuning = ordinal.fit_head(
                 list(range(len(values))),
                 embeddings,
                 train_labels,
-                lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
-            )
-            dev_embeddings = (
-                model.encode(dev_texts, show_progress_bar=False) if dev_rows else None
+                dev_embeddings,
+                dev_labels,
             )
             dev_decode_comparison = ordinal.select_decoder(
                 head, dev_embeddings, dev_labels, config.decode
@@ -373,6 +374,23 @@ def train_setfit(
         (field_dir / "labels.json").write_text(
             json.dumps(values, indent=2, ensure_ascii=False)
         )
+        # the epoch-0 curve entry scored the frozen body with the same
+        # throwaway head as every later epoch: the delta to the surviving
+        # epoch is the direct answer to "did fine-tuning the encoder help?"
+        frozen_vs_tuned = None
+        curve = (embedding_training or {}).get("curve")
+        if curve:
+            best_epoch = embedding_training["best_epoch"]
+            frozen = curve[0]["dev_within_one"]
+            tuned = next(
+                point["dev_within_one"] for point in curve if point["epoch"] == best_epoch
+            )
+            frozen_vs_tuned = {
+                "frozen_dev_within_one": frozen,
+                "best_dev_within_one": tuned,
+                "delta": round(tuned - frozen, 4),
+                "best_epoch": best_epoch,
+            }
         field_training[field_name] = {
             "embedding_train_rows": len(embedding_train),
             "embedding_eval_rows": len(embedding_eval),
@@ -381,6 +399,8 @@ def train_setfit(
             "embedding_pairs": (embedding_training or {}).get("pairs"),
             "embedding_curve": (embedding_training or {}).get("curve"),
             "embedding_best_epoch": (embedding_training or {}).get("best_epoch"),
+            "frozen_vs_tuned": frozen_vs_tuned,
+            "head_tuning": head_tuning,
             "classifier_train_rows": len(train_rows),
             "objective": objective,
             "decode": decoder,

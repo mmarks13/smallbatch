@@ -168,6 +168,18 @@ def test_setfit_ordinal_head_gets_a_dev_selected_decoder(tmp_path, monkeypatch):
     assert training["dev_decode_comparison"]["selected"] == training["decode"]
     assert training["dev_decode_comparison"]["metric"] == "within_one"
 
+    # the boundary models tried the regularization grid on dev
+    assert training["head_tuning"]["metric"] == "within_one"
+    assert training["head_tuning"]["selected"]["C"] in (0.1, 1.0, 10.0)
+
+    # the frozen-vs-tuned delta comes straight from the embedding curve
+    assert training["frozen_vs_tuned"] == {
+        "frozen_dev_within_one": 0.5,
+        "best_dev_within_one": 0.75,
+        "delta": 0.25,
+        "best_epoch": 1,
+    }
+
     # aggregate head diagnostics in the record; per-row evidence local-only
     diagnostics = training["head_diagnostics"]
     assert diagnostics["rows"] == len(rows)

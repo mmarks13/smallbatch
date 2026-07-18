@@ -254,6 +254,23 @@ def _decoder_lines(record: dict) -> list[str]:
     return lines
 
 
+def _embedding_lines(record: dict) -> list[str]:
+    """SetFit only: did fine-tuning the encoder beat leaving it frozen?"""
+    lines: list[str] = []
+    if record.get("backend") != "setfit":
+        return lines
+    for field, training in (record.get("field_training") or {}).items():
+        comparison = training.get("frozen_vs_tuned")
+        if not comparison:
+            continue
+        lines.append(
+            f"\nEmbedding `{field}`: frozen {_number(comparison['frozen_dev_within_one'])} "
+            f"-> best {_number(comparison['best_dev_within_one'])} dev within-one "
+            f"(delta {_number(comparison['delta'])}, kept epoch {comparison['best_epoch']})"
+        )
+    return lines
+
+
 def render_markdown(report: dict) -> str:
     lines = [
         f"# {report['function']} evidence",
@@ -278,6 +295,7 @@ def render_markdown(report: dict) -> str:
         if record.get("metrics"):
             lines.extend(["", f"### {name} metrics", "", "```json", json.dumps(record["metrics"], indent=2), "```"])
         lines.extend(_decoder_lines(record))
+        lines.extend(_embedding_lines(record))
         if record.get("error"):
             lines.append(f"\nError: `{record['error']}`")
     lines.extend(["", "## Interpretation", "", report["selection_bias_note"]])

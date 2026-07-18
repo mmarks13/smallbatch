@@ -235,6 +235,30 @@ def test_predict_honors_the_persisted_decoder():
     assert ordinal.predict(head, np.zeros((1, 1))) == [1]
 
 
+def test_fit_head_without_dev_rows_is_the_default_fit():
+    features = np.array([[float(level)] for level in (0, 1, 2) for _ in range(8)])
+    labels = [level for level in (0, 1, 2) for _ in range(8)]
+    head, tuning = ordinal.fit_head([0, 1, 2], features, labels)
+    assert tuning is None
+    assert ordinal.predict(head, np.array([[0.0], [2.0]])) == [0, 2]
+
+
+def test_fit_head_tries_the_grid_on_dev_and_keeps_the_best():
+    features = np.array([[float(level)] for level in (0, 1, 2) for _ in range(8)])
+    labels = [level for level in (0, 1, 2) for _ in range(8)]
+    head, tuning = ordinal.fit_head([0, 1, 2], features, labels, features, labels)
+
+    assert tuning["metric"] == "within_one"
+    assert len(tuning["trials"]) == len(ordinal.HEAD_GRID)
+    assert {trial["C"] for trial in tuning["trials"]} == {0.1, 1.0, 10.0}
+    assert tuning["selected"] in [
+        {"C": c, "class_weight": weight} for c, weight in ordinal.HEAD_GRID
+    ]
+    # a perfectly separable dev split ties every trial at 1.0: the default wins
+    assert tuning["selected"] == {"C": 1.0, "class_weight": None}
+    assert ordinal.predict(head, np.array([[1.0]])) == [1]
+
+
 def test_tfidf_selects_and_persists_a_decoder(tmp_path):
     import skops.io as sio
 
@@ -355,6 +379,10 @@ def test_tfidf_records_head_diagnostics_and_local_distributions(tmp_path):
                 }
             )
     record = train_tfidf(spec, rows, tmp_path, dev_rows=rows)
+
+    tuning = record["head_tuning"]["score"]
+    assert tuning["selected"]["C"] in (0.1, 1.0, 10.0)
+    assert len(tuning["trials"]) == len(ordinal.HEAD_GRID)
 
     diagnostics = record["head_diagnostics"]["score"]
     assert diagnostics["rows"] == len(rows)

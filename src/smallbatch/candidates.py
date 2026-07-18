@@ -101,6 +101,7 @@ def train_tfidf(
     decoders: dict[str, str] = {}
     dev_decode_comparison: dict[str, Any] = {}
     head_diagnostics: dict[str, Any] = {}
+    head_tuning: dict[str, Any] = {}
     dev_distributions: dict[str, Any] = {}
     for name, field in spec.output.fields.items():
         outs = [row_output(spec, r) for r in train_rows]
@@ -108,15 +109,14 @@ def train_tfidf(
         vectorizer = TfidfVectorizer(sublinear_tf=True, ngram_range=(1, 2))
         features = vectorizer.fit_transform(texts)
         if ordinal.applies(spec, name):
-            head = ordinal.build(
-                field.values(),
-                features,
-                labels,
-                lambda x, y: LogisticRegression(max_iter=1000).fit(x, y),
-            )
             dev_outs = [row_output(spec, r) for r in dev_rows or []]
             dev_references = [out[name] if isinstance(out, dict) else out for out in dev_outs]
             dev_features = vectorizer.transform(dev_texts) if dev_texts else None
+            head, tuning = ordinal.fit_head(
+                field.values(), features, labels, dev_features, dev_references
+            )
+            if tuning is not None:
+                head_tuning[name] = tuning
             comparison = ordinal.select_decoder(head, dev_features, dev_references, decode)
             decoders[name] = head["decoder"]
             if comparison is not None:
@@ -146,6 +146,7 @@ def train_tfidf(
         "decode": decoders,
         "dev_decode_comparison": dev_decode_comparison,
         "head_diagnostics": head_diagnostics,
+        "head_tuning": head_tuning,
     }
 
 

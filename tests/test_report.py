@@ -75,6 +75,12 @@ def test_markdown_shows_decoder_selection_and_head_diagnostics(tmp_path):
             "decode": "argmax",
             "dev_decode_comparison": None,
             "head_diagnostics": None,
+            "frozen_vs_tuned": {
+                "frozen_dev_within_one": 0.7,
+                "best_dev_within_one": 0.85,
+                "delta": 0.15,
+                "best_epoch": 1,
+            },
         }
     }
     lora = candidate([1])
@@ -105,6 +111,10 @@ def test_markdown_shows_decoder_selection_and_head_diagnostics(tmp_path):
     assert "Decode `decode`: **median** (dev-selected)" in markdown
     assert "monotonicity violations in 0.1000 of rows" in markdown
     assert "repair changed 0.0250 of predictions" in markdown
+    assert (
+        "Embedding `score`: frozen 0.7000 -> best 0.8500 dev within-one "
+        "(delta 0.1500, kept epoch 1)" in markdown
+    )
     # a candidate with no level distribution shows no decode line
     assert markdown.count("Decode ") == 3
 
