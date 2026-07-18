@@ -75,3 +75,14 @@ def test_setfit_managed_training_args_rejected():
                 }
             }
         )
+
+
+def test_head_capacity_knob_parses_and_rejects_unknown_values():
+    spec = make_spec(
+        output={"type": "int", "range": [0, 4]},
+        candidates={"words": {"type": "tfidf", "head": "linear"}},
+    )
+    assert spec.candidates["words"].head == "linear"
+    assert make_spec().candidates["tfidf"].head == "auto"  # dev decides by default
+    with pytest.raises(ValueError):
+        make_spec(candidates={"words": {"type": "tfidf", "head": "wide"}})

@@ -334,6 +334,7 @@ def train_setfit(
                 train_labels,
                 dev_embeddings,
                 dev_labels,
+                setting=config.head,
             )
             dev_decode_comparison = heads.select_decoder(
                 head, dev_embeddings, dev_labels, config.decode

@@ -167,6 +167,10 @@ class TfidfCandidateSpec(BaseModel):
     # integer field reports (argmax / median / within_one, as documented on
     # LoraCandidateSpec.decode). auto lets the development split decide.
     decode: Literal["auto", "argmax", "median", "within_one"] = "auto"
+    # ordered scales only: the softmax head's capacity. auto lets the
+    # development split choose between a linear layer and one hidden layer;
+    # pin it only to remove that search deliberately.
+    head: Literal["auto", "linear", "mlp"] = "auto"
     model_config = {"extra": "forbid"}
 
 
@@ -183,6 +187,10 @@ class SetFitCandidateSpec(BaseModel):
     # integer field reports (argmax / median / within_one, as documented on
     # LoraCandidateSpec.decode). auto lets the development split decide.
     decode: Literal["auto", "argmax", "median", "within_one"] = "auto"
+    # ordered scales only: the softmax head's capacity. auto lets the
+    # development split choose between a linear layer and one hidden layer;
+    # pin it only to remove that search deliberately.
+    head: Literal["auto", "linear", "mlp"] = "auto"
     model_config = {"extra": "forbid"}
 
     @field_validator("training_args")

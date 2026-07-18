@@ -195,7 +195,7 @@ def _train_candidate(
         from .candidates import train_tfidf
 
         metadata = train_tfidf(
-            spec, train_rows, model_dir, dev_rows=dev_rows, decode=config.decode
+            spec, train_rows, model_dir, dev_rows=dev_rows, decode=config.decode, head=config.head
         )
     elif isinstance(config, SetFitCandidateSpec):
         from .setfit_candidate import train_setfit

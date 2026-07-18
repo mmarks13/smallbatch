@@ -79,6 +79,7 @@ def train_tfidf(
     out_dir: Path,
     dev_rows: list[Row] | None = None,
     decode: str = "auto",
+    head: str = "auto",
 ) -> dict[str, Any]:
     """Fit a TF-IDF vectorizer plus one head per output field and persist with
     skops. Integer scales get the shared softmax ordinal head — trained with
@@ -94,6 +95,7 @@ def train_tfidf(
 
     from . import heads
 
+    head_setting = head  # the loop below rebinds `head` to each trained head
     _check_class_coverage(spec, train_rows)
     texts = _texts(spec, train_rows)
     dev_texts = _texts(spec, dev_rows) if dev_rows else []
@@ -114,7 +116,12 @@ def train_tfidf(
             dev_references = [out[name] if isinstance(out, dict) else out for out in dev_outs]
             dev_features = vectorizer.transform(dev_texts) if dev_texts else None
             head, tuning = heads.fit_head(
-                field.values(), features, labels, dev_features, dev_references
+                field.values(),
+                features,
+                labels,
+                dev_features,
+                dev_references,
+                setting=head_setting,
             )
             if tuning is not None:
                 head_tuning[name] = tuning

@@ -214,3 +214,15 @@ def test_deployable_copy_refuses_local_files(tmp_path):
     assert (tmp_path / "deployed" / "model.skops").exists()
     assert not (tmp_path / "deployed" / "dev_distributions.local.json").exists()
     assert deployable_size(source, "tfidf") == len("weights")
+
+
+def test_tfidf_pinned_head_restricts_the_capacity_search(tmp_path):
+    from smallbatch.candidates import train_tfidf
+
+    spec = make_spec(output={"type": "int", "range": [0, 2]})
+    rows = scale_rows()
+    record = train_tfidf(spec, rows, tmp_path, dev_rows=rows, head="linear")
+
+    tuning = record["head_tuning"]["score"]
+    assert tuning["selected"]["hidden"] == 0
+    assert all(trial["hidden"] == 0 for trial in tuning["trials"])
