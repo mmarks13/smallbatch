@@ -173,7 +173,11 @@ class TfidfCandidateSpec(BaseModel):
 class SetFitCandidateSpec(BaseModel):
     type: Literal["setfit"]
     model: str
-    embedding_samples_per_class: int = Field(default=8, ge=1)
+    # None (the default) fine-tunes the embedding on every training row.
+    # SetFit's own 8-per-class few-shot recipe is the wrong regime for a tool
+    # whose labeling pipeline produces thousands of decisions; set a number
+    # only to deliberately restrict the contrastive phase.
+    embedding_samples_per_class: int | None = Field(default=None, ge=1)
     training_args: dict[str, Any] = Field(default_factory=dict)
     # ordered scales only: which point of the head's level distribution each
     # integer field reports (argmax / median / within_one, as documented on

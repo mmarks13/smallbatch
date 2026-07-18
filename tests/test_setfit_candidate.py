@@ -170,6 +170,40 @@ def test_setfit_ordinal_pinned_decoder_skips_the_comparison(tmp_path, monkeypatc
     assert training["dev_decode_comparison"] is None
 
 
+def test_setfit_default_embeds_every_training_row(tmp_path, monkeypatch):
+    """The few-shot per-class cap is opt-in: by default the contrastive phase
+    sees the whole train split, with the pair budget bounding compute."""
+    install_fake_setfit(monkeypatch)
+    spec = make_spec(
+        candidates={"bge-small": {"type": "setfit", "model": "BAAI/bge-small-en-v1.5"}}
+    )
+    rows = [
+        {
+            "input": {"title": f"ticket {index}", "body": "body"},
+            "output": "urgent" if index % 2 else "normal",
+        }
+        for index in range(24)
+    ]
+
+    metadata = train_setfit(spec, spec.candidates["bge-small"], rows, rows, tmp_path)
+
+    training = metadata["field_training"]["score"]
+    assert training["embedding_train_rows"] == 24
+    assert training["embedding_eval_rows"] == 24
+    assert metadata["embedding_samples_per_class"] is None
+
+
+def test_pair_budget_backs_off_iterations_as_embedding_rows_grow(tmp_path, monkeypatch):
+    install_fake_setfit(monkeypatch)
+    from smallbatch.setfit_candidate import _resolved_args
+    from smallbatch.spec import SetFitCandidateSpec
+
+    config = SetFitCandidateSpec(type="setfit", model="m")
+    assert _resolved_args(config, tmp_path, 8).kwargs["num_iterations"] == 20
+    assert _resolved_args(config, tmp_path, 512).kwargs["num_iterations"] == 4
+    assert _resolved_args(config, tmp_path, 4096).kwargs["num_iterations"] == 1
+
+
 def test_setfit_bounds_embedding_rows_but_trains_head_on_all_rows(tmp_path, monkeypatch):
     install_fake_setfit(monkeypatch)
     spec = make_spec(

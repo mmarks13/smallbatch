@@ -17,7 +17,10 @@ from .labeling import Row, row_output
 from .spec import FunctionSpec, SetFitCandidateSpec
 
 ORDINAL_HEAD_FILE = "ordinal_head.skops"
-TARGET_CONTRASTIVE_PAIRS = 1024
+# the pair budget backs off num_iterations as embedding rows grow, so lifting
+# the per-class cap scales training volume with the data instead of the row
+# count times a fixed few-shot iteration count
+TARGET_CONTRASTIVE_PAIRS = 4096
 MAX_PAIR_ITERATIONS = 20
 
 
@@ -25,7 +28,11 @@ def _labels(spec: FunctionSpec, field_name: str) -> list[Any]:
     return spec.output.fields[field_name].values()
 
 
-def _embedding_indices(labels: list[int], per_class: int, seed: int) -> list[int]:
+def _embedding_indices(labels: list[int], per_class: int | None, seed: int) -> list[int]:
+    """Rows the contrastive phase trains on: everything by default, an even
+    per-class sample only when the spec restricts it."""
+    if per_class is None:
+        return list(range(len(labels)))
     grouped: dict[int, list[int]] = defaultdict(list)
     for index, label in enumerate(labels):
         grouped[label].append(index)
