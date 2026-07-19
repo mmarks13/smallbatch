@@ -374,7 +374,9 @@ def compile(  # noqa: A001
                 threads=threads,
             )
             record["predictions"] = profiled["predictions"]
-            record["metrics"] = compute_metrics(spec, record["predictions"], references)
+            record["metrics"] = compute_metrics(
+                spec, record["predictions"], references, bootstrap=True
+            )
             record["profile"] = profiled["profile"]
             _write_local_record(final_record_path, record)
             candidates[candidate_id] = record
@@ -439,7 +441,9 @@ def compile(  # noqa: A001
                 "selectable": False,
                 "backend": "zeroshot",
                 "base_model": config.model,
-                "metrics": compute_metrics(spec, profiled["predictions"], references),
+                "metrics": compute_metrics(
+                    spec, profiled["predictions"], references, bootstrap=True
+                ),
                 "profile": profiled["profile"],
             }
             _write_local_record(
@@ -466,7 +470,9 @@ def compile(  # noqa: A001
     diagnostics["train-fitted-constant"] = {
         "selectable": False,
         "value": constant,
-        "metrics": compute_metrics(spec, constant_predictions, references),
+        "metrics": compute_metrics(
+            spec, constant_predictions, references, bootstrap=True
+        ),
     }
     _progress(
         "diagnostic train-fitted-constant complete: "

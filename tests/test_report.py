@@ -1,7 +1,14 @@
 import json
 
 from conftest import make_spec
-from smallbatch.report import build_report, evidence_summary, observed_dominance, write_report
+from smallbatch.report import (
+    build_report,
+    evidence_summary,
+    observed_dominance,
+    pairwise_comparisons,
+    render_markdown,
+    write_report,
+)
 
 
 def candidate(predictions, latency=1, memory=100, size=10):
@@ -27,6 +34,42 @@ def test_observed_dominance_is_row_level_and_operational():
         "b": candidate(["urgent", "urgent"], 2, 200, 20),
     }
     assert observed_dominance(spec, completed, refs) == [{"dominates": "b", "candidate": "a"}]
+
+
+def test_pairwise_reports_paired_delta_mcnemar_and_no_mae_for_enum():
+    spec = make_spec()  # enum urgent/normal
+    refs = ["urgent"] * 5
+    completed = {"a": candidate(["urgent"] * 5), "b": candidate(["normal"] * 5)}
+    pairs = pairwise_comparisons(spec, completed, refs)
+    assert len(pairs) == 1
+    entry = pairs[0]
+    assert (entry["a"], entry["b"]) == ("a", "b")
+    assert entry["agreement_delta"] == 1.0
+    assert entry["agreement_delta_ci"] == [1.0, 1.0]  # every resample: A right, B wrong
+    assert entry["mcnemar_discordant"] == [5, 0]
+    assert entry["mcnemar_p"] == 0.0625  # 2 * 0.5**5
+    assert "mae_delta" not in entry  # no integer field to score
+
+
+def test_pairwise_mae_delta_over_complete_case_rows_for_integer_spec():
+    spec = make_spec(output={"type": "int", "range": [0, 4]})
+    refs = [0, 0, 0, 0]
+    completed = {"a": candidate([0, 0, 0, 0]), "b": candidate([2, 2, 2, 2])}
+    entry = pairwise_comparisons(spec, completed, refs)[0]
+    assert entry["mae_delta"] == -2.0  # A minus B
+    assert entry["mae_delta_paired_n"] == 4
+    assert entry["mae_delta_ci"] == [-2.0, -2.0]
+    assert entry["agreement_delta"] == 1.0  # A within-one everywhere, B off by two
+
+
+def test_markdown_calls_out_robust_pairwise_wins():
+    spec = make_spec()
+    rows = [{"input": {"title": "t", "body": "b"}, "output": "urgent"} for _ in range(5)]
+    completed = {"a": candidate(["urgent"] * 5), "b": candidate(["normal"] * 5)}
+    report, _ = build_report(spec, rows, completed, {})
+    markdown = render_markdown(report)
+    assert "## Paired comparisons" in markdown
+    assert "`a` beats `b` on decision agreement" in markdown
 
 
 def test_public_report_redacts_inputs_and_local_details_keep_them(tmp_path):

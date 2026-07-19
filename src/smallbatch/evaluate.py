@@ -223,8 +223,14 @@ def train_fitted_constant(spec: FunctionSpec, train_rows: list[Row]) -> Any:
     return values[next(iter(values))] if spec.output.is_scalar else values
 
 
-def compute_metrics(spec: FunctionSpec, preds: list, golds: list) -> dict[str, Any]:
-    """Compute the complete shared metric set."""
+def compute_metrics(
+    spec: FunctionSpec, preds: list, golds: list, bootstrap: bool = False
+) -> dict[str, Any]:
+    """Compute the complete shared metric set.
+
+    `bootstrap` adds confidence intervals to the non-proportion metrics; leave
+    it off on the hot per-epoch dev path and turn it on for final evaluation.
+    """
     from . import metrics as m
 
-    return m.compare(spec, preds, golds)
+    return m.compare(spec, preds, golds, bootstrap)

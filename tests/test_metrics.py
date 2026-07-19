@@ -1,5 +1,47 @@
 from conftest import make_spec
-from smallbatch.metrics import compare, nearest_rank_p90, pearson_r, wilson_ci
+from smallbatch.metrics import (
+    _enum_scalar_scores,
+    compare,
+    nearest_rank_p90,
+    pearson_r,
+    wilson_ci,
+)
+
+
+def test_bootstrap_cis_are_opt_in_and_cover_non_proportion_metrics():
+    spec = make_spec(output={"type": "int", "range": [0, 4]})
+    preds = [0, 2, 4, None, 1]
+    refs = [0, 1, 2, 3, 4]
+    # the hot per-epoch path takes the default and pays nothing
+    assert "mae_ci" not in compare(spec, preds, refs)
+    enriched = compare(spec, preds, refs, bootstrap=True)
+    for key in ("mae_ci", "mean_signed_error_ci", "pearson_r_ci", "spearman_rho_ci"):
+        assert key in enriched
+    low, high = enriched["mae_ci"]
+    assert low <= enriched["mae"] <= high
+
+
+def test_bootstrap_cis_are_deterministic():
+    spec = make_spec(output={"type": "int", "range": [0, 4]})
+    preds, refs = [0, 2, 4, 1, 1], [0, 1, 2, 3, 4]
+    first = compare(spec, preds, refs, bootstrap=True)
+    second = compare(spec, preds, refs, bootstrap=True)
+    assert first["mae_ci"] == second["mae_ci"]
+    assert first["spearman_rho_ci"] == second["spearman_rho_ci"]
+
+
+def test_enum_bootstrap_cis_agree_with_their_point_estimates():
+    spec = make_spec(output={"type": "enum", "labels": ["a", "b", "c"]})
+    preds = ["a", "a", "b", "c", None]
+    refs = ["a", "b", "b", "c", "a"]
+    metrics = compare(spec, preds, refs, bootstrap=True)
+    macro, weighted, balanced = _enum_scalar_scores(["a", "b", "c"], preds, refs)
+    assert round(macro, 4) == metrics["macro_f1"]
+    assert round(weighted, 4) == metrics["weighted_f1"]
+    assert round(balanced, 4) == metrics["balanced_accuracy"]
+    for key in ("macro_f1_ci", "weighted_f1_ci", "balanced_accuracy_ci"):
+        low, high = metrics[key]
+        assert low <= high
 
 
 def test_integer_metrics_are_descriptive_and_named():

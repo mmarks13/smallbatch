@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
+from .metrics import BOOTSTRAP_SEED, bootstrap_ci, field_decision_matches
 from .spec import FunctionSpec
 
 
@@ -127,6 +129,121 @@ def observed_dominance(
     return output
 
 
+def _decision_correct(spec: FunctionSpec, prediction, reference) -> bool:
+    """Did this row's decision match within the contract's tolerance (±1 for
+    integer fields, exact for enums, jointly for structured output)?"""
+    if spec.output.is_scalar:
+        return field_decision_matches(spec.output.scalar, prediction, reference)
+    pred = prediction if isinstance(prediction, dict) else {}
+    return all(
+        field_decision_matches(field, pred.get(name), reference[name])
+        for name, field in spec.output.fields.items()
+    )
+
+
+def _row_absolute_error(spec: FunctionSpec, prediction, reference) -> float | None:
+    """Total absolute error over integer fields, or None when the spec has no
+    integer field or this row's prediction is missing an integer field (so a
+    paired MAE contrast can drop it complete-case rather than count it as zero)."""
+    if spec.output.is_scalar:
+        if spec.output.scalar.type != "int":
+            return None
+        return None if prediction is None else float(abs(prediction - reference))
+    pred = prediction if isinstance(prediction, dict) else {}
+    total = 0
+    has_int = False
+    for name, field in spec.output.fields.items():
+        if field.type != "int":
+            continue
+        has_int = True
+        value = pred.get(name)
+        if value is None:
+            return None
+        total += abs(value - reference[name])
+    return float(total) if has_int else None
+
+
+def _mcnemar_p(discordant_a: int, discordant_b: int) -> float | None:
+    """Two-sided exact McNemar p over the rows the two candidates disagree on
+    (an exact binomial sign test at p=0.5, right for the small eval splits here)."""
+    n = discordant_a + discordant_b
+    if n == 0:
+        return None
+    tail = sum(math.comb(n, k) for k in range(min(discordant_a, discordant_b) + 1)) * 0.5**n
+    return round(min(1.0, 2 * tail), 4)
+
+
+def pairwise_comparisons(
+    spec: FunctionSpec, completed: dict[str, dict], references: list, seed: int = BOOTSTRAP_SEED
+) -> list[dict]:
+    """Paired candidate-vs-candidate contrasts on the shared evaluation rows.
+
+    Both candidates score the identical rows, so pairing cancels row-difficulty
+    variance and is far more powerful than comparing two marginal intervals:
+    overlapping per-candidate CIs do not imply the pair is indistinguishable.
+    Reports the paired decision-agreement delta with a bootstrap CI, an exact
+    McNemar test on discordant decisions, and — for integer-bearing specs — a
+    paired MAE delta over complete-case rows. Deltas are first-minus-second in
+    candidate-name order; a delta CI clear of zero is a robust win.
+    """
+    names = sorted(completed)
+    n = len(references)
+    correct = {
+        name: [
+            _decision_correct(spec, prediction, reference)
+            for prediction, reference in zip(completed[name]["predictions"], references)
+        ]
+        for name in names
+    }
+    abs_error = {
+        name: [
+            _row_absolute_error(spec, prediction, reference)
+            for prediction, reference in zip(completed[name]["predictions"], references)
+        ]
+        for name in names
+    }
+    comparisons: list[dict] = []
+    for first_index in range(len(names)):
+        for second_index in range(first_index + 1, len(names)):
+            first, second = names[first_index], names[second_index]
+            hits_a, hits_b = correct[first], correct[second]
+            discordant = [
+                sum(a and not b for a, b in zip(hits_a, hits_b)),
+                sum(b and not a for a, b in zip(hits_a, hits_b)),
+            ]
+            entry: dict = {
+                "a": first,
+                "b": second,
+                "agreement_delta": round((sum(hits_a) - sum(hits_b)) / n, 4) if n else None,
+                "agreement_delta_ci": bootstrap_ci(
+                    lambda idx, hits_a=hits_a, hits_b=hits_b: (
+                        sum(hits_a[k] for k in idx) - sum(hits_b[k] for k in idx)
+                    )
+                    / len(idx),
+                    n,
+                    seed=seed,
+                ),
+                "mcnemar_discordant": discordant,
+                "mcnemar_p": _mcnemar_p(*discordant),
+            }
+            paired = [
+                (a, b)
+                for a, b in zip(abs_error[first], abs_error[second])
+                if a is not None and b is not None
+            ]
+            if paired:
+                diffs = [a - b for a, b in paired]
+                entry["mae_delta"] = round(sum(diffs) / len(diffs), 4)
+                entry["mae_delta_ci"] = bootstrap_ci(
+                    lambda idx, diffs=diffs: sum(diffs[k] for k in idx) / len(idx),
+                    len(diffs),
+                    seed=seed,
+                )
+                entry["mae_delta_paired_n"] = len(paired)
+            comparisons.append(entry)
+    return comparisons
+
+
 def build_report(
     spec: FunctionSpec,
     eval_rows: list[dict],
@@ -145,13 +262,14 @@ def build_report(
             if key not in {"predictions"}
         }
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "function": spec.name,
         "evaluation_rows": len(eval_rows),
         "small_evaluation_warning": len(eval_rows) < 30,
         "candidates": public_candidates,
         "diagnostics": diagnostics,
         "observed_strict_dominance": observed_dominance(spec, completed, references),
+        "pairwise": pairwise_comparisons(spec, completed, references),
         "selection_bias_note": (
             "These candidates share one evaluation split. Selecting after comparison makes "
             "the selected result optimistic; v0.2 does not provide an independent confirmation set."
@@ -312,6 +430,7 @@ def render_markdown(report: dict) -> str:
         lines.extend(_embedding_lines(record))
         if record.get("error"):
             lines.append(f"\nError: `{record['error']}`")
+    lines.extend(_pairwise_lines(report.get("pairwise") or []))
     lines.extend(["", "## Interpretation", "", report["selection_bias_note"]])
     if report["observed_strict_dominance"]:
         lines.extend(["", "Observed strict dominance:"])
@@ -320,3 +439,51 @@ def render_markdown(report: dict) -> str:
             for entry in report["observed_strict_dominance"]
         )
     return "\n".join(lines) + "\n"
+
+
+def _fmt_ci(interval) -> str:
+    return f"[{_number(interval[0])}, {_number(interval[1])}]" if interval else "-"
+
+
+def _ci_excludes_zero(interval) -> bool:
+    return bool(interval) and (interval[0] > 0 or interval[1] < 0)
+
+
+def _pairwise_lines(pairwise: list[dict]) -> list[str]:
+    """Paired candidate contrasts, with the CI-clear-of-zero wins called out."""
+    if not pairwise:
+        return []
+    lines = [
+        "",
+        "## Paired comparisons",
+        "",
+        "Same evaluation rows, so these contrasts are paired (deltas are A minus B). "
+        "A delta CI clear of zero is a robust win; overlapping per-candidate CIs do not "
+        "rule one out.",
+        "",
+        "| A | B | agreement Δ | 95% CI | McNemar p | MAE Δ | MAE Δ 95% CI |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for entry in pairwise:
+        agreement = entry.get("agreement_delta")
+        lines.append(
+            f"| {entry['a']} | {entry['b']} | "
+            f"{_number(agreement) if agreement is not None else '-'} | "
+            f"{_fmt_ci(entry.get('agreement_delta_ci'))} | "
+            f"{entry.get('mcnemar_p') if entry.get('mcnemar_p') is not None else '-'} | "
+            f"{_number(entry['mae_delta']) if 'mae_delta' in entry else '-'} | "
+            f"{_fmt_ci(entry.get('mae_delta_ci'))} |"
+        )
+    wins = []
+    for entry in pairwise:
+        interval = entry.get("agreement_delta_ci")
+        if not _ci_excludes_zero(interval):
+            continue
+        better, worse = (entry["a"], entry["b"]) if interval[0] > 0 else (entry["b"], entry["a"])
+        wins.append(
+            f"- `{better}` beats `{worse}` on decision agreement "
+            f"(Δ={_number(abs(entry['agreement_delta']))}, 95% CI {_fmt_ci(interval)})."
+        )
+    if wins:
+        lines.extend(["", "Robust agreement wins (CI excludes zero):", *wins])
+    return lines
