@@ -14,8 +14,32 @@ from .spec import FunctionSpec, LoraCandidateSpec, SetFitCandidateSpec
 Finding = tuple[str, str]
 
 
+def _teacher_looks_hosted(spec: FunctionSpec) -> bool:
+    """Best-effort: the CLI backends are hosted providers; an
+    openai-compatible endpoint is treated as self-hosted only when it points
+    at a loopback address (the Ollama/vLLM pattern)."""
+    teacher = spec.teacher
+    if teacher is None:
+        return False
+    if teacher.backend in ("claude-cli", "codex-cli"):
+        return True
+    base_url = teacher.base_url or ""
+    return not any(host in base_url for host in ("localhost", "127.0.0.1", "[::1]"))
+
+
 def inspect_spec(spec: FunctionSpec) -> list[Finding]:
     findings: list[Finding] = [("ok", "prompt-first spec validated")]
+    if spec.output.has_text and _teacher_looks_hosted(spec):
+        findings.append(
+            (
+                "warn",
+                f"text output field {spec.output.text_field!r} with a hosted "
+                "teacher: this distills a hosted model's generated text, and "
+                "provider terms restrict training generative models on their "
+                "outputs. Review docs/responsible-use.md; a self-hosted "
+                "open-weights teacher avoids the question",
+            )
+        )
     for name, candidate in spec.candidates.items():
         if isinstance(candidate, SetFitCandidateSpec):
             level = "ok" if importlib.util.find_spec("setfit") else "fail"

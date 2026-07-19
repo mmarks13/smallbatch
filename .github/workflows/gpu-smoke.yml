@@ -1,0 +1,47 @@
+name: gpu-smoke
+
+# Real-GPU PR gate: three function shapes end to end on the self-hosted
+# runner (~15 min). Two guards keep this safe and non-disruptive:
+#
+# 1. Same-repo PRs only. A self-hosted runner on a public repo must never
+#    execute code from a fork — that is the classic runner takeover. Fork
+#    PRs simply skip this job.
+# 2. The repo variable GPU_RUNNER_READY must be "1". Until the runner is
+#    registered and its GPU validated, the job is skipped instead of sitting
+#    pending forever and blocking merges. Flip the variable (and add
+#    `gpu-smoke` to the branch-protection required checks) only after
+#    `SMALLBATCH_GPU_TESTS=1 pytest tests_gpu -m gpu_smoke -q` passes
+#    locally on the runner machine.
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: gpu-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gpu-smoke:
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      vars.GPU_RUNNER_READY == '1'
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: GPU sanity
+        run: |
+          nvidia-smi --query-gpu=name,driver_version,power.limit --format=csv,noheader
+      - name: Install into the runner environment
+        # the runner machine keeps a persistent venv with the heavy pinned
+        # stack (torch cu-build, transformers, peft, trl, setfit); this step
+        # only refreshes smallbatch itself and any light new dependencies
+        run: |
+          source "$SMALLBATCH_RUNNER_VENV/bin/activate"
+          uv pip install -e ".[dev]"
+      - name: gpu-smoke tier
+        run: |
+          source "$SMALLBATCH_RUNNER_VENV/bin/activate"
+          python -c "import torch; assert torch.cuda.is_available(), 'no CUDA'"
+          SMALLBATCH_GPU_TESTS=1 pytest tests_gpu -m gpu_smoke -q

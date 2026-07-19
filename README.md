@@ -233,7 +233,7 @@ standalone package — review them like code before sharing.
 ```bash
 pip install -e '.[dev]'
 pytest -q
-ruff check src tests case-study
+ruff check src tests tests_gpu case-study
 python -m build
 ```
 

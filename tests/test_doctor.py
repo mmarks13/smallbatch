@@ -150,3 +150,37 @@ def test_doctor_warns_when_reference_text_crowds_the_limit():
     assert any(level == "ok" and "fits max_chars" in m for level, m in findings)
     # the contract itself never fails while every reference is valid
     assert not any(level == "fail" for level, _ in findings)
+
+
+def test_doctor_warns_on_hosted_teacher_with_text_output():
+    from smallbatch.doctor import inspect_spec
+
+    def spec_with(teacher):
+        return make_spec(
+            output={"type": "text", "max_chars": 100},
+            candidates={"granite": {"type": "lora"}},
+            teacher=teacher,
+        )
+
+    hosted = [
+        {"backend": "claude-cli", "model": "m"},
+        {"backend": "codex-cli", "model": "m"},
+        {"backend": "openai-compatible", "model": "m", "base_url": "https://api.example.com/v1"},
+    ]
+    for teacher in hosted:
+        findings = inspect_spec(spec_with(teacher))
+        assert any(
+            level == "warn" and "responsible-use" in message
+            for level, message in findings
+        ), teacher
+
+    # loopback endpoints are the self-hosted pattern: no warning
+    local = spec_with(
+        {"backend": "openai-compatible", "model": "m", "base_url": "http://localhost:11434/v1"}
+    )
+    assert not any(level == "warn" for level, _ in inspect_spec(local))
+
+    # bounded-only functions with hosted teachers stay unwarned: the
+    # specialized-tool category the docs describe
+    bounded = make_spec(teacher={"backend": "claude-cli", "model": "m"})
+    assert not any(level == "warn" for level, _ in inspect_spec(bounded))

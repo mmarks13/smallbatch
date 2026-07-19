@@ -11,8 +11,32 @@ jobs:
   test:
     uses: ./.github/workflows/ci.yml
 
+  gpu-gate:
+    # a release must be preceded by a manually dispatched gpu-release run on
+    # this exact commit; tagging alone is not enough. Deliberately manual so
+    # the 45-minute matrix runs once per release candidate, not per push.
+    # The cloud matrix (docs/cloud.md, RunPod) is also on the release
+    # checklist but is verified by hand until its API key is sorted.
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Require a successful gpu-release run on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          successes=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/gpu-release.yml/runs?head_sha=${GITHUB_SHA}&status=completed" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+          if [ "${successes}" -lt 1 ]; then
+            echo "No successful gpu-release run found for ${GITHUB_SHA}."
+            echo "Dispatch the gpu-release workflow on this commit, let it"
+            echo "pass, then re-push the tag."
+            exit 1
+          fi
+
   publish:
-    needs: test
+    needs: [test, gpu-gate]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

@@ -181,14 +181,24 @@ Files suffixed `.local` never enter standalone packages.
 ## Verification
 
 ```bash
-pytest -q
-ruff check src tests case-study
+pytest -q                    # CPU-only, offline; every PR (hosted CI)
+ruff check src tests tests_gpu case-study
 python -m build
+
+# real-GPU tiers (self-hosted runner; collected only with the env var):
+SMALLBATCH_GPU_TESTS=1 pytest tests_gpu -m gpu_smoke -q   # ~15 min PR gate
+SMALLBATCH_GPU_TESTS=1 pytest tests_gpu -q                # ~45 min, manual;
+                                                          # gates release
 ```
 
-CPU-only, offline unit tests are the default. Real SetFit and LoRA release
-checks use cached models; do not make the normal test suite download models or
-call a teacher.
+CPU-only, offline unit tests are the default and include the tiny-random-model
+integration tests (`tests/test_lora_integration.py`), which run the real
+transformers/PEFT/tokenizers stack end to end without a GPU or network — keep
+them offline. The `tests_gpu` tier runs real students on real hardware:
+`gpu-smoke` is a required PR check on the self-hosted runner, `gpu-release` is
+manually dispatched per release candidate and the release workflow refuses to
+publish without a successful run on the tagged commit. Do not make the normal
+test suite download models or call a teacher.
 
 The repository may be dirty. Preserve user changes and work with compatible
 in-progress edits rather than reverting them.

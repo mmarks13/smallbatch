@@ -25,6 +25,39 @@ Do not use a generated function as the sole decision-maker for high-impact
 medical, legal, employment, credit, housing, insurance, policing, or similar
 decisions without the domain controls those uses require.
 
+## Teacher Provider Terms
+
+Training candidates on a teacher's outputs makes the teacher provider's terms
+part of your compliance surface. Major hosted providers expressly permit
+building specialized, non-competing tools (content categorization, scoring,
+sentiment) on their outputs — the bounded-decision functions Smallbatch
+compiles fit that category — while prohibiting the use of outputs to train
+general-purpose or competing generative models, and some restrict
+distributing models trained on their outputs at all.
+
+**Text output fields change this calculus.** A function with a `type: text`
+field is trained on the teacher's *generated prose*, not just its selections
+from a fixed list. A narrow, length-bounded transformation (a query rewrite,
+a normalized message, a one-line rationale beside a decision) is still a
+specialized tool, not a general assistant — Smallbatch enforces one required
+text field, a hard character limit, and no open-ended generation — but it
+sits meaningfully closer to the conduct hosted-provider terms restrict, and
+whether a given text function crosses a given provider's line is a judgment
+Smallbatch cannot make for you.
+
+Concretely:
+
+- **Self-hosted open-weights teachers** (Ollama, vLLM, or any
+  `openai-compatible` endpoint you operate) sidestep the question entirely
+  for labeling. This is the recommended path for text functions.
+- **Hosted teachers** (`claude-cli`, `codex-cli`, or a hosted
+  `openai-compatible` endpoint) require you to read the provider's current
+  output-use terms against your specific text field before labeling.
+  `smallbatch doctor` warns — it never blocks — when a text-bearing spec is
+  configured with a teacher that looks hosted.
+- Check the base model's license too: the adapter you distribute remains
+  subject to it regardless of the teacher.
+
 ## Data And Model Privacy
 
 Teacher calls send prompt and input content to the configured provider. Review

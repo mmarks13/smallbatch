@@ -79,3 +79,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E731"]  # tests bind small lambdas for brevity
+
+[tool.pytest.ini_options]
+# the real-GPU tier (tests_gpu/) is only ever run explicitly
+testpaths = ["tests"]
+markers = [
+  "gpu_smoke: fast real-GPU end-to-end checks (PR gate; ~15 min)",
+  "gpu_release: full real-GPU regression matrix (release gate; ~45 min)",
+]

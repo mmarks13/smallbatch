@@ -1,0 +1,30 @@
+name: gpu-release
+
+# The full real-GPU regression matrix (~45 min): smoke shapes plus precision
+# paths (fp32/bf16/qlora), gradient checkpointing, kill-and-resume, and OOM
+# backoff. Deliberately manual — run it once per release on the release
+# candidate commit, not on every PR push. The release workflow refuses to
+# publish unless this workflow has succeeded on the tagged commit.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gpu-release:
+    if: vars.GPU_RUNNER_READY == '1'
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: GPU sanity
+        run: |
+          nvidia-smi --query-gpu=name,driver_version,power.limit --format=csv,noheader
+      - name: Install into the runner environment
+        run: |
+          source "$SMALLBATCH_RUNNER_VENV/bin/activate"
+          uv pip install -e ".[dev]"
+      - name: gpu-release tier (includes gpu-smoke)
+        run: |
+          source "$SMALLBATCH_RUNNER_VENV/bin/activate"
+          python -c "import torch; assert torch.cuda.is_available(), 'no CUDA'"
+          SMALLBATCH_GPU_TESTS=1 pytest tests_gpu -q
