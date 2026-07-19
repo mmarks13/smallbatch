@@ -32,7 +32,9 @@ class LabelJournal:
     """Append-only event log with replay state.
 
     Replay state exposed to the pipeline:
-    - `rows`: labeled rows by row id (real and synthetic) — skip these calls
+    - `rows`: labeled rows by (row id, origin) — skip these calls. Origin is
+      part of the key because multi-pass labeling draws the same row id once
+      per pass and every draw is separately paid work
     - `cached_stage(stage)`: the generated inputs of a COMPLETED generation
       stage (partial generations are regenerated; their finished labels still
       replay when the regenerated input matches by content hash)
@@ -42,7 +44,7 @@ class LabelJournal:
     def __init__(self, journal_dir: Path, fingerprint: str):
         self.dir = journal_dir
         self.fingerprint = fingerprint
-        self.rows: dict[str, dict] = {}
+        self.rows: dict[tuple[str, str], dict] = {}
         self._stage_items: dict[str, list[dict]] = {}
         self._stage_done: set[str] = set()
         self.probe: dict[str, Any] = {}
@@ -95,7 +97,8 @@ class LabelJournal:
                 continue  # stale: written under a different labeling identity
             kind = ev.get("event")
             if kind == "row":
-                self.rows[ev["row"]["id"]] = ev["row"]
+                row = ev["row"]
+                self.rows[(row["id"], row.get("origin", ""))] = row
             elif kind == "stage_item":
                 self._stage_items.setdefault(ev["stage"], []).append(ev)
             elif kind == "stage_done":
@@ -135,7 +138,7 @@ class LabelJournal:
 
     def record_row(self, row: dict) -> None:
         self._record("row", row=row)
-        self.rows[row["id"]] = row
+        self.rows[(row["id"], row.get("origin", ""))] = row
 
     def record_stage_item(self, stage: str, item: dict, **provenance) -> None:
         ev = {"stage": stage, "item": item, **provenance}
@@ -165,7 +168,7 @@ class LabelJournal:
 class NullJournal:
     """No-persistence stand-in so the pipeline reads one code path."""
 
-    rows: dict[str, dict] = {}
+    rows: dict[tuple[str, str], dict] = {}
     probe: dict[str, Any] = {}
 
     def record_row(self, row: dict) -> None:

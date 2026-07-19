@@ -20,6 +20,17 @@ from .teacher import Teacher
 Row = dict[str, Any]
 SPLIT_SEED = 17
 
+# Origins whose rows are supplied decisions (as opposed to synthetic
+# augmentation variants). "user-resolved" marks a decision the user made by
+# resolving a three-way teacher split; the reference on that row is the user,
+# not the teacher, and public evidence must disclose the count.
+REAL_ORIGINS = {"real", "user-resolved"}
+
+# Fraction of three-way splits above which hand-resolving is the wrong tool:
+# the rubric under-determines a whole region of inputs, and tightening the
+# prompt then relabeling beats annotating the symptom.
+UNRESOLVED_RUBRIC_THRESHOLD = 0.03
+
 
 def _progress(message: str) -> None:
     print(f"[smallbatch] {message}", file=sys.stderr, flush=True)
@@ -90,9 +101,8 @@ def label_items(
     journal = journal or NullJournal()
     rows: dict[int, Row] = {}
     for index, item in enumerate(items):
-        rid = row_id(item)
-        cached = journal.rows.get(rid)
-        if cached is not None and cached.get("origin") == origin:
+        cached = journal.rows.get((row_id(item), origin))
+        if cached is not None:
             rows[index] = dict(cached)
     pending = [index for index in range(len(items)) if index not in rows]
     if rows:
@@ -158,6 +168,93 @@ def label_items(
     elif items:
         _progress(f"teacher {origin} complete rows={len(items)}")
     return [rows[index] for index in range(len(items)) if index in rows]
+
+
+def _output_key(output: Any) -> str:
+    return json.dumps(output, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _draw_summary(row: Row) -> dict[str, Any]:
+    return {"output": row["output"], "reason": row.get("reason", ""), "origin": row["origin"]}
+
+
+def label_real_rows(
+    teacher: Teacher,
+    spec: FunctionSpec,
+    items: list[dict],
+    journal=None,
+) -> tuple[list[Row], list[dict]]:
+    """Label real decisions honoring `teacher.passes`.
+
+    passes=1 is a single draw per item, unchanged. passes=2 draws every item
+    twice — the second pass over a shuffled item order so batch neighbors
+    differ — and tie-breaks flips with one targeted third draw. Rows carry
+    `weight` (the fraction of draws matching the consensus) and `agreement`
+    ("unanimous", "majority", or "median"); training may down-weight low
+    agreement, and the unanimous fraction is the teacher's self-agreement
+    ceiling reported as evidence. Items whose three draws are all distinct and
+    not an ordered integer scale are returned separately as unresolved: they
+    get no decision, never block the run, and may be resolved by the user via
+    the imported-decisions path.
+    """
+    passes = spec.teacher.passes if spec.teacher else 1
+    if passes == 1 or not items:
+        return label_items(teacher, spec, items, "real", journal), []
+    first = label_items(teacher, spec, items, "real#1", journal)
+    order = list(range(len(items)))
+    random.Random(SPLIT_SEED).shuffle(order)
+    second = label_items(teacher, spec, [items[i] for i in order], "real#2", journal)
+    first_by = {row["id"]: row for row in first}
+    second_by = {row["id"]: row for row in second}
+    flips = [
+        item
+        for item in items
+        if first_by[row_id(item)]["output"] != second_by[row_id(item)]["output"]
+    ]
+    _progress(
+        f"teacher pass agreement: {len(items) - len(flips)}/{len(items)} unanimous, "
+        f"{len(flips)} flips to tie-break"
+    )
+    third_by = {
+        row["id"]: row
+        for row in (
+            label_items(teacher, spec, flips, "real#tiebreak", journal) if flips else []
+        )
+    }
+    ordered_scale = spec.output.is_scalar and spec.output.scalar.type == "int"
+    rows: list[Row] = []
+    unresolved: list[dict] = []
+    for item in items:
+        rid = row_id(item)
+        draws = [first_by[rid], second_by[rid]]
+        if draws[0]["output"] == draws[1]["output"]:
+            rows.append({**draws[0], "origin": "real", "weight": 1.0, "agreement": "unanimous"})
+            continue
+        draws.append(third_by[rid])
+        counts = Counter(_output_key(draw["output"]) for draw in draws)
+        key, votes = counts.most_common(1)[0]
+        if votes >= 2:
+            winner = next(draw for draw in draws if _output_key(draw["output"]) == key)
+            rows.append(
+                {**winner, "origin": "real", "weight": round(2 / 3, 4), "agreement": "majority"}
+            )
+        elif ordered_scale:
+            # the median of three distinct levels is always one of the draws
+            winner = sorted(draws, key=lambda draw: draw["output"])[1]
+            rows.append(
+                {**winner, "origin": "real", "weight": round(1 / 3, 4), "agreement": "median"}
+            )
+        else:
+            unresolved.append(
+                {
+                    "input": item,
+                    "provenance": {
+                        "unresolved": True,
+                        "draws": [_draw_summary(draw) for draw in draws],
+                    },
+                }
+            )
+    return rows, unresolved
 
 
 def _strata(spec: FunctionSpec, rows: list[Row], seed: int) -> dict[str, list[Row]]:
@@ -237,17 +334,26 @@ def assign_splits(
             row["split"] = "train"
 
 
-def _imported_rows(spec: FunctionSpec, inputs: list[dict], outputs: list[Any]) -> list[Row]:
-    return [
-        {
-            "id": row_id(item),
-            "input": item,
-            "output": output,
-            "reason": "",
-            "origin": "real",
-        }
-        for item, output in zip(inputs, outputs)
-    ]
+def _imported_rows(
+    spec: FunctionSpec, inputs: list[dict], outputs: list[Any], records: list[dict]
+) -> list[Row]:
+    """Imported decisions; a record whose provenance marks it unresolved is a
+    user resolution of a three-way teacher split and keeps that identity."""
+    rows = []
+    for item, output, record in zip(inputs, outputs, records):
+        provenance = record.get("provenance")
+        resolved = isinstance(provenance, dict) and provenance.get("unresolved")
+        rows.append(
+            {
+                "id": row_id(item),
+                "input": item,
+                "output": output,
+                "reason": "",
+                "origin": "user-resolved" if resolved else "real",
+                **({"weight": 1.0} if resolved else {}),
+            }
+        )
+    return rows
 
 
 def _dedupe(rows: list[Row]) -> list[Row]:
@@ -397,6 +503,90 @@ def _augment(
     return rows
 
 
+def _maintain_unresolved(
+    spec: FunctionSpec,
+    out_dir: Path,
+    new_unresolved: list[dict],
+    real_rows: list[Row],
+    *,
+    append: bool,
+) -> list[dict]:
+    """Fold this run's three-way splits into `unresolved.jsonl`.
+
+    Records whose input has since received a decision (a user resolution or a
+    later stable teacher draw) drop out. Resolution is always optional: the
+    file never blocks a run, it only records what has no stable answer yet.
+    """
+    path = out_dir / "unresolved.jsonl"
+    prior = read_jsonl(path) if append else []
+    decided = {row["id"] for row in real_rows}
+    kept = [record for record in prior if row_id(record["input"]) not in decided]
+    known = {row_id(record["input"]) for record in kept}
+    kept.extend(
+        record for record in new_unresolved if row_id(record["input"]) not in known
+    )
+    if not kept:
+        path.unlink(missing_ok=True)
+        return []
+    atomic_jsonl(path, kept)
+    spec_path = spec._source_path or f"{spec.name}.yaml"
+    _progress(
+        f"{len(kept)} items had three distinct teacher answers and were set aside in "
+        f"{path} — to resolve any of them, fill in a top-level \"output\" on each "
+        f"line you keep (delete the rest), then run: "
+        f"smallbatch label {spec_path} --items {path} --append"
+    )
+    total = len(kept) + len(real_rows)
+    if total and len(kept) / total > UNRESOLVED_RUBRIC_THRESHOLD:
+        _progress(
+            "high three-way rate: the prompt likely under-determines these inputs; "
+            "tightening the decision instructions and relabeling will help more "
+            "than resolving items by hand"
+        )
+    return kept
+
+
+def _noise_meta(
+    spec: FunctionSpec,
+    decision_source: str,
+    real_rows: list[Row],
+    unresolved_rows: list[dict],
+) -> dict[str, Any] | None:
+    """Teacher-noise evidence: self-agreement per split plus disclosure counts.
+
+    Self-agreement is the fraction of measured rows whose two independent
+    draws matched — the ceiling candidate agreement is judged against. Rows
+    labeled before measurement was on (or imported) carry no agreement data
+    and are excluded from the ceiling, never guessed at.
+    """
+    measured = [row for row in real_rows if "agreement" in row]
+    user_resolved = sum(row.get("origin") == "user-resolved" for row in real_rows)
+    if decision_source != "teacher" and not measured and not user_resolved and not unresolved_rows:
+        return None
+
+    def unanimous_fraction(rows: list[Row]) -> float | None:
+        if not rows:
+            return None
+        return round(sum(row["agreement"] == "unanimous" for row in rows) / len(rows), 4)
+
+    return {
+        "passes": spec.teacher.passes if spec.teacher else 1,
+        "measured_rows": len(measured),
+        "self_agreement": {
+            "overall": unanimous_fraction(measured),
+            **{
+                split: unanimous_fraction(
+                    [row for row in measured if row.get("split") == split]
+                )
+                for split in ("train", "dev", "eval")
+            },
+        },
+        "agreement_counts": dict(Counter(row["agreement"] for row in measured)),
+        "unresolved": len(unresolved_rows),
+        "user_resolved": user_resolved,
+    }
+
+
 def build_dataset(
     spec: FunctionSpec,
     records: list[dict],
@@ -410,23 +600,24 @@ def build_dataset(
     inputs, imported = normalize_item_records(spec, records)
     out_dir.mkdir(parents=True, exist_ok=True)
     existing_rows = read_jsonl(out_dir / "labeled.jsonl") if append else []
-    existing_variants = [row for row in existing_rows if row.get("origin") != "real"]
+    existing_variants = [row for row in existing_rows if row.get("origin") not in REAL_ORIGINS]
     existing_splits = {row["id"]: row["split"] for row in existing_rows}
     existing_by_id = {row["id"]: row for row in existing_rows}
 
     journal = LabelJournal.open(out_dir, spec.decision_hash())
     try:
+        new_unresolved: list[dict] = []
         if imported is not None:
-            new_rows = _imported_rows(spec, inputs, imported)
+            new_rows = _imported_rows(spec, inputs, imported, records)
             decision_source = "imported"
         else:
             if teacher is None:
                 raise ValueError("unlabeled inputs require a configured teacher")
             unseen = [item for item in inputs if row_id(item) not in existing_by_id]
-            new_rows = label_items(teacher, spec, unseen, "real", journal)
+            new_rows, new_unresolved = label_real_rows(teacher, spec, unseen, journal)
             decision_source = "teacher"
         real_rows = _dedupe([*existing_rows, *new_rows])
-        real_rows = [row for row in real_rows if row.get("origin") == "real"]
+        real_rows = [row for row in real_rows if row.get("origin") in REAL_ORIGINS]
         assign_splits(
             spec,
             real_rows,
@@ -437,6 +628,9 @@ def build_dataset(
         _progress(
             f"decisions ready source={decision_source} real={len(real_rows)} "
             f"train={split_counts['train']} dev={split_counts['dev']} eval={split_counts['eval']}"
+        )
+        unresolved_rows = _maintain_unresolved(
+            spec, out_dir, new_unresolved, real_rows, append=append
         )
         variants: list[Row] = list(existing_variants)
         if spec.augmentation and (not append or max_variants is not None):
@@ -462,6 +656,7 @@ def build_dataset(
             "real": len(real_rows),
             "variants": sum(row.get("origin") != "real" for row in rows),
             "label_histogram": dict(sorted(histogram.items())),
+            "teacher_noise": _noise_meta(spec, decision_source, real_rows, unresolved_rows),
             "split_label_histograms": {
                 split: dict(
                     sorted(

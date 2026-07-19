@@ -68,6 +68,11 @@ smallbatch doctor ticket-priority/spec.yaml \
   --items ticket-priority/items.json
 
 # Imported decisions skip the teacher. Unlabeled inputs start with calibration.
+# `teacher.passes: 2` in the spec labels everything twice (~2.2x teacher cost),
+# tie-breaks flips with a third targeted draw, and reports the teacher's
+# self-agreement — the ceiling candidate agreement is judged against. Items
+# with no stable answer land in data/<function>/unresolved.jsonl for optional
+# hand resolution.
 smallbatch label ticket-priority/spec.yaml \
   --items ticket-priority/items.json
 

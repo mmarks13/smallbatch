@@ -130,6 +130,15 @@ def inspect_items(spec: FunctionSpec, records: list[dict]) -> list[Finding]:
         )
     if outputs is None and spec.teacher is None:
         findings.append(("fail", "unlabeled inputs require a teacher block"))
+    if outputs is None and spec.teacher is not None and spec.teacher.passes == 1:
+        findings.append(
+            (
+                "warn",
+                "teacher.passes: 1 draws each decision once, so the teacher's "
+                "self-agreement ceiling stays unknown; passes: 2 measures it and "
+                "tie-breaks unstable decisions",
+            )
+        )
     if outputs is not None and spec.augmentation and spec.teacher is None:
         findings.append(("fail", "augmentation of imported decisions requires a teacher"))
     return findings
@@ -150,6 +159,18 @@ def inspect_data(spec: FunctionSpec, data_dir: Path) -> list[Finding]:
     for split in ("train", "dev", "eval"):
         if not (data_dir / f"{split}.jsonl").exists():
             findings.append(("fail", f"missing {split}.jsonl"))
+    unresolved = data_dir / "unresolved.jsonl"
+    if unresolved.exists():
+        count = sum(1 for line in unresolved.read_text().splitlines() if line.strip())
+        if count:
+            findings.append(
+                (
+                    "warn",
+                    f"{count} unresolved decisions in {unresolved} — resolution is "
+                    "optional; fill in `output` per kept line and relabel with "
+                    "--append, or tighten the prompt and relabel",
+                )
+            )
     return findings
 
 

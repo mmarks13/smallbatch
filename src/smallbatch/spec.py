@@ -148,6 +148,12 @@ class TeacherSpec(BaseModel):
     backend: Literal["claude-cli", "codex-cli", "openai-compatible"]
     model: str
     batch_size: int = 40
+    # decision-noise measurement. 2 labels every item twice (the second pass
+    # with shuffled batch composition), tie-breaks flips with one targeted
+    # third draw, and records the teacher's self-agreement ceiling; items with
+    # three distinct categorical answers are set aside for optional user
+    # resolution. 1 is a single draw with the ceiling unknown.
+    passes: Literal[1, 2] = 1
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     base_url: str | None = None
     api_key_env: str = "OPENAI_API_KEY"
@@ -350,7 +356,15 @@ class FunctionSpec(BaseModel):
             "input_schema": self.input_schema,
             "output": self.output.model_dump(mode="json"),
             "prompt": self.prompt,
-            "teacher": self.teacher.model_dump(mode="json") if self.teacher else None,
+            # `passes` is a measurement protocol, not part of the decision's
+            # identity: the same approved teacher answers the same prompt, we
+            # just draw more than once. Excluding it keeps existing datasets
+            # and journals valid when a user turns measurement on or off.
+            "teacher": (
+                self.teacher.model_dump(mode="json", exclude={"passes"})
+                if self.teacher
+                else None
+            ),
             "augmentation": (
                 self.augmentation.model_dump(mode="json") if self.augmentation else None
             ),

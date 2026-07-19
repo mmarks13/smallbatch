@@ -138,7 +138,15 @@ def train_tfidf(
                 )
             objectives[name] = "ordinal"
         else:
-            head = LogisticRegression(max_iter=1000).fit(features, labels)
+            # rows from a passes=2 labeling run carry an agreement weight
+            # (unanimous 1.0, tie-broken lower); down-weighting flip rows keeps
+            # teacher noise from pulling the boundary. The shared ordinal head
+            # and the SetFit/LoRA loops do not consume weights yet.
+            head = LogisticRegression(max_iter=1000).fit(
+                features,
+                labels,
+                sample_weight=[float(row.get("weight", 1.0)) for row in train_rows],
+            )
             objectives[name] = "multinomial"
         models[name] = {"vectorizer": vectorizer, "head": head}
 

@@ -90,3 +90,38 @@ def test_truncation_check_skips_specs_without_setfit_candidates():
     from smallbatch import doctor
 
     assert doctor.inspect_setfit_truncation(make_spec(), imported_records(4)) == []
+
+
+def test_doctor_recommends_measuring_teacher_noise():
+    from smallbatch.doctor import inspect_items
+
+    spec = make_spec(teacher={"backend": "codex-cli", "model": "test"})
+    records = [{"input": {"title": f"t{i}", "body": "b"}} for i in range(25)]
+    findings = inspect_items(spec, records)
+    assert any("passes: 2" in message for level, message in findings if level == "warn")
+    measured = make_spec(teacher={"backend": "codex-cli", "model": "test", "passes": 2})
+    assert not any("passes: 2" in message for _, message in inspect_items(measured, records))
+
+
+def test_doctor_surfaces_unresolved_decisions(tmp_path):
+    import json as jsonlib
+
+    from smallbatch.doctor import inspect_data
+
+    spec = make_spec()
+    (tmp_path / "meta.json").write_text(
+        jsonlib.dumps(
+            {
+                "schema_version": 3,
+                "decision_hash": spec.decision_hash(),
+                "counts": {"train": 7, "dev": 1, "eval": 2},
+            }
+        )
+    )
+    for split in ("train", "dev", "eval"):
+        (tmp_path / f"{split}.jsonl").write_text("")
+    (tmp_path / "unresolved.jsonl").write_text('{"input": {"title": "x", "body": "y"}}\n')
+    findings = inspect_data(spec, tmp_path)
+    assert any(
+        level == "warn" and "unresolved decisions" in message for level, message in findings
+    )

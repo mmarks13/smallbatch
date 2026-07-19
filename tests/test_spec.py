@@ -86,3 +86,18 @@ def test_head_capacity_knob_parses_and_rejects_unknown_values():
     assert make_spec().candidates["tfidf"].head == "auto"  # dev decides by default
     with pytest.raises(ValueError):
         make_spec(candidates={"words": {"type": "tfidf", "head": "wide"}})
+
+
+def test_teacher_passes_validates_and_stays_out_of_decision_hash():
+    from conftest import make_spec
+
+    base = make_spec(teacher={"backend": "codex-cli", "model": "test"})
+    measured = make_spec(teacher={"backend": "codex-cli", "model": "test", "passes": 2})
+    # a measurement protocol, not a different decision: datasets stay valid
+    assert base.decision_hash() == measured.decision_hash()
+    # but builds must revision when the protocol changes
+    assert base.build_hash() != measured.build_hash()
+    with pytest.raises(ValueError):
+        make_spec(teacher={"backend": "codex-cli", "model": "test", "passes": 3})
+    with pytest.raises(ValueError):
+        make_spec(teacher={"backend": "codex-cli", "model": "test", "passes": 0})

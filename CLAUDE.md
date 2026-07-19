@@ -130,7 +130,8 @@ runtime before atomically changing `active.json`.
 ```text
 data/<function>/
   train.jsonl dev.jsonl eval.jsonl labeled.jsonl meta.json calibration.json
-  journal/
+  unresolved.jsonl   # only at teacher.passes: 2 — three-way splits awaiting
+  journal/           # optional user resolution; never blocks a run
 
 artifacts/<function>/
   builds/<build-id>/

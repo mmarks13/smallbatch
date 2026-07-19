@@ -487,7 +487,9 @@ def compile(  # noqa: A001
         artifacts.write_build_state(build, state)
         raise ValueError("all configured candidates failed; inspect build_state.json")
 
-    report, details = build_report(spec, eval_rows, candidates, diagnostics)
+    report, details = build_report(
+        spec, eval_rows, candidates, diagnostics, data_meta=data_meta
+    )
     report_path = write_report(build, report, details)
     manifest = _write_provisional_manifest(
         spec, build, data_meta, exact_dataset_hash, candidates, diagnostics

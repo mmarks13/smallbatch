@@ -192,3 +192,58 @@ def test_integer_evidence_summary_includes_quality_and_operating_metrics():
         "peak_rss=0.0MiB",
     ):
         assert expected in summary
+
+
+def test_reference_stability_reports_ceiling_and_relative_agreement():
+    spec = make_spec()
+    rows = [{"input": {"title": "t", "body": "b"}, "output": "urgent"} for _ in range(5)]
+    meta = {
+        "teacher_noise": {
+            "passes": 2,
+            "measured_rows": 40,
+            "self_agreement": {"overall": 0.9, "train": 0.9, "dev": None, "eval": 0.9},
+            "agreement_counts": {"unanimous": 36, "majority": 4},
+            "unresolved": 2,
+            "user_resolved": 1,
+        }
+    }
+    completed = {"a": candidate(["urgent"] * 5)}
+    report, _ = build_report(spec, rows, completed, {}, data_meta=meta)
+    stability = report["reference_stability"]
+    assert stability["self_agreement"]["eval"] == 0.9
+    assert "ceiling" in stability["note"]
+    markdown = render_markdown(report)
+    assert "## Reference stability" in markdown
+    assert "eval 90.0%" in markdown
+    assert "111% of the ceiling" in markdown  # 1.0 agreement vs 0.9 ceiling
+    assert "2 items had no stable teacher answer" in markdown
+    assert "1 decisions were resolved by the user" in markdown
+
+
+def test_single_pass_report_states_unknown_ceiling():
+    spec = make_spec()
+    rows = [{"input": {"title": "t", "body": "b"}, "output": "urgent"}]
+    meta = {
+        "teacher_noise": {
+            "passes": 1,
+            "measured_rows": 0,
+            "self_agreement": {"overall": None, "train": None, "dev": None, "eval": None},
+            "agreement_counts": {},
+            "unresolved": 0,
+            "user_resolved": 0,
+        }
+    }
+    report, _ = build_report(spec, rows, {"a": candidate(["urgent"])}, {}, data_meta=meta)
+    assert "ceiling is unknown" in report["reference_stability"]["note"]
+    assert "teacher.passes: 2" in report["reference_stability"]["note"]
+    assert "single teacher draw" in render_markdown(report)
+
+
+def test_imported_decisions_have_no_reference_stability_block():
+    spec = make_spec()
+    rows = [{"input": {"title": "t", "body": "b"}, "output": "urgent"}]
+    report, _ = build_report(
+        spec, rows, {"a": candidate(["urgent"])}, {}, data_meta={"teacher_noise": None}
+    )
+    assert report["reference_stability"] is None
+    assert "Reference stability" not in render_markdown(report)
