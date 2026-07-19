@@ -5,7 +5,7 @@ from .api import compile as compile  # noqa: A004 - deliberate product verb
 from .runtime import load_fn
 from .spec import load_spec
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "label",
     "compile",

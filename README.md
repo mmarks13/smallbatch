@@ -4,7 +4,7 @@
   <img src="https://raw.githubusercontent.com/mmarks13/smallbatch/main/assets/smallbatch_banner.png" alt="smallbatch — distill once, own the function" width="100%">
 </p>
 
-**Smallbatch distills prompt-driven LLM decisions into small, tested local
+**Smallbatch distills prompt-driven LLM tasks into small, tested local
 functions that run on a CPU.**
 
 Replace repeated LLM inference with a local CPU function you control, with
@@ -24,9 +24,12 @@ local implementations of those decisions. You explicitly select one or none.
 ## When It Fits
 
 Use Smallbatch when the same constrained prompt is repeatedly producing a
-bounded integer, one choice from a fixed list (an enum), or a structured
-combination of those outputs, and the prompt, output meaning, and input
-distribution are stable enough to compile.
+bounded integer, one choice from a fixed list (an enum), a structured
+combination of those outputs, or one of these plus a single short text field
+(a rationale, rewrite, or summary) up to a declared length — and the prompt,
+output meaning, and input distribution are stable enough to compile.
+Functions with a text field are LoRA-only, because their output must be
+generated, not selected.
 
 Keep the original LLM call when the task is open-ended, the prompt changes
 frequently, examples are not representative, or a local function cannot
@@ -54,7 +57,7 @@ be the best choice when it already reproduces the decisions well enough. See
 pip install smallbatch
 ```
 
-The v0.2 package is intentionally a full installation containing all three
+The smallbatch package is intentionally a full installation containing all three
 training approaches. The final function wheel contains only the selected
 candidate's runtime dependencies and never depends on Smallbatch.
 
@@ -93,9 +96,9 @@ Smallbatch. It evaluates that package on the complete held-out evaluation split
 the active selection.
 
 ```python
-from smallbatch_functions.ticket_priority import classify, classify_batch, metadata
+from smallbatch_functions.ticket_priority import run, run_batch, metadata
 
-priority = classify({"title": "Production down", "body": "All requests return 503"})
+priority = run({"title": "Production down", "body": "All requests return 503"})
 ```
 
 The generated package does not import Smallbatch. A LoRA package still requires
@@ -134,6 +137,10 @@ CPU. Reports include:
   balanced accuracy, per-class behavior, worst-class recall, and confusion for
   enums.
 - Joint and per-field results for structured outputs.
+- For text fields: bits-per-byte reference fidelity against held-out teacher
+  text plus structural failure rates (malformed JSON, empty text, character
+  limit, budget). These measure how well the function predicts the teacher's
+  text — never semantic correctness or usefulness.
 - Cold load, median/tail (p50/p95) single-item latency, peak resident memory
   (RSS), candidate-owned bytes, required shared/base bytes, runtime
   dependencies, CPU, OS, and thread count.
@@ -142,7 +149,7 @@ CPU. Reports include:
 
 Smallbatch may report observed strict dominance, but it never declares a winner
 or PASS/FAIL. Comparing candidates on one evaluation split introduces selection
-bias; v0.2 reports that limitation and does not claim independent confirmation.
+bias; Smallbatch reports that limitation and does not claim independent confirmation.
 CPU time, memory, and footprint are operating proxies, not energy measurements.
 
 ## Case Study

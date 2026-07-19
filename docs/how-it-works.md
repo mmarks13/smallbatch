@@ -74,20 +74,54 @@ or SetFit head per field and return one validated object.
 
 Every ordered scale therefore ends in a distribution over the levels — a LoRA
 student reads it from a single forward pass with no decoding loop, and the
-softmax heads compute it with a few lines of numpy. That exposes a choice
-shared by all three candidates: `decode: argmax` reports the most likely
-level, which maximizes exact agreement; `decode: median` reports the first
-level whose cumulative probability reaches one half, which trades exact hits
-for smaller misses; `decode: within_one` reports the level whose ±1
-neighborhood holds the most probability. The default, `auto`, measures all
-three on the development split and keeps the best within-one agreement, ties
-resolving to argmax; the evaluation split never decides it. The selected
-decoder and the full comparison are recorded with the candidate, and the
-softmax heads persist the selection inside the head artifact. The report also
-carries head diagnostics: the selected capacity, the head's mean confidence,
-and each level's mean predicted probability against its observed rate — the
-view that shows a rare extreme level being starved of probability mass on the
-development split, before it surfaces as tail bias in evaluation.
+softmax heads compute it with a few lines of numpy. Every ordinal field
+decodes by **argmax**: the most likely level, exactly what constrained greedy
+decoding would emit, so the scored distribution and generation always agree.
+(v0.3 removed the configurable median/within-one decoders and their
+development-time selection.) The report carries head diagnostics: the
+selected capacity, the head's mean confidence, and each level's mean
+predicted probability against its observed rate — the view that shows a rare
+extreme level being starved of probability mass on the development split,
+before it surfaces as tail bias in evaluation.
+
+### Length-Bounded Text Outputs
+
+A function may declare **one** text field (`type: text`, `max_chars` 1-2000
+code points, default 300), alone or beside bounded fields. Text functions are
+LoRA-only — classifiers select from fixed values, but this contract requires
+generation — and reject augmentation. Their canonical completion is strict
+JSON in declared field order (a bare JSON string for scalar text); declared
+order is generation order, so a rationale placed before a decision is
+generated first and may influence it, with no separate ordering setting.
+
+All LoRA functions train under one **universal per-field objective**. Each
+field gets a type-appropriate semantic loss: integer scales keep class NLL
+plus RPS at their deciding token, enums get legal-value NLL (token NLL
+renormalized over the label trie, so shared tokens cancel), and text gets the
+mean next-token NLL over its span — a mean, so longer text earns no extra
+influence. JSON structure, field names, punctuation, and the final EOS are a
+separate internal format objective at fixed weight 0.1. Every semantic loss
+is normalized by the candidate's untuned-base development loss for that field
+(measured once before training; an unsafe baseline fails the candidate), and
+combined as a weighted mean using the function-level `training.loss_weights`
+(defaults: bounded 1.0, text-beside-bounded 0.25, text-alone 1.0). The same
+weighted normalized development score — teacher-forced, conditioned on the
+correct preceding reference fields — selects the best checkpoint and drives
+early stopping for every LoRA shape; behavioral metrics never do.
+
+Final evaluation is free-running and deterministic (greedy, sampling
+disabled), the same behavior packaged inference reproduces. The whole output
+is atomic: a completion that is not exactly the declared JSON value, breaks a
+field contract, is empty, or exceeds `max_chars` invalidates the entire row —
+never truncated, repaired, or partially returned. Structural failure rates
+(malformed JSON, empty text, character limit, budget exhaustion) are counted,
+and text quality evidence is **reference fidelity** — bits per byte as the
+primary cross-model metric, plus token NLL, perplexity, top-1 accuracy, and
+median/p90 per-example bits per byte, all measuring held-out teacher-text
+prediction, never correctness, factuality, or usefulness. The normalized
+checkpoint score is never a cross-candidate ranking: each candidate has its
+own baseline. Enforced structured decoding (grammar-constrained JSON) is
+future work; today generation is validated, not constrained.
 
 Completed stages are durable. An interrupted build resumes in place, including
 LoRA trainer checkpoints and completed zero-shot diagnostics. Re-running a
@@ -139,8 +173,15 @@ The standalone package is the generated source project and wheel that runs
 without Smallbatch. It exposes:
 
 ```python
-from smallbatch_functions.ticket_priority import classify, classify_batch, metadata
+from smallbatch_functions.ticket_priority import run, run_batch, metadata
 ```
+
+`run` returns the declared shape — a value, a string, or a complete
+dictionary — and raises a structured `InvalidOutputError` (atomic: no partial
+result, no repair, no automatic retry) when a generated output violates the
+contract. The embedded `function.json` carries the resolved output contract,
+character limits, deterministic decoding settings, and the selected
+candidate's loss weights.
 
 It does not depend on Smallbatch. TF-IDF packages depend only on their sklearn
 runtime, SetFit packages on SetFit's inference stack, and LoRA packages on
