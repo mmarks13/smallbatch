@@ -108,9 +108,21 @@ def nearest_rank_p90(values: list[float]) -> float | None:
 
 
 def field_decision_matches(field: FieldSpec, prediction: Any, reference: Any) -> bool:
+    """Within the contract's tolerance: ±1 for integers, exact for enums. A
+    text field has no notion of a matching decision — it contributes validity
+    (a non-empty string was produced), so joint metrics on mixed outputs read
+    as "the bounded decisions match and the record is complete"."""
     if prediction is None:
         return False
+    if field.type == "text":
+        return isinstance(prediction, str) and bool(prediction.strip())
     return abs(prediction - reference) <= 1 if field.type == "int" else prediction == reference
+
+
+def _field_value_valid(field: FieldSpec, value: Any) -> bool:
+    if field.type == "text":
+        return isinstance(value, str) and bool(value.strip())
+    return value in field.values()
 
 
 def _int_bootstrap_cis(predictions: list, references: list) -> dict[str, list[float] | None]:
@@ -320,11 +332,29 @@ def enum_field_metrics(
     return result
 
 
+def text_field_metrics(
+    field: FieldSpec, predictions: list, references: list
+) -> dict[str, Any]:
+    """Structural presence only. Text has no behavioral agreement metric:
+    reference fidelity lives in the candidate's text-fidelity evidence, and
+    neither measures semantic correctness."""
+    n = len(references)
+    valid = sum(_field_value_valid(field, prediction) for prediction in predictions)
+    return {
+        "n": n,
+        "valid_n": valid,
+        "invalid_rate": round((n - valid) / n, 4) if n else 0.0,
+        "note": "text agreement is not scored; see text fidelity evidence",
+    }
+
+
 def field_metrics(
     field: FieldSpec, predictions: list, references: list, bootstrap: bool = False
 ) -> dict[str, Any]:
     if field.type == "int":
         return int_field_metrics(field, predictions, references, bootstrap)
+    if field.type == "text":
+        return text_field_metrics(field, predictions, references)
     return enum_field_metrics(field, predictions, references, bootstrap)
 
 
@@ -363,7 +393,10 @@ def compare(
     )
     exact = sum(prediction == reference for prediction, reference in zip(normalized, references))
     invalid = sum(
-        any(prediction.get(name) not in field.values() for name, field in spec.output.fields.items())
+        any(
+            not _field_value_valid(field, prediction.get(name))
+            for name, field in spec.output.fields.items()
+        )
         for prediction in normalized
     )
     return {

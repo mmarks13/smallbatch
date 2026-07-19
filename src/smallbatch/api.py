@@ -195,7 +195,7 @@ def _train_candidate(
         from .candidates import train_tfidf
 
         metadata = train_tfidf(
-            spec, train_rows, model_dir, dev_rows=dev_rows, decode=config.decode, head=config.head
+            spec, train_rows, model_dir, dev_rows=dev_rows, head=config.head
         )
     elif isinstance(config, SetFitCandidateSpec):
         from .setfit_candidate import train_setfit
@@ -210,23 +210,22 @@ def _train_candidate(
             "base_model": config.model,
             "train_precision": info["precision"],
             "inference_precision": "fp32",
-            "rationale_distillation": config.rationale_distillation,
             "eval_batch_size": config.eval_batch_size,
-            # the dev-selected decoder must reach the record: runtime.py and
-            # the standalone package fall back to argmax when it is absent
-            "decode": info["decode"],
+            "objective": info["objective"],
+            "loss_weights": info["loss_weights"],
             "training": {
                 key: info.get(key)
                 for key in (
                     "train_loss",
                     "curve",
                     "best_epoch",
-                    "best_dev_agreement",
+                    "best_checkpoint_score",
                     "epochs_run",
                     "stopped_reason",
                     "train_rows",
                     "dev_rows",
-                    "dev_decode_comparison",
+                    "untuned_baselines",
+                    "format_loss_weight",
                 )
             },
         }
@@ -383,6 +382,10 @@ def compile(  # noqa: A001
             record["metrics"] = compute_metrics(
                 spec, record["predictions"], references, bootstrap=True
             )
+            if profiled.get("structural_failures"):
+                record["metrics"]["structural_failures"] = profiled["structural_failures"]
+            if profiled.get("text_fidelity"):
+                record["text_fidelity"] = profiled["text_fidelity"]
             record["profile"] = profiled["profile"]
             _write_local_record(final_record_path, record)
             candidates[candidate_id] = record
@@ -471,19 +474,22 @@ def compile(  # noqa: A001
             _write_local_record(local_path, diagnostics[diagnostic_id])
             _progress(f"{prefix} ERROR {diagnostics[diagnostic_id]['error']}")
 
-    constant = train_fitted_constant(spec, train_rows)
-    constant_predictions = [constant for _ in eval_rows]
-    diagnostics["train-fitted-constant"] = {
-        "selectable": False,
-        "value": constant,
-        "metrics": compute_metrics(
-            spec, constant_predictions, references, bootstrap=True
-        ),
-    }
-    _progress(
-        "diagnostic train-fitted-constant complete: "
-        + evidence_summary(diagnostics["train-fitted-constant"])
-    )
+    if not spec.output.has_text:
+        # no constant text is a valid output, so the constant diagnostic is
+        # undefined for text-bearing functions and honestly absent
+        constant = train_fitted_constant(spec, train_rows)
+        constant_predictions = [constant for _ in eval_rows]
+        diagnostics["train-fitted-constant"] = {
+            "selectable": False,
+            "value": constant,
+            "metrics": compute_metrics(
+                spec, constant_predictions, references, bootstrap=True
+            ),
+        }
+        _progress(
+            "diagnostic train-fitted-constant complete: "
+            + evidence_summary(diagnostics["train-fitted-constant"])
+        )
     if not any(record.get("status") == "completed" for record in candidates.values()):
         _write_provisional_manifest(
             spec, build, data_meta, exact_dataset_hash, candidates, diagnostics

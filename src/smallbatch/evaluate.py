@@ -94,15 +94,21 @@ def generate_batch(
     max_new_tokens: int,
     batch_size: int = 16,
     allowed_completions: list[str] | None = None,
-) -> tuple[list[str], int]:
-    """Greedy generation; returns (newly generated text per prompt, the
-    effective batch size after any OOM backoff).
+    return_exhausted: bool = False,
+) -> tuple[list[str], int] | tuple[list[str], list[bool], int]:
+    """Deterministic greedy generation (sampling disabled, no top-p/top-k, no
+    temperature); returns (newly generated text per prompt, the effective
+    batch size after any OOM backoff).
 
     With `allowed_completions`, decoding is constrained token-by-token to
     those exact strings (plus EOS), so an invalid output is impossible.
-    Eval-time OOM is data-dependent (prompt length), so the batch loop
-    self-heals by halving instead of asking the user to predict a safe size;
-    results are unaffected because decoding is greedy with left padding.
+    With `return_exhausted`, also returns one flag per prompt marking a
+    generation that spent the whole token budget without emitting EOS — for
+    text outputs that is a structural failure to count, never something to
+    silently truncate. Eval-time OOM is data-dependent (prompt length), so
+    the batch loop self-heals by halving instead of asking the user to
+    predict a safe size; results are unaffected because decoding is greedy
+    with left padding.
     """
     import torch
 
@@ -157,9 +163,15 @@ def generate_batch(
             extra["use_cache"] = False
             gen = _generate()
         new_tokens = gen[:, enc["input_ids"].shape[1] :]
-        return tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
+        decoded = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
+        end_ids = {tokenizer.eos_token_id, tokenizer.pad_token_id} - {None}
+        exhausted = [
+            len(row) >= max_new_tokens and not (end_ids & set(row))
+            for row in new_tokens.tolist()
+        ]
+        return list(zip(decoded, exhausted))
 
-    outs, effective = _oom_backoff(
+    pairs, effective = _oom_backoff(
         process,
         texts,
         batch_size,
@@ -172,7 +184,49 @@ def generate_batch(
             f"train.eval_batch_size: {effective} to avoid the retry cost",
             flush=True,
         )
+    outs = [text for text, _ in pairs]
+    if return_exhausted:
+        return outs, [spent for _, spent in pairs], effective
     return outs, effective
+
+
+def generate_outputs(
+    spec: FunctionSpec,
+    model,
+    tokenizer,
+    texts: list[str],
+    batch_size: int = 16,
+) -> tuple[list[Any], dict[str, int]]:
+    """Free-running deterministic generation, parsed against the contract.
+
+    Bounded-only outputs use constrained decoding (invalid impossible);
+    text-bearing outputs generate freely and are strictly validated as one
+    atomic result — any invalid field makes the whole row None. Returns
+    (outputs aligned with texts, structural failure counts by category).
+    This is the exact behavior packaged inference reproduces.
+    """
+    from collections import Counter
+
+    failures: Counter[str] = Counter()
+    if not spec.output.has_text:
+        raw, _ = generate_batch(
+            model, tokenizer, texts, prompts.completion_budget(spec),
+            batch_size=batch_size,
+            allowed_completions=prompts.allowed_completions(spec),
+        )
+        return [prompts.parse_output(spec, text) for text in raw], dict(failures)
+    raw, exhausted, _ = generate_batch(
+        model, tokenizer, texts, prompts.completion_budget(spec),
+        batch_size=batch_size,
+        return_exhausted=True,
+    )
+    outputs: list[Any] = []
+    for text, spent in zip(raw, exhausted):
+        output, category = prompts.parse_generated(spec, text, exhausted=spent)
+        if category is not None:
+            failures[category] += 1
+        outputs.append(output)
+    return outputs, dict(failures)
 
 
 def score_holdout(
@@ -181,25 +235,16 @@ def score_holdout(
     tokenizer,
     holdout: list[Row],
     prompt_fn: Callable[[dict], str],
-    max_new_tokens: int,
     batch_size: int = 16,
-    rationale: bool = False,
 ) -> dict[str, Any]:
-    texts = [prompt_fn(r["input"]) for r in holdout]
-    # Candidate and zero-shot paths use the same output constraint so their
-    # decision-fidelity metrics remain comparable.
-    raw, effective_batch = generate_batch(
-        model, tokenizer, texts, max_new_tokens,
-        batch_size=batch_size,
-        allowed_completions=prompts.allowed_completions(spec, rationale),
-    )
     from .labeling import row_output
 
-    preds = [prompts.parse_output(spec, t) for t in raw]
+    texts = [prompt_fn(r["input"]) for r in holdout]
+    preds, failures = generate_outputs(spec, model, tokenizer, texts, batch_size)
     metrics = compute_metrics(spec, preds, [row_output(spec, r) for r in holdout])
     metrics["preds"] = preds  # per-item, aligned with the holdout file order
-    if effective_batch != batch_size:
-        metrics["eval_batch_size_effective"] = effective_batch
+    if failures:
+        metrics["structural_failures"] = failures
     return metrics
 
 

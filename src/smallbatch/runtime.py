@@ -17,10 +17,20 @@ from .spec import FunctionSpec, load_spec, validate_input, validate_output
 
 
 class CandidateFunction:
+    """Internal evaluation facade over one trained candidate.
+
+    Unlike packaged inference (which raises `InvalidOutputError`), evaluation
+    records an invalid free-running result as None so the failing row is
+    counted instead of aborting the run; `structural_failures` accumulates
+    the categories. The output is still atomic — a partially valid record is
+    never returned.
+    """
+
     def __init__(self, spec: FunctionSpec, predict: Callable[[list[dict]], list[Any]], manifest: dict):
         self.spec = spec
         self._predict = predict
         self.manifest = manifest
+        self.structural_failures: dict[str, int] = {}
 
     def __call__(self, item: dict[str, Any]) -> Any:
         return self.batch([item])[0]
@@ -30,7 +40,10 @@ class CandidateFunction:
         outputs = self._predict(normalized)
         if len(outputs) != len(normalized):
             raise ValueError("candidate returned the wrong number of outputs")
-        return [validate_output(self.spec, output) for output in outputs]
+        return [
+            None if output is None else validate_output(self.spec, output)
+            for output in outputs
+        ]
 
 
 class PackagedFunction:
@@ -42,10 +55,10 @@ class PackagedFunction:
         self.manifest = module.metadata()
 
     def __call__(self, item: dict[str, Any]) -> Any:
-        return self._module.classify(item)
+        return self._module.run(item)
 
     def batch(self, items: list[dict[str, Any]]) -> list[Any]:
-        return self._module.classify_batch(items)
+        return self._module.run_batch(items)
 
 
 def _load_active_package(root: Path, name: str) -> PackagedFunction:
@@ -120,37 +133,47 @@ def load_candidate(build: Path, candidate: str) -> CandidateFunction:
 
     from peft import PeftModel
 
-    from .evaluate import generate_batch
+    from .evaluate import generate_outputs
     from .training import load_base_model
 
     tokenizer, base = load_base_model(record["base_model"], record["inference_precision"])
     model = PeftModel.from_pretrained(base, str(model_dir))
     model.eval()
-    rationale = bool(record.get("rationale_distillation"))
-    levels = None if rationale else decode.scale_levels(spec)
-    decoder = record.get("decode") or "argmax"
+    levels = None if spec.output.has_text else decode.scale_levels(spec)
+    batch_size = record.get("eval_batch_size", 16)
+    function: CandidateFunction
 
     def predict(items: list[dict]) -> list[Any]:
         texts = [prompts.student_prompt(spec, item) for item in items]
         if levels is not None:
-            # a level is one token, so the distribution over the scale is in the
-            # logits at one position: no decoding loop, and the decoder chooses
-            # which point of it to report
+            # a level is one token, so the distribution over the scale is in
+            # the logits at one position: no decoding loop, argmax read
             distributions = decode.score_levels(
-                model, tokenizer, spec, texts, record.get("eval_batch_size", 16)
+                model, tokenizer, spec, texts, batch_size
             )
-            return decode.decode_levels(distributions, levels, decoder)
-        raw, _ = generate_batch(
-            model,
-            tokenizer,
-            texts,
-            prompts.completion_budget(spec, rationale),
-            batch_size=record.get("eval_batch_size", 16),
-            allowed_completions=prompts.allowed_completions(spec, rationale),
+            return decode.decode_levels(distributions, levels)
+        outputs, failures = generate_outputs(
+            spec, model, tokenizer, texts, batch_size
         )
-        return [prompts.parse_output(spec, text) for text in raw]
+        for category, count in failures.items():
+            function.structural_failures[category] = (
+                function.structural_failures.get(category, 0) + count
+            )
+        return outputs
 
-    return CandidateFunction(spec, predict, manifest)
+    function = CandidateFunction(spec, predict, manifest)
+    if spec.output.has_text:
+        from . import objective
+
+        codecs = objective.field_codecs(spec, tokenizer)
+
+        def fidelity(rows: list[dict]) -> dict | None:
+            return objective.text_fidelity(
+                model, tokenizer, spec, codecs, rows, batch_size
+            )
+
+        function.text_fidelity = fidelity  # type: ignore[attr-defined]
+    return function
 
 
 def load_fn(

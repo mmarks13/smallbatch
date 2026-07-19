@@ -3,7 +3,7 @@
 Every candidate family expresses an ordinal decision the same way: a softmax
 distribution over the scale's levels, trained with cross-entropy plus the
 ranked probability score (RPS) so distant misses cost more than adjacent ones,
-and read out by the shared dev-selected decoder. LoRA gets the distribution
+and read out by argmax. LoRA gets the distribution
 from the language model's own logits at the deciding token; SetFit and TF-IDF
 get it from this head — a linear layer, or one hidden layer when the
 development split says the extra capacity earns its keep.
@@ -224,9 +224,7 @@ def _train_one(features, labels, dev_features, dev_references, values, config, s
     from . import decode
 
     interim = {"kind": KIND, "values": list(values), "scaler": None, **best[1]}
-    predictions = decode.decode_levels(
-        class_distribution(interim, dev_features), values, "argmax"
-    )
+    predictions = decode.decode_levels(class_distribution(interim, dev_features), values)
     within_one = sum(
         abs(prediction - reference) <= 1
         for prediction, reference in zip(predictions, dev_references)
@@ -341,47 +339,10 @@ def class_distribution(head: dict, features):
 
 
 def predict(head: dict, features) -> list[Any]:
-    """Class values via the head's distribution, one row per feature row."""
+    """Argmax class values via the head's distribution, one per feature row."""
     from . import decode
 
-    return decode.decode_levels(
-        class_distribution(head, features),
-        head["values"],
-        head.get("decoder", "argmax"),
-    )
-
-
-def select_decoder(head: dict, features, references: list, setting: str = "auto") -> dict | None:
-    """Pick the decode rule for this head and persist it inside the head.
-
-    A pinned setting is recorded as-is. `auto` measures every rule on the
-    development rows — never the evaluation split — and keeps the one with the
-    best within-one agreement, ties resolving to the stable default (argmax,
-    listed first). With no development rows the head keeps argmax. Returns the
-    development comparison when one was run, for the candidate record.
-    """
-    from . import decode
-
-    if setting != "auto":
-        head["decoder"] = setting
-        return None
-    if references is None or not len(references):
-        head["decoder"] = "argmax"
-        return None
-    distribution = class_distribution(head, features)
-    comparison: dict[str, dict[str, float]] = {}
-    for name in decode.DECODERS:
-        predictions = decode.decode_levels(distribution, head["values"], name)
-        errors = [abs(p - r) for p, r in zip(predictions, references)]
-        n = len(errors)
-        comparison[name] = {
-            "exact": round(sum(e == 0 for e in errors) / n, 4),
-            "within_one": round(sum(e <= 1 for e in errors) / n, 4),
-            "mae": round(sum(errors) / n, 4),
-        }
-    chosen = max(decode.DECODERS, key=lambda name: comparison[name]["within_one"])
-    head["decoder"] = chosen
-    return {"selected": chosen, "metric": "within_one", "decoders": comparison}
+    return decode.decode_levels(class_distribution(head, features), head["values"])
 
 
 def head_diagnostics(
@@ -402,7 +363,6 @@ def head_diagnostics(
     distribution = class_distribution(head, features)
     rows = distribution.shape[0]
     values = head["values"]
-    decoder = head.get("decoder", "argmax")
     labels = values if levels is None else levels
 
     per_level = [
@@ -418,7 +378,6 @@ def head_diagnostics(
     ]
     return {
         "rows": rows,
-        "decoder": decoder,
         "hidden": head.get("hidden", 0),
         "mean_confidence": round(float(distribution.max(axis=1).mean()), 4),
         "levels": per_level,

@@ -244,26 +244,27 @@ def test_compile_retries_failed_zero_shot_diagnostic_in_new_revision(tmp_path, m
     )
 
 
-def test_lora_record_carries_the_dev_selected_decoder(tmp_path, monkeypatch):
-    """runtime.py and the standalone package read record["decode"]; dropping it
-    silently serves argmax no matter what the dev comparison selected."""
+def test_lora_record_carries_the_universal_training_evidence(tmp_path, monkeypatch):
+    """The report and standalone packaging read the record's loss weights,
+    baselines, and checkpoint evidence; dropping any of them loses the
+    training-configuration evidence the reports must show."""
     import smallbatch.training
     from smallbatch import api
     from smallbatch.spec import LoraCandidateSpec
 
     spec = make_spec(output={"type": "int", "range": [0, 4]})
-    comparison = {"argmax": {"within_one": 0.5}, "median": {"within_one": 0.9}}
     info = {
         "precision": "fp32",
-        "objective": "ordinal",
-        "decode": "median",
-        "dev_decode_comparison": comparison,
+        "objective": "per-field",
+        "loss_weights": {"score": 1.0},
+        "untuned_baselines": {"score": 2.4, "__format__": 0.5},
+        "format_loss_weight": 0.1,
         "train_rows": 4,
         "train_loss": 0.1,
         "adapter_dir": str(tmp_path / "model"),
         "curve": [],
         "best_epoch": 1,
-        "best_dev_agreement": 0.9,
+        "best_checkpoint_score": 0.42,
         "epochs_run": 1,
         "stopped_reason": "max_epochs",
         "dev_rows": 2,
@@ -277,8 +278,12 @@ def test_lora_record_carries_the_dev_selected_decoder(tmp_path, monkeypatch):
         [],
         tmp_path / "candidates" / "lora",
     )
-    assert record["decode"] == "median"
-    assert record["training"]["dev_decode_comparison"] == comparison
+    assert record["objective"] == "per-field"
+    assert record["loss_weights"] == {"score": 1.0}
+    assert record["training"]["untuned_baselines"] == {"score": 2.4, "__format__": 0.5}
+    assert record["training"]["best_checkpoint_score"] == 0.42
+    assert record["training"]["format_loss_weight"] == 0.1
+    assert "decode" not in record
 
 
 def test_release_accelerator_memory_empties_cuda_and_survives_no_torch(monkeypatch):

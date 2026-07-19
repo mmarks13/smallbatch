@@ -113,188 +113,11 @@ def ordinal_decision_tokens(spec: FunctionSpec, tokenizer) -> tuple[int, list[in
     return prefix, ids
 
 
-def ordinal_objective_applies(spec: FunctionSpec, config: LoraCandidateSpec) -> bool:
-    """Ordinal training needs one scalar int decision and no free-text rationale."""
-    if config.objective == "token":
-        return False
-    scalar = spec.output.is_scalar and spec.output.scalar.type == "int"
-    if config.objective == "ordinal":
-        if not scalar:
-            raise ValueError(
-                "objective: ordinal requires a scalar integer output; use objective: token"
-            )
-        if config.rationale_distillation:
-            raise ValueError(
-                "objective: ordinal cannot score free-text rationales; "
-                "disable rationale_distillation or use objective: token"
-            )
-        return True
-    return scalar and not config.rationale_distillation
-
-
-def _ordinal_trainer_class(spec: FunctionSpec, tokenizer):
-    """SFTTrainer whose loss knows the levels are ordered.
-
-    Token cross-entropy treats "3" and "4" as unrelated symbols, so a student
-    is punished the same for a near miss and a far one. Here the logits at the
-    deciding position are renormalized over the legal levels into a proper
-    distribution and trained with the shared ordinal objective
-    (`heads.ordinal_loss`) — the same loss every candidate family's ordinal
-    head uses. It costs one ordinary forward pass: everything the completions
-    share cancels in the softmax, so nothing is gained by scoring them one at
-    a time.
-    """
-    import torch
-    from trl import SFTTrainer
-
-    from .heads import ordinal_loss
-
-    decision = ordinal_decision_tokens(spec, tokenizer)
-    if decision is None:
-        raise ValueError(
-            "the tokenizer needs more than one token to tell this scale's levels "
-            "apart, so no single decision can be trained or scored; keep integer "
-            "ranges within 0-9 or set objective: token"
-        )
-    prefix, legal_ids = decision
-
-    class OrdinalSFTTrainer(SFTTrainer):
-        def compute_loss(
-            self, model, inputs, return_outputs=False, num_items_in_batch=None
-        ):
-            input_ids = inputs["input_ids"]
-            labels = inputs["labels"]
-            device = input_ids.device
-
-            supervised = labels != -100
-            if not bool(supervised.any()):
-                return input_ids.sum() * 0.0
-
-            rows = torch.arange(input_ids.size(0), device=device)
-            ids = torch.tensor(legal_ids, device=device)
-            # the completions diverge `prefix` tokens into the answer; the logits
-            # one step earlier are the ones that predict the deciding token
-            decides_at = supervised.float().argmax(dim=1) + prefix
-            attention_mask = inputs.get("attention_mask")
-            # only the deciding positions are ever read, so ask the model to
-            # project just those: the full sequence-by-vocabulary logits (and
-            # their gradient) are what evict 1B+ fp32 students from 11GB cards
-            try:
-                logits = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    logits_to_keep=decides_at - 1,
-                ).logits
-                kept = logits.size(1) != input_ids.size(1)
-                if not kept and input_ids.size(0) == input_ids.size(1):
-                    # a kept projection has one column per row, so when the
-                    # batch is exactly as long as the sequence its shape
-                    # matches full logits and the two cannot be told apart;
-                    # rerun the unambiguous form instead of guessing
-                    raise TypeError("kept and full logits are the same shape")
-            except TypeError:  # no logits_to_keep contract, or shapes collide
-                kept = False
-                logits = model(
-                    input_ids=input_ids, attention_mask=attention_mask
-                ).logits
-            if kept:
-                # kept logits: column k holds position decides_at[k] - 1
-                class_logits = logits[rows, rows].float()[:, ids]
-            else:
-                class_logits = logits[rows, decides_at - 1].float()[:, ids]
-            answers = input_ids[rows, decides_at]
-            target = (answers.unsqueeze(1) == ids.unsqueeze(0)).float().argmax(dim=1)
-            return ordinal_loss(class_logits, target)
-
-    return OrdinalSFTTrainer
-
-
 def _last_logged_loss(log_history: list[dict]) -> float | None:
     for entry in reversed(log_history):
         if "loss" in entry:
             return round(entry["loss"], 4)
     return None
-
-
-def _quality_value(spec: FunctionSpec, metrics: dict) -> float:
-    if not spec.output.is_scalar:
-        return metrics["joint_decision_agreement"]
-    if spec.output.scalar.type == "int":
-        return metrics["within_one"]
-    return metrics["decision_agreement"]
-
-
-def _make_dev_callback(
-    spec: FunctionSpec,
-    config: LoraCandidateSpec,
-    tokenizer,
-    dev_rows: list[Row],
-    adapter_dir: Path,
-):
-    """TrainerCallback: score the dev split each epoch (constrained decode,
-    task agreement), snapshot the adapter whenever it improves, and stop after
-    `patience` epochs without improvement. The saved adapter is always the
-    best-so-far, so early stopping never ships a worse-than-seen checkpoint."""
-    import torch
-    from transformers import TrainerCallback
-
-    from . import prompts
-    from .evaluate import compute_metrics, generate_batch
-    from .labeling import row_output
-
-    dev_texts = [prompts.student_prompt(spec, r["input"]) for r in dev_rows]
-    golds = [row_output(spec, r) for r in dev_rows]
-    allowed = prompts.allowed_completions(spec, config.rationale_distillation)
-    max_new = prompts.completion_budget(spec, config.rationale_distillation)
-
-    class DevEval(TrainerCallback):
-        def __init__(self):
-            self.curve: list[dict] = []
-            self.best: float | None = None
-            self.best_epoch: int | None = None
-            self.stale = 0
-            self.stopped_reason = "max_epochs"
-
-        def on_epoch_end(self, args, state, control, model=None, **kwargs):
-            epoch = int(round(state.epoch))
-            was_training = model.training
-            # generate_batch flips padding_side to left; the training collator
-            # needs it back or every later epoch trains on left-padded batches
-            pad_side = tokenizer.padding_side
-            model.eval()
-            with torch.no_grad():
-                # dev-eval reductions print generate_batch's one-liner; the
-                # final eval re-derives its own effective size for the report
-                raw, _ = generate_batch(
-                    model, tokenizer, dev_texts, max_new,
-                    batch_size=config.eval_batch_size,
-                    allowed_completions=allowed,
-                )
-            tokenizer.padding_side = pad_side
-            if was_training:
-                model.train()
-            preds = [prompts.parse_output(spec, t) for t in raw]
-            agreement = _quality_value(spec, compute_metrics(spec, preds, golds))
-            self.curve.append({
-                "epoch": epoch,
-                "train_loss": _last_logged_loss(state.log_history),
-                "dev_agreement": agreement,
-            })
-            print(f"epoch {epoch}: dev_agreement={agreement:.4f}", flush=True)
-
-            if self.best is None or agreement > self.best + config.min_delta:
-                self.best = agreement
-                self.best_epoch = epoch
-                self.stale = 0
-                model.save_pretrained(str(adapter_dir))
-            else:
-                self.stale += 1
-                if config.patience is not None and self.stale >= config.patience:
-                    self.stopped_reason = f"early_stop(patience={config.patience})"
-                    control.should_training_stop = True
-            return control
-
-    return DevEval()
 
 
 def _latest_checkpoint(trainer_dir: Path) -> Path | None:
@@ -310,6 +133,7 @@ def _latest_checkpoint(trainer_dir: Path) -> Path | None:
     return max(checkpoints, key=lambda path: int(path.name.rsplit("-", 1)[-1]))
 
 
+
 def train(
     spec: FunctionSpec,
     config: LoraCandidateSpec,
@@ -317,47 +141,76 @@ def train(
     out_dir: Path,
     dev_rows: list[Row] | None = None,
 ) -> dict:
-    """Fine-tune a LoRA adapter; saves it to out_dir/adapter. Returns run info.
+    """Fine-tune a LoRA adapter under the universal per-field objective.
 
-    With `dev_rows`, the adapter written is the best-dev-agreement epoch (with
-    early stopping per spec.train.patience), not necessarily the final one.
+    Every output field trains with its type-appropriate loss (int: class NLL
+    + RPS, enum: legal-value NLL, text: mean next-token NLL), each normalized
+    by this candidate's untuned-base development loss for that field, and
+    combined as a weighted mean plus the fixed-weight format loss (see
+    `objective`). The same weighted normalized score — teacher-forced on the
+    development split, never behavioral agreement — selects the best
+    checkpoint and drives early stopping for every function shape.
+
+    The adapter written to out_dir/model is the best-scoring epoch's.
     """
-    from datasets import Dataset
-    from peft import LoraConfig, prepare_model_for_kbit_training
-    from trl import SFTConfig, SFTTrainer
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from transformers import Trainer, TrainerCallback, TrainingArguments
 
+    from . import objective
+    from .labeling import row_output
+    from .spec import effective_loss_weights
+
+    if not dev_rows:
+        raise ValueError(
+            "LoRA training requires a development split: the checkpoint rule "
+            "scores every epoch on teacher-forced development losses. Label "
+            "more data"
+        )
     precision = pick_precision(config.precision)
     tokenizer, model = load_base_model(config.model, precision)
+    codecs = objective.field_codecs(spec, tokenizer)
+    weights = effective_loss_weights(spec)
+
+    def encode(rows: list[Row]) -> list[dict]:
+        return [
+            objective.encode_row(
+                spec,
+                tokenizer,
+                codecs,
+                prompts.student_prompt(spec, row["input"]),
+                row_output(spec, row),
+                config.max_seq_len,
+            )
+            for row in rows
+        ]
+
+    train_encoded = encode(train_rows)
+    dev_encoded = encode(dev_rows)
+
+    # candidate- and field-specific normalization baselines: the untuned base
+    # model's teacher-forced development losses, fixed before training and
+    # recorded as evidence. An unsafe baseline fails here, before any training
+    model.eval()
+    baselines = objective.evaluate_field_losses(
+        model, spec, codecs, dev_encoded, tokenizer.pad_token_id, config.eval_batch_size
+    )
+    objective.check_baselines(baselines)
+    _progress(
+        "untuned base dev losses: "
+        + " ".join(f"{name}={value:.4f}" for name, value in sorted(baselines.items()))
+    )
+
     if precision == "qlora":
         # prepare_model_for_kbit_training upcasts every non-quantized module
         # to fp32; for huge-vocab models the tied embedding alone can be a
-        # ~4GB fp32 tensor (Qwen3.5-9B: 151936x6656) and OOMs 12GB cards.
-        # In that case do the two things we actually need by hand and keep
-        # the embedding in its load dtype.
+        # ~4GB fp32 tensor and OOMs 12GB cards. In that case do the two
+        # things we actually need by hand and keep the embedding load dtype.
         embed = model.get_input_embeddings()
         if embed.weight.numel() * 4 > 3_000_000_000:
             model.gradient_checkpointing_enable()
             model.enable_input_require_grads()
         else:
             model = prepare_model_for_kbit_training(model)
-
-    from .labeling import row_output
-
-    ds = Dataset.from_list(
-        [
-            {
-                "prompt": prompts.student_prompt(spec, r["input"]),
-                "completion": prompts.student_completion(
-                    spec,
-                    row_output(spec, r),
-                    r.get("reason", ""),
-                    config.rationale_distillation,
-                )
-                + tokenizer.eos_token,
-            }
-            for r in train_rows
-        ]
-    )
 
     lora = LoraConfig(
         r=config.lora_r,
@@ -367,14 +220,16 @@ def train(
         target_modules="all-linear",
         task_type="CAUSAL_LM",
     )
-    ordinal = ordinal_objective_applies(spec, config)
-    cfg = SFTConfig(
+    model = get_peft_model(model, lora)
+    if config.gradient_checkpointing:
+        model.enable_input_require_grads()
+
+    args = TrainingArguments(
         output_dir=str(out_dir / "trainer"),
         num_train_epochs=config.max_epochs,
         gradient_checkpointing=config.gradient_checkpointing,
         learning_rate=config.learning_rate,
         per_device_train_batch_size=config.batch_size,
-        max_length=config.max_seq_len,
         bf16=(precision == "bf16"),
         fp16=False,
         seed=config.seed,
@@ -382,96 +237,110 @@ def train(
         save_strategy="epoch",
         save_total_limit=1,
         report_to=[],
-        # MoE load-balancing aux loss is meaningless for a frozen-base LoRA
-        # student, and TRL's nonzero default crashes dense models whose config
-        # merely carries the router attribute (e.g. Granite 4.0 hybrids)
-        router_aux_loss_coef=0.0,
-        **({"loss_type": config.loss_type} if config.loss_type else {}),
+        remove_unused_columns=False,
     )
     adapter_dir = out_dir / "model"
-    dev_cb = (
-        _make_dev_callback(spec, config, tokenizer, dev_rows, adapter_dir)
-        if dev_rows
-        else None
-    )
-    trainer_class = _ordinal_trainer_class(spec, tokenizer) if ordinal else SFTTrainer
-    trainer = trainer_class(
-        model=model, args=cfg, train_dataset=ds, processing_class=tokenizer,
-        peft_config=lora, callbacks=[dev_cb] if dev_cb else None,
+
+    class UniversalTrainer(Trainer):
+        """One loss for every LoRA shape; see the module objective."""
+
+        def compute_loss(
+            self, model, inputs, return_outputs=False, num_items_in_batch=None
+        ):
+            logits, start = objective.completion_logits(model, inputs)
+            losses = objective.row_losses(
+                logits, inputs["input_ids"], inputs["owners"], spec, codecs, start
+            )
+            return objective.combine_losses(losses, weights, baselines).mean()
+
+    class DevScore(TrainerCallback):
+        """Score dev each epoch, snapshot the best adapter, stop on patience.
+
+        The saved adapter is always the best-so-far, so early stopping never
+        ships a worse-than-seen checkpoint. Behavioral metrics play no part."""
+
+        def __init__(self):
+            self.curve: list[dict] = []
+            self.best: float | None = None
+            self.best_epoch: int | None = None
+            self.stale = 0
+            self.stopped_reason = "max_epochs"
+
+        def on_epoch_end(self, args, state, control, model=None, **kwargs):
+            import torch
+
+            epoch = int(round(state.epoch))
+            was_training = model.training
+            model.eval()
+            with torch.no_grad():
+                dev = objective.evaluate_field_losses(
+                    model,
+                    spec,
+                    codecs,
+                    dev_encoded,
+                    tokenizer.pad_token_id,
+                    config.eval_batch_size,
+                )
+            if was_training:
+                model.train()
+            score = objective.checkpoint_score(dev, weights, baselines)
+            entry = {
+                "epoch": epoch,
+                "train_loss": _last_logged_loss(state.log_history),
+                "checkpoint_score": round(score, 4),
+                "normalized_dev_losses": {
+                    name: round(dev[name] / baselines[name], 4) for name in weights
+                },
+                "normalized_format_loss": round(
+                    dev[objective.FORMAT_KEY] / baselines[objective.FORMAT_KEY], 4
+                ),
+            }
+            self.curve.append(entry)
+            print(f"epoch {epoch}: checkpoint_score={score:.4f}", flush=True)
+            if self.best is None or score < self.best - config.min_delta:
+                self.best = score
+                self.best_epoch = epoch
+                self.stale = 0
+                model.save_pretrained(str(adapter_dir))
+            else:
+                self.stale += 1
+                if config.patience is not None and self.stale >= config.patience:
+                    self.stopped_reason = f"early_stop(patience={config.patience})"
+                    control.should_training_stop = True
+            return control
+
+    dev_cb = DevScore()
+    trainer = UniversalTrainer(
+        model=model,
+        args=args,
+        train_dataset=train_encoded,
+        data_collator=lambda rows: objective.collate(rows, tokenizer.pad_token_id),
+        processing_class=tokenizer,
+        callbacks=[dev_cb],
     )
     checkpoint = _latest_checkpoint(out_dir / "trainer")
     result = trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint else None)
 
-    if dev_cb is None or dev_cb.best_epoch is None:
-        # no dev split (or it never scored): fall back to the final adapter
+    if dev_cb.best_epoch is None:
+        # dev never scored (e.g. zero epochs): fall back to the final adapter
         trainer.model.save_pretrained(str(adapter_dir))
     tokenizer.save_pretrained(str(adapter_dir))
     epochs_run = int(round(trainer.state.epoch or config.max_epochs))
-    decoder, comparison = _select_decoder(
-        spec, config, trainer.model, tokenizer, dev_rows
-    )
     return {
         "precision": precision,
-        "objective": "ordinal" if ordinal else "token",
-        "decode": decoder,
-        "dev_decode_comparison": comparison,
+        "objective": "per-field",
+        "loss_weights": weights,
+        "untuned_baselines": {
+            name: round(value, 4) for name, value in sorted(baselines.items())
+        },
+        "format_loss_weight": objective.FORMAT_LOSS_WEIGHT,
         "train_rows": len(train_rows),
         "train_loss": round(result.training_loss, 4),
         "adapter_dir": str(adapter_dir),
-        "curve": dev_cb.curve if dev_cb else [],
-        "best_epoch": dev_cb.best_epoch if dev_cb else None,
-        "best_dev_agreement": dev_cb.best if dev_cb else None,
+        "curve": dev_cb.curve,
+        "best_epoch": dev_cb.best_epoch,
+        "best_checkpoint_score": dev_cb.best,
         "epochs_run": epochs_run,
-        "stopped_reason": dev_cb.stopped_reason if dev_cb else "max_epochs",
-        "dev_rows": len(dev_rows or []),
+        "stopped_reason": dev_cb.stopped_reason,
+        "dev_rows": len(dev_rows),
     }
-
-
-def _select_decoder(
-    spec: FunctionSpec, config: LoraCandidateSpec, model, tokenizer, dev_rows
-) -> tuple[str | None, dict | None]:
-    """Which point of the level distribution to report, decided on dev.
-
-    The mode maximizes exact agreement and the median minimizes absolute error;
-    which one reproduces the supplied decisions better is an empirical question,
-    so `auto` measures both on the development split and keeps the winner. It
-    is never decided on the evaluation split.
-    """
-    from . import decode
-    from .labeling import row_output
-    from .metrics import compare
-
-    levels = decode.scale_levels(spec)
-    if levels is None or config.rationale_distillation:
-        # no level distribution exists to decode: record no decoder at all,
-        # so reports and packages don't disclose a rule that never runs
-        return None, None
-    if config.decode != "auto":
-        return config.decode, None
-    if not dev_rows:
-        return "argmax", None
-
-    # DevEval restores train mode after every epoch, so dropout is still
-    # active here; the argmax-vs-median comparison must run deterministically
-    model.eval()
-    texts = [prompts.student_prompt(spec, row["input"]) for row in dev_rows]
-    references = [row_output(spec, row) for row in dev_rows]
-    distributions = decode.score_levels(
-        model, tokenizer, spec, texts, config.eval_batch_size
-    )
-    comparison = {}
-    for candidate in decode.DECODERS:
-        predictions = decode.decode_levels(distributions, levels, candidate)
-        comparison[candidate] = compare(spec, predictions, references)
-    chosen = max(
-        decode.DECODERS, key=lambda name: _quality_value(spec, comparison[name])
-    )
-    _progress(
-        "decoder selected on dev: "
-        + " ".join(
-            f"{name}={_quality_value(spec, comparison[name]):.4f}"
-            for name in decode.DECODERS
-        )
-        + f" -> {chosen}"
-    )
-    return chosen, comparison

@@ -32,6 +32,14 @@ def validate_input(item):
 
 def validate_output(output):
     return output
+
+
+def parse_strict_json(text, exhausted=False):
+    return text
+
+
+class InvalidOutputError(ValueError):
+    pass
 """
 
 
@@ -83,7 +91,7 @@ def test_completion_trie_is_built_once_per_process(tmp_path):
         {
             "name": "fn",
             "output": {"fields": {"score": {"labels": ["a", "b"], "range": None}}},
-            "runtime": {},
+            "runtime": {"decoding": {"max_new_tokens": 8}},
         },
     )
     tokenizer = CountingTokenizer()
@@ -100,12 +108,18 @@ def test_completion_trie_is_built_once_per_process(tmp_path):
 
 
 def test_unconstrained_specs_cache_the_absence_too(tmp_path):
+    """A text-bearing output has no finite completion set: the template must
+    cache that absence instead of re-deriving it per call."""
     module = load_lora_template(
         tmp_path,
         {
             "name": "fn",
-            "output": {"fields": {"score": {"labels": ["a"], "range": None}}},
-            "runtime": {"rationale_distillation": True},
+            "output": {
+                "fields": {
+                    "score": {"labels": None, "range": None, "max_chars": 300}
+                }
+            },
+            "runtime": {"decoding": {"max_new_tokens": 8}},
         },
     )
     tokenizer = CountingTokenizer()

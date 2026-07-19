@@ -188,12 +188,27 @@ def _worker(build: Path, candidate: str, request_path: Path, result_path: Path) 
             _write_progress(progress_path, index, len(items))
             progress_written = now
 
+    extras: dict[str, Any] = {}
+    failures = dict(getattr(function, "structural_failures", None) or {})
+    if failures:
+        extras["structural_failures"] = failures
+    fidelity_fn = getattr(function, "text_fidelity", None)
+    if fidelity_fn is not None:
+        # held-out teacher-text prediction, teacher-forced on the same CPU
+        # and thread budget as the behavioral evaluation; report-only
+        from .labeling import read_jsonl
+
+        eval_rows = read_jsonl(build / "evaluation.local.jsonl")
+        if eval_rows:
+            extras["text_fidelity"] = fidelity_fn(eval_rows)
+
     dependencies = _runtime_dependencies(record["backend"])
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform != "darwin":
         peak *= 1024
     result = {
         "predictions": outputs,
+        **extras,
         "profile": {
             "runtime": record["backend"],
             "cold_load_seconds": round(cold_load, 4),

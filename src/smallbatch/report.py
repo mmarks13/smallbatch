@@ -54,6 +54,9 @@ def evidence_summary(record: dict) -> str:
         for label, key in fields
         if metrics.get(key) is not None
     )
+    fidelity = record.get("text_fidelity") or {}
+    if fidelity.get("bits_per_byte") is not None:
+        parts.append(f"text_bpb={_number(fidelity['bits_per_byte'])}")
 
     profile = record.get("profile") or {}
     latency = profile.get("batch_one_latency_ms") or {}
@@ -360,75 +363,126 @@ def write_report(build: Path, report: dict, details: dict) -> Path:
     return path
 
 
-def _decoder_evidence(record: dict) -> list[tuple[str, str, dict | None, dict | None]]:
-    """(field, selected decoder, dev comparison, head diagnostics) per ordinal
-    field, across the three backends' record shapes."""
-    entries: list[tuple[str, str, dict | None, dict | None]] = []
+def _head_evidence(record: dict) -> list[tuple[str, dict]]:
+    """(field, head diagnostics) per ordinal field, across backend shapes."""
     backend = record.get("backend")
-    if backend == "lora" and record.get("decode"):
-        training = record.get("training") or {}
-        entries.append(("decode", record["decode"], training.get("dev_decode_comparison"), None))
-    elif backend == "tfidf":
-        for field, selected in (record.get("decode") or {}).items():
-            entries.append(
-                (
-                    field,
-                    selected,
-                    (record.get("dev_decode_comparison") or {}).get(field),
-                    (record.get("head_diagnostics") or {}).get(field),
-                )
-            )
-    elif backend == "setfit":
-        for field, training in (record.get("field_training") or {}).items():
-            if training.get("decode"):
-                entries.append(
-                    (
-                        field,
-                        training["decode"],
-                        training.get("dev_decode_comparison"),
-                        training.get("head_diagnostics"),
-                    )
-                )
-    return entries
+    if backend == "tfidf":
+        return list((record.get("head_diagnostics") or {}).items())
+    if backend == "setfit":
+        return [
+            (field, training["head_diagnostics"])
+            for field, training in (record.get("field_training") or {}).items()
+            if training.get("head_diagnostics")
+        ]
+    return []
 
 
-def _decoder_lines(record: dict) -> list[str]:
+def _head_lines(record: dict) -> list[str]:
     lines: list[str] = []
-    for field, selected, comparison, diagnostics in _decoder_evidence(record):
-        lines.append("")
-        source = "dev-selected" if comparison else "pinned"
-        lines.append(f"Decode `{field}`: **{selected}** ({source})")
-        if comparison:
-            decoders = comparison.get("decoders", comparison)
-            lines.extend(["", "| decoder | exact | within_one | mae |", "|---|---:|---:|---:|"])
-            for name, values in decoders.items():
-                marker = " *" if name == selected else ""
-                lines.append(
-                    f"| {name}{marker} | {_number(values.get('exact'))} | "
-                    f"{_number(values.get('within_one'))} | {_number(values.get('mae'))} |"
-                )
-        if diagnostics:
-            capacity = "linear" if not diagnostics.get("hidden") else (
-                f"{diagnostics['hidden']}-hidden"
+    for field, diagnostics in _head_evidence(record):
+        capacity = "linear" if not diagnostics.get("hidden") else (
+            f"{diagnostics['hidden']}-hidden"
+        )
+        lines.append(
+            f"\nOrdinal head `{field}` on dev: {capacity} capacity, argmax read, "
+            f"mean confidence {_number(diagnostics.get('mean_confidence'))}."
+        )
+        levels = diagnostics.get("levels") or []
+        if levels:
+            lines.extend(
+                [
+                    "",
+                    "| level | mean probability | observed rate |",
+                    "|---|---:|---:|",
+                ]
             )
+            lines.extend(
+                f"| {entry['level']} | {_number(entry['mean_probability'])} | "
+                f"{_number(entry['observed_rate'])} |"
+                for entry in levels
+            )
+    return lines
+
+
+def _training_lines(record: dict) -> list[str]:
+    """LoRA training configuration and checkpoint evidence, kept separate from
+    behavioral evidence: the checkpoint score compares epochs within one
+    candidate and is not comparable across candidates (each normalizes by its
+    own untuned baseline)."""
+    if record.get("backend") != "lora":
+        return []
+    training = record.get("training") or {}
+    lines: list[str] = []
+    weights = record.get("loss_weights")
+    if weights:
+        lines.append(
+            "\nTraining configuration: per-field objective, loss weights "
+            + ", ".join(f"`{name}`={value}" for name, value in weights.items())
+            + f"; format loss fixed at {training.get('format_loss_weight')} "
+            "(internal, excluded from checkpoint selection)."
+        )
+    baselines = training.get("untuned_baselines")
+    if baselines:
+        lines.append(
+            "Untuned-base dev losses (normalization baselines): "
+            + ", ".join(f"`{name}`={_number(value)}" for name, value in baselines.items())
+            + "."
+        )
+    if training.get("best_epoch") is not None:
+        lines.append(
+            f"Checkpoint: epoch {training['best_epoch']} of "
+            f"{training.get('epochs_run')}, weighted normalized dev score "
+            f"{_number(training.get('best_checkpoint_score'))} "
+            f"(lower is better; stopped: {training.get('stopped_reason')})."
+        )
+    curve = training.get("curve") or []
+    if curve:
+        lines.extend(["", "| epoch | checkpoint score | normalized dev losses |", "|---:|---:|---|"])
+        for entry in curve:
+            normalized = entry.get("normalized_dev_losses") or {}
             lines.append(
-                f"\nOrdinal head on dev: {capacity} capacity, mean confidence "
-                f"{_number(diagnostics.get('mean_confidence'))}."
+                f"| {entry['epoch']} | {_number(entry.get('checkpoint_score'))} | "
+                + " ".join(f"{name}={_number(value)}" for name, value in normalized.items())
+                + " |"
             )
-            levels = diagnostics.get("levels") or []
-            if levels:
-                lines.extend(
-                    [
-                        "",
-                        "| level | mean probability | observed rate |",
-                        "|---|---:|---:|",
-                    ]
-                )
-                lines.extend(
-                    f"| {entry['level']} | {_number(entry['mean_probability'])} | "
-                    f"{_number(entry['observed_rate'])} |"
-                    for entry in levels
-                )
+    return lines
+
+
+def _text_lines(record: dict) -> list[str]:
+    """Text evidence: reference fidelity and structural behavior only."""
+    lines: list[str] = []
+    fidelity = record.get("text_fidelity")
+    if fidelity:
+        lines.extend(
+            [
+                "",
+                "Text reference fidelity (held-out teacher-text prediction — "
+                "not correctness, factuality, or usefulness):",
+                "",
+                "| bits/byte | median bpb | p90 bpb | token NLL | perplexity | top-1 |",
+                "|---:|---:|---:|---:|---:|---:|",
+                f"| {_number(fidelity.get('bits_per_byte'))} | "
+                f"{_number(fidelity.get('median_example_bpb'))} | "
+                f"{_number(fidelity.get('p90_example_bpb'))} | "
+                f"{_number(fidelity.get('token_nll'))} | "
+                f"{_number(fidelity.get('perplexity'))} | "
+                f"{_number(fidelity.get('top1_accuracy'))} |",
+                "",
+                "Bits per byte is the primary cross-model comparison; token NLL "
+                "and perplexity depend on the tokenizer and do not compare "
+                "across candidates with different tokenizers.",
+            ]
+        )
+    failures = (record.get("metrics") or {}).get("structural_failures")
+    if failures:
+        n = (record.get("metrics") or {}).get("n")
+        lines.append(
+            "\nStructural failures (invalid atomic outputs): "
+            + ", ".join(
+                f"{category}={count}" for category, count in sorted(failures.items())
+            )
+            + (f" of {n} rows." if n else ".")
+        )
     return lines
 
 
@@ -472,7 +526,9 @@ def render_markdown(report: dict) -> str:
         )
         if record.get("metrics"):
             lines.extend(["", f"### {name} metrics", "", "```json", json.dumps(record["metrics"], indent=2), "```"])
-        lines.extend(_decoder_lines(record))
+        lines.extend(_training_lines(record))
+        lines.extend(_text_lines(record))
+        lines.extend(_head_lines(record))
         lines.extend(_embedding_lines(record))
         if record.get("error"):
             lines.append(f"\nError: `{record['error']}`")

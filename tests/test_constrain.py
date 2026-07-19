@@ -19,8 +19,19 @@ def test_allowed_completions_int_and_enum():
     assert allowed_completions(spec) == [" urgent", " low"]
 
 
-def test_allowed_completions_none_in_rationale_mode():
-    assert allowed_completions(make_spec(), rationale=True) is None
+def test_allowed_completions_none_when_output_has_text():
+    """Generated text has no finite completion set, so text-bearing functions
+    never use constrained decoding."""
+    scalar_text = make_spec(
+        output={"type": "text", "max_chars": 100},
+        candidates={"g": {"type": "lora"}},
+    )
+    assert allowed_completions(scalar_text) is None
+    mixed = make_spec(
+        output={"priority": {"range": [0, 4]}, "explanation": {"type": "text"}},
+        candidates={"g": {"type": "lora"}},
+    )
+    assert allowed_completions(mixed) is None
 
 
 def test_trie_prefix_and_terminals():

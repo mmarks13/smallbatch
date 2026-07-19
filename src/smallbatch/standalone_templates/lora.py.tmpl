@@ -6,13 +6,15 @@ from pathlib import Path
 from ._common import (
     FUNCTION,
     ROOT,
+    InvalidOutputError,
     metadata,
+    parse_strict_json,
     render_input,
     validate_input,
     validate_output,
 )
 
-__all__ = ["classify", "classify_batch", "metadata"]
+__all__ = ["run", "run_batch", "metadata", "InvalidOutputError"]
 
 _MODEL = None
 _TOKENIZER = None
@@ -20,6 +22,13 @@ _CONSTRAINT_TABLES = None
 _INT_RE = re.compile(r"-?\d+")
 _SCORE_RE = re.compile(r"score:\s*(-?\d+)", re.I)
 _SCORE_VALUE_RE = re.compile(r"^\s*score\s*:\s*(.+)$", re.I | re.M)
+
+
+def _has_text():
+    return any(
+        field.get("max_chars") is not None
+        for field in FUNCTION["output"]["fields"].values()
+    )
 
 
 def _load_tokenizer(base):
@@ -85,7 +94,7 @@ def _parse_field(field, text):
     return min(hits)[2] if hits else None
 
 
-def _parse(text):
+def _parse_bounded(text):
     fields = FUNCTION["output"]["fields"]
     if list(fields) == ["score"]:
         if fields["score"].get("range") is not None:
@@ -107,8 +116,8 @@ def _parse(text):
 
 
 def _completion_strings():
-    if FUNCTION["runtime"].get("rationale_distillation"):
-        return None
+    if _has_text():
+        return None  # generated text has no finite completion set
     fields = FUNCTION["output"]["fields"]
     choices = []
     for field in fields.values():
@@ -170,10 +179,8 @@ def _constraint(tokenizer, prompt_length):
 
 def _scale_levels():
     """The ordered levels of a scalar integer decision, else None."""
-    if FUNCTION["runtime"].get("rationale_distillation"):
-        return None
     fields = FUNCTION["output"]["fields"]
-    if list(fields) != ["score"] or fields["score"].get("range") is None:
+    if _has_text() or list(fields) != ["score"] or fields["score"].get("range") is None:
         return None
     low, high = fields["score"]["range"]
     return list(range(low, high + 1))
@@ -195,9 +202,10 @@ def _deciding_tokens(tokenizer, levels):
     return (prefix, ids) if len(set(ids)) == len(ids) else None
 
 
-def _classify_levels(tokenizer, model, prompts, levels):
+def _run_levels(tokenizer, model, prompts, levels):
     """One forward pass: the distribution over the scale sits in the logits at
-    the deciding position. `decode` picks the mode or the median of it."""
+    the deciding position; argmax is exactly what constrained greedy decoding
+    would emit."""
     import torch
 
     decision = _deciding_tokens(tokenizer, levels)
@@ -217,33 +225,22 @@ def _classify_levels(tokenizer, model, prompts, levels):
     )
     with torch.no_grad():
         logits = model(**encoded).logits[:, -1, :].float()
-    probabilities = torch.softmax(logits[:, torch.tensor(ids)], dim=-1)
-    decoder = FUNCTION["runtime"].get("decode")
-    if decoder == "median":
-        chosen = (probabilities.cumsum(dim=-1) >= 0.5).float().argmax(dim=-1)
-    elif decoder == "within_one":
-        window = probabilities.clone()
-        window[:, :-1] += probabilities[:, 1:]
-        window[:, 1:] += probabilities[:, :-1]
-        chosen = window.argmax(dim=-1)
-    else:
-        chosen = probabilities.argmax(dim=-1)
+    chosen = logits[:, torch.tensor(ids)].argmax(dim=-1)
     return [levels[int(index)] for index in chosen]
 
 
-def classify_batch(items):
-    normalized = [validate_input(item) for item in items]
-    if not normalized:
-        return []
-    tokenizer, model = _load()
-    prompts = [
-        f"[{FUNCTION['name']}]\n{render_input(item)}\noutput:" for item in normalized
-    ]
-    levels = _scale_levels()
-    if levels is not None:
-        outputs = _classify_levels(tokenizer, model, prompts, levels)
-        if outputs is not None:
-            return [validate_output(output) for output in outputs]
+def _generate(tokenizer, model, prompts, constrained):
+    """Deterministic greedy generation with the packaged decoding settings.
+
+    Sampling is disabled and no top-p/top-k/temperature behavior exists; EOS
+    ends generation normally. Returns (decoded texts, exhausted flags) where
+    exhausted marks a row that spent the whole recorded token budget without
+    emitting EOS.
+    """
+    import torch
+
+    decoding = FUNCTION["runtime"]["decoding"]
+    max_new = decoding["max_new_tokens"]
     tokenizer.padding_side = "left"
     encoded = tokenizer(
         prompts,
@@ -254,13 +251,11 @@ def classify_batch(items):
         return_token_type_ids=False,
     )
     extra = {}
-    allowed_fn = _constraint(tokenizer, encoded["input_ids"].shape[1])
-    if allowed_fn is not None:
-        extra["prefix_allowed_tokens_fn"] = allowed_fn
-    max_new = 8 + 8 * len(FUNCTION["output"]["fields"])
-    if FUNCTION["runtime"].get("rationale_distillation"):
-        max_new += 72
-    with __import__("torch").no_grad():
+    if constrained:
+        allowed_fn = _constraint(tokenizer, encoded["input_ids"].shape[1])
+        if allowed_fn is not None:
+            extra["prefix_allowed_tokens_fn"] = allowed_fn
+    with torch.no_grad():
         try:
             generated = model.generate(
                 **encoded,
@@ -281,9 +276,42 @@ def classify_batch(items):
                 **extra,
             )
     new = generated[:, encoded["input_ids"].shape[1]:]
-    raw = tokenizer.batch_decode(new, skip_special_tokens=True)
-    return [validate_output(_parse(text)) for text in raw]
+    texts = tokenizer.batch_decode(new, skip_special_tokens=True)
+    end_ids = {tokenizer.eos_token_id, tokenizer.pad_token_id} - {None}
+    exhausted = [
+        len(row) >= max_new and not (end_ids & set(row)) for row in new.tolist()
+    ]
+    return texts, exhausted
 
 
-def classify(item):
-    return classify_batch([item])[0]
+def run_batch(items):
+    """Complete validated outputs for every item, in order.
+
+    Raises InvalidOutputError the moment any generated output violates the
+    contract: no partial dictionaries, no omitted fields, no silent repair,
+    no automatic retry.
+    """
+    normalized = [validate_input(item) for item in items]
+    if not normalized:
+        return []
+    tokenizer, model = _load()
+    prompts = [
+        f"[{FUNCTION['name']}]\n{render_input(item)}\noutput:" for item in normalized
+    ]
+    levels = _scale_levels()
+    if levels is not None:
+        outputs = _run_levels(tokenizer, model, prompts, levels)
+        if outputs is not None:
+            return [validate_output(output) for output in outputs]
+    if _has_text():
+        raw, exhausted = _generate(tokenizer, model, prompts, constrained=False)
+        return [
+            parse_strict_json(text, exhausted=spent)
+            for text, spent in zip(raw, exhausted)
+        ]
+    raw, _ = _generate(tokenizer, model, prompts, constrained=True)
+    return [validate_output(_parse_bounded(text)) for text in raw]
+
+
+def run(item):
+    return run_batch([item])[0]

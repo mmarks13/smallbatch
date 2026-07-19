@@ -33,12 +33,19 @@ def validate_id(value: str, what: str) -> str:
 
 InputType = Literal["string", "integer", "number", "boolean"]
 
+# Length-bounded text fields count Unicode code points in the decoded value —
+# not bytes, tokens, JSON escapes, or the surrounding quotes.
+TEXT_MAX_CHARS_DEFAULT = 300
+TEXT_MAX_CHARS_LIMIT = 2000
+
 
 class FieldSpec(BaseModel):
-    """One constrained output field: a bounded integer or an enum."""
+    """One declared output field: a bounded integer, an enum, or one
+    length-bounded text value (declared as `type: text`)."""
 
     range: tuple[int, int] | None = None
     labels: list[str] | None = None
+    max_chars: int | None = None
     model_config = {"extra": "forbid"}
 
     @model_validator(mode="before")
@@ -52,10 +59,46 @@ class FieldSpec(BaseModel):
             )
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def _text_shorthand(cls, data):
+        """`{type: text, max_chars: N}` declares a text field; the stored
+        discriminator is `max_chars`, which text fields always resolve."""
+        if not isinstance(data, dict) or "type" not in data:
+            return data
+        kind = data.get("type")
+        if kind != "text":
+            raise ValueError(
+                f"output field type {kind!r} is not declared with `type`: integer "
+                "scales use `range`, enums use `labels`; only `type: text` exists"
+            )
+        translated = {key: value for key, value in data.items() if key != "type"}
+        translated.setdefault("max_chars", TEXT_MAX_CHARS_DEFAULT)
+        return translated
+
     @model_validator(mode="after")
     def _check(self) -> FieldSpec:
-        if (self.range is None) == (self.labels is None):
-            raise ValueError("an output field needs exactly one of `range` or `labels`")
+        declared = [
+            name
+            for name, value in (
+                ("range", self.range),
+                ("labels", self.labels),
+                ("max_chars", self.max_chars),
+            )
+            if value is not None
+        ]
+        if len(declared) != 1:
+            raise ValueError(
+                "an output field needs exactly one of `range`, `labels`, or "
+                "`type: text` (got " + (", ".join(declared) or "none") + ")"
+            )
+        if self.max_chars is not None and not (
+            1 <= self.max_chars <= TEXT_MAX_CHARS_LIMIT
+        ):
+            raise ValueError(
+                f"max_chars {self.max_chars} must lie within 1-{TEXT_MAX_CHARS_LIMIT} "
+                "Unicode code points"
+            )
         if self.range is not None and self.range[0] > self.range[1]:
             raise ValueError(f"range {list(self.range)} is reversed")
         if self.range is not None and not (0 <= self.range[0] and self.range[1] <= 9):
@@ -80,16 +123,20 @@ class FieldSpec(BaseModel):
 
     @property
     def type(self) -> str:
-        return "int" if self.range is not None else "enum"
+        if self.range is not None:
+            return "int"
+        return "enum" if self.labels is not None else "text"
 
     def values(self) -> list[Any]:
         if self.range is not None:
             return list(range(self.range[0], self.range[1] + 1))
-        return list(self.labels or [])
+        if self.labels is not None:
+            return list(self.labels)
+        raise ValueError("a text field has no enumerable values")
 
 
 SCALAR_FIELD = "score"
-_RESERVED_OUTPUT_KEYS = {"type", "range", "labels"}
+_RESERVED_OUTPUT_KEYS = {"type", "range", "labels", "max_chars"}
 
 
 class OutputSpec(BaseModel):
@@ -103,9 +150,15 @@ class OutputSpec(BaseModel):
             return data
         if "type" in data:
             kind = data.get("type")
-            if kind not in ("int", "enum"):
-                raise ValueError("output.type must be `int` or `enum`")
-            allowed = {key: data[key] for key in ("range", "labels") if key in data}
+            if kind not in ("int", "enum", "text"):
+                raise ValueError("output.type must be `int`, `enum`, or `text`")
+            allowed = {
+                key: data[key]
+                for key in ("range", "labels", "max_chars")
+                if key in data
+            }
+            if kind == "text":
+                allowed["type"] = "text"
             return {"fields": {SCALAR_FIELD: allowed}}
         if not data:
             raise ValueError("output needs at least one field")
@@ -119,7 +172,42 @@ class OutputSpec(BaseModel):
         for name in fields:
             if not _FIELD_RE.fullmatch(name):
                 raise ValueError(f"output field {name!r} must be a Python-style identifier")
+            if name.startswith("__"):
+                raise ValueError(
+                    f"output field {name!r} is reserved (dunder names collide "
+                    "with internal loss bookkeeping)"
+                )
         return fields
+
+    @model_validator(mode="after")
+    def _at_most_one_text(self) -> OutputSpec:
+        text_fields = [name for name, field in self.fields.items() if field.type == "text"]
+        if len(text_fields) > 1:
+            raise ValueError(
+                f"output declares {len(text_fields)} text fields ({text_fields}); "
+                "a function may contain at most one"
+            )
+        return self
+
+    @property
+    def has_text(self) -> bool:
+        return any(field.type == "text" for field in self.fields.values())
+
+    @property
+    def text_field(self) -> str | None:
+        """Name of the single text field, or None."""
+        for name, field in self.fields.items():
+            if field.type == "text":
+                return name
+        return None
+
+    @property
+    def bounded_fields(self) -> dict[str, FieldSpec]:
+        return {name: f for name, f in self.fields.items() if f.type != "text"}
+
+    @property
+    def is_text_only(self) -> bool:
+        return self.has_text and not self.bounded_fields
 
     @property
     def is_scalar(self) -> bool:
@@ -167,17 +255,49 @@ class TeacherSpec(BaseModel):
         return value
 
 
+# Options deleted in the v0.3 schema break, each with the correction. They
+# fail loudly instead of being ignored so an old spec cannot silently train
+# under different semantics.
+_REMOVED_CANDIDATE_OPTIONS = {
+    "decode": (
+        "`decode` was removed in v0.3: ordinal fields always decode argmax, "
+        "the level constrained generation would emit. Delete the key."
+    ),
+    "objective": (
+        "`objective` was removed in v0.3: each output field's declared type "
+        "sets its training objective (int: class NLL + ranked probability "
+        "score; enum: legal-value NLL; text: mean next-token NLL). Delete "
+        "the key."
+    ),
+    "rationale_distillation": (
+        "`rationale_distillation` was removed in v0.3: declare an ordinary "
+        "text output field instead, e.g. `rationale: {type: text}` before "
+        "the decision field. Delete the key."
+    ),
+    "loss_type": (
+        "`loss_type` was removed in v0.3: the per-field objective replaces "
+        "TRL token-loss variants. Delete the key."
+    ),
+}
+
+
+def _reject_removed_options(cls, data):
+    if isinstance(data, dict):
+        for key, message in _REMOVED_CANDIDATE_OPTIONS.items():
+            if key in data:
+                raise ValueError(message)
+    return data
+
+
 class TfidfCandidateSpec(BaseModel):
     type: Literal["tfidf"]
-    # ordered scales only: which point of the head's level distribution each
-    # integer field reports (argmax / median / within_one, as documented on
-    # LoraCandidateSpec.decode). auto lets the development split decide.
-    decode: Literal["auto", "argmax", "median", "within_one"] = "auto"
     # ordered scales only: the softmax head's capacity. auto lets the
     # development split choose between a linear layer and one hidden layer;
     # pin it only to remove that search deliberately.
     head: Literal["auto", "linear", "mlp"] = "auto"
     model_config = {"extra": "forbid"}
+
+    _removed = model_validator(mode="before")(classmethod(_reject_removed_options))
 
 
 class SetFitCandidateSpec(BaseModel):
@@ -189,15 +309,13 @@ class SetFitCandidateSpec(BaseModel):
     # only to deliberately restrict the contrastive phase.
     embedding_samples_per_class: int | None = Field(default=None, ge=1)
     training_args: dict[str, Any] = Field(default_factory=dict)
-    # ordered scales only: which point of the head's level distribution each
-    # integer field reports (argmax / median / within_one, as documented on
-    # LoraCandidateSpec.decode). auto lets the development split decide.
-    decode: Literal["auto", "argmax", "median", "within_one"] = "auto"
     # ordered scales only: the softmax head's capacity. auto lets the
     # development split choose between a linear layer and one hidden layer;
     # pin it only to remove that search deliberately.
     head: Literal["auto", "linear", "mlp"] = "auto"
     model_config = {"extra": "forbid"}
+
+    _removed = model_validator(mode="before")(classmethod(_reject_removed_options))
 
     @field_validator("training_args")
     @classmethod
@@ -234,17 +352,6 @@ class LoraCandidateSpec(BaseModel):
     lora_alpha: int | None = None
     lora_dropout: float = 0.05
     use_dora: bool = False
-    rationale_distillation: bool = False
-    # ordinal: score the legal completions and optimize class NLL + RPS so an
-    # integer scale trains as ordered levels rather than unrelated symbols.
-    # auto uses it for scalar integer decisions without rationale distillation.
-    objective: Literal["auto", "token", "ordinal"] = "auto"
-    # which point of the level distribution to report: the mode (argmax, the
-    # level constrained generation would emit), the median (the first level
-    # whose cumulative probability reaches one half, which trades exact hits
-    # for smaller misses), or within_one (the level whose ±1 window holds the
-    # most mass). auto lets the development split decide.
-    decode: Literal["auto", "argmax", "median", "within_one"] = "auto"
     # recompute activations in the backward pass instead of holding them: buys
     # a large amount of GPU memory for roughly a third more compute, which is
     # what lets a bigger student train on a small card
@@ -257,8 +364,9 @@ class LoraCandidateSpec(BaseModel):
     eval_batch_size: int = 16
     max_seq_len: int = 1024
     seed: int = 17
-    loss_type: Literal["nll", "chunked_nll"] | None = None
     model_config = {"extra": "forbid"}
+
+    _removed = model_validator(mode="before")(classmethod(_reject_removed_options))
 
     @model_validator(mode="after")
     def _bounds(self) -> LoraCandidateSpec:
@@ -315,6 +423,65 @@ class AugmentationSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+# Default relative loss weights, per field type. A text field beside bounded
+# fields defaults low so its many tokens support the decision instead of
+# dominating it; alone it is the whole objective.
+DEFAULT_BOUNDED_WEIGHT = 1.0
+DEFAULT_TEXT_BESIDE_BOUNDED_WEIGHT = 0.25
+
+
+class TrainingSpec(BaseModel):
+    """Function-level training configuration shared by all LoRA candidates.
+
+    `loss_weights` are the user's relative task priorities across output
+    fields. Partial overrides are allowed: unspecified fields keep their
+    defaults (bounded 1.0; text 0.25 beside bounded fields, 1.0 alone).
+    Weights never vary by candidate and never include the internal JSON
+    format objective.
+    """
+
+    loss_weights: dict[str, float] = Field(default_factory=dict)
+    model_config = {"extra": "forbid"}
+
+    @field_validator("loss_weights", mode="before")
+    @classmethod
+    def _finite_positive(cls, weights):
+        import math
+
+        if not isinstance(weights, dict):
+            raise ValueError("loss_weights must map output field names to numbers")
+        for name, value in weights.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(
+                    f"loss_weights[{name!r}] must be a finite number greater than "
+                    f"zero, got {value!r}"
+                )
+        return weights
+
+
+def effective_loss_weights(spec: FunctionSpec) -> dict[str, float]:
+    """Resolved per-field loss weights: defaults filled, overrides applied.
+
+    These are recorded in build evidence as training intent; they are not a
+    ranking formula across candidates.
+    """
+    overrides = spec.training.loss_weights if spec.training else {}
+    weights: dict[str, float] = {}
+    for name, field in spec.output.fields.items():
+        if name in overrides:
+            weights[name] = float(overrides[name])
+        elif field.type != "text" or spec.output.is_text_only:
+            weights[name] = DEFAULT_BOUNDED_WEIGHT
+        else:
+            weights[name] = DEFAULT_TEXT_BESIDE_BOUNDED_WEIGHT
+    return weights
+
+
 class FunctionSpec(BaseModel):
     name: str
     description: str = ""
@@ -324,6 +491,7 @@ class FunctionSpec(BaseModel):
     teacher: TeacherSpec | None = None
     candidates: dict[str, CandidateSpec]
     augmentation: AugmentationSpec | None = None
+    training: TrainingSpec | None = None
 
     _base_dir: Path = PrivateAttr(default=Path("."))
     _source_path: Path | None = PrivateAttr(default=None)
@@ -347,6 +515,44 @@ class FunctionSpec(BaseModel):
             unknown = set(self.augmentation.field_dropout.fields) - set(self.input_schema)
             if unknown:
                 raise ValueError(f"field_dropout names unknown fields: {sorted(unknown)}")
+        if self.output.has_text:
+            generative = {
+                name: config
+                for name, config in self.candidates.items()
+                if config.type != "lora"
+            }
+            if generative:
+                raise ValueError(
+                    f"candidates {sorted(generative)} cannot produce the declared "
+                    f"text field {self.output.text_field!r}: classifiers select "
+                    "from fixed values, but this output contract requires "
+                    "generation. Remove the text field or keep only `type: lora` "
+                    "candidates"
+                )
+            if self.augmentation is not None:
+                raise ValueError(
+                    "augmentation is not supported for functions with a text "
+                    "field: synthetic variants would need generated text targets "
+                    "smallbatch cannot validate. Remove the `augmentation` block"
+                )
+            if self.output.is_text_only and self.teacher and self.teacher.passes == 2:
+                raise ValueError(
+                    "teacher.passes: 2 measures self-agreement on bounded "
+                    "decisions; a text-only function has none (two harmless "
+                    "rewordings are not a disagreement). Use passes: 1"
+                )
+        if self.training and self.training.loss_weights:
+            unknown = set(self.training.loss_weights) - set(self.output.fields)
+            if unknown:
+                raise ValueError(
+                    f"loss_weights name unknown output fields {sorted(unknown)}; "
+                    f"declared fields are {list(self.output.fields)}"
+                )
+            if len(self.output.fields) == 1:
+                raise ValueError(
+                    "loss_weights have no effect on a single-field output "
+                    "(one weight always normalizes to itself); delete the block"
+                )
         return self
 
     def decision_hash(self) -> str:
@@ -425,7 +631,39 @@ def validate_output(spec: FunctionSpec, value: Any) -> Any:
     }
 
 
+# C0 controls other than newline and tab, plus NUL and DEL, are unsafe in a
+# text value. Carriage returns are rejected rather than normalized: silently
+# rewriting \r\n would be repair, which smallbatch never does to outputs.
+_UNSAFE_TEXT_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def _validate_text(field: FieldSpec, value: Any, name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"output field {name!r} must be a string")
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError(
+            f"output field {name!r} must contain at least one non-whitespace "
+            "character; empty text is not a valid result"
+        )
+    bad = _UNSAFE_TEXT_CHARS.search(stripped)
+    if bad:
+        raise ValueError(
+            f"output field {name!r} contains unsafe control character "
+            f"{bad.group()!r}; only newline and tab are allowed"
+        )
+    if len(stripped) > field.max_chars:
+        raise ValueError(
+            f"output field {name!r} is {len(stripped)} characters; the contract "
+            f"allows at most {field.max_chars}. Smallbatch never truncates: "
+            "shorten the value or raise max_chars"
+        )
+    return stripped
+
+
 def _validate_field(field: FieldSpec, value: Any, name: str) -> Any:
+    if field.type == "text":
+        return _validate_text(field, value, name)
     if field.type == "int":
         if not isinstance(value, int) or isinstance(value, bool):
             raise ValueError(f"output field {name!r} must be an integer")

@@ -2,30 +2,24 @@
 
 A level is one token, so the model's whole distribution over the scale sits in
 the logits at one position: renormalize the legal levels and the result is a
-proper distribution, which constrained generation would have collapsed to its
-mode anyway. Scoring it directly costs one forward pass instead of a decoding
-loop, and it exposes the choice generation hides — which point of the
-distribution to report.
+proper distribution. Scoring it directly costs one forward pass instead of a
+decoding loop.
 
-`argmax` returns the most likely level, which is what constrained greedy
-decoding returns and what minimizes exact disagreement. `median` returns the
-first level whose cumulative probability reaches one half, which minimizes
-absolute error, so it is the better reading when a near miss matters more than
-an exact hit. `within_one` returns the level whose ±1 neighborhood holds the
-most mass, which maximizes the chance of landing within one level. The
-candidate's `decode` setting picks one, and `auto` lets the development split
-decide.
+Every ordinal field decodes by argmax — the most likely level, which is
+exactly what constrained greedy decoding would emit, so the scored
+distribution and generation always agree. v0.3 removed the configurable
+median/within-one decoders and their development-time selection: one decode
+rule for every candidate family, chosen by the field's type, never by a
+search.
 
 The decode step is backend-neutral: any candidate that can produce a
-distribution over the ordered levels — a student's renormalized logits, a
-differenced cumulative head — reads a decision out of it the same way.
+distribution over the ordered levels — a student's renormalized logits, the
+shared softmax head — reads a decision out of it the same way.
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-DECODERS = ("argmax", "median", "within_one")
 
 
 def scale_levels(spec) -> list[Any] | None:
@@ -69,25 +63,14 @@ def score_levels(model, tokenizer, spec, texts: list[str], batch_size: int = 16)
     return torch.cat(distributions) if distributions else torch.empty(0, len(ids))
 
 
-def decode_levels(distributions, levels: list[Any], decoder: str) -> list[Any]:
-    """Read one level per row out of an array of level distributions.
+def decode_levels(distributions, levels: list[Any]) -> list[Any]:
+    """Read the argmax level per row out of an array of level distributions.
 
     Accepts anything numpy can view as a rows-by-levels array (a CPU torch
-    tensor included). Adjacent columns must be adjacent levels, which integer
-    scales guarantee; ties resolve to the lower level.
+    tensor included). Ties resolve to the lower level.
     """
     import numpy as np
 
-    if decoder not in DECODERS:
-        raise ValueError(f"unknown decoder {decoder!r}; use one of {DECODERS}")
     probabilities = np.asarray(distributions, dtype=float)
-    if decoder == "argmax":
-        chosen = probabilities.argmax(axis=1)
-    elif decoder == "median":
-        chosen = (probabilities.cumsum(axis=1) >= 0.5).argmax(axis=1)
-    else:  # within_one: the level whose ±1 window holds the most mass
-        window = probabilities.copy()
-        window[:, :-1] += probabilities[:, 1:]
-        window[:, 1:] += probabilities[:, :-1]
-        chosen = window.argmax(axis=1)
+    chosen = probabilities.argmax(axis=1)
     return [levels[int(index)] for index in chosen]

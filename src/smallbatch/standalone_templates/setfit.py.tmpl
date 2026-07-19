@@ -3,6 +3,7 @@ import json
 from ._common import (
     FUNCTION,
     ROOT,
+    InvalidOutputError,
     metadata,
     ordinal_predict,
     render_input,
@@ -35,7 +36,10 @@ def _load():
     return _MODELS
 
 
-def classify_batch(items):
+__all__ = ["run", "run_batch", "metadata", "InvalidOutputError"]
+
+
+def run_batch(items):
     normalized = [validate_input(item) for item in items]
     if not normalized:
         return []
@@ -58,5 +62,5 @@ def classify_batch(items):
     return [validate_output(output) for output in outputs]
 
 
-def classify(item):
-    return classify_batch([item])[0]
+def run(item):
+    return run_batch([item])[0]

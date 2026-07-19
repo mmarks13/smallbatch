@@ -125,7 +125,7 @@ def cmd_select(args) -> int:
     print(f"wheel: {result.wheel}")
     print(
         f"import: from smallbatch_functions.{args.name.replace('-', '_')} "
-        "import classify"
+        "import run"
     )
     return 0
 

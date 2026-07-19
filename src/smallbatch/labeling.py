@@ -50,6 +50,18 @@ def primary_value(spec: FunctionSpec, row: Row) -> Any:
     return output[next(iter(spec.output.fields))] if isinstance(output, dict) else output
 
 
+def stratum_value(spec: FunctionSpec, row: Row) -> Any:
+    """The value splits stratify on: the first bounded field.
+
+    Unique free-text values are never treated as classes, so a text-only
+    function returns None — one stratum, deterministic seeded splitting."""
+    output = row_output(spec, row)
+    for name, field in spec.output.fields.items():
+        if field.type != "text":
+            return output[name] if isinstance(output, dict) else output
+    return None
+
+
 def dataset_hash(rows: list[Row]) -> str:
     canonical = json.dumps(
         sorted(rows, key=lambda row: row["id"]),
@@ -143,7 +155,6 @@ def label_items(
                     "id": row_id(items[global_index]),
                     "input": items[global_index],
                     "output": output,
-                    "reason": str(entry.get("reason", "")).strip(),
                     "origin": origin,
                 }
                 rows[global_index] = row
@@ -174,8 +185,20 @@ def _output_key(output: Any) -> str:
     return json.dumps(output, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+def _comparison_output(spec: FunctionSpec, output: Any) -> Any:
+    """The projection compared across teacher passes: bounded fields only.
+
+    Two draws whose decisions match but whose text is worded differently are
+    not a disagreement — exact text match would overstate teacher
+    inconsistency, and semantic comparison is out of scope. Text-only
+    functions reject passes: 2 at the spec, so a projection always exists."""
+    if not spec.output.has_text:
+        return output
+    return {name: output[name] for name in spec.output.bounded_fields}
+
+
 def _draw_summary(row: Row) -> dict[str, Any]:
-    return {"output": row["output"], "reason": row.get("reason", ""), "origin": row["origin"]}
+    return {"output": row["output"], "origin": row["origin"]}
 
 
 def label_real_rows(
@@ -196,6 +219,10 @@ def label_real_rows(
     not an ordered integer scale are returned separately as unresolved: they
     get no decision, never block the run, and may be resolved by the user via
     the imported-decisions path.
+
+    Draws are compared on their bounded fields only: a text field that is
+    worded differently between passes is variation, not disagreement, and the
+    winning draw keeps its own text.
     """
     passes = spec.teacher.passes if spec.teacher else 1
     if passes == 1 or not items:
@@ -209,7 +236,8 @@ def label_real_rows(
     flips = [
         item
         for item in items
-        if first_by[row_id(item)]["output"] != second_by[row_id(item)]["output"]
+        if _comparison_output(spec, first_by[row_id(item)]["output"])
+        != _comparison_output(spec, second_by[row_id(item)]["output"])
     ]
     _progress(
         f"teacher pass agreement: {len(items) - len(flips)}/{len(items)} unanimous, "
@@ -227,14 +255,22 @@ def label_real_rows(
     for item in items:
         rid = row_id(item)
         draws = [first_by[rid], second_by[rid]]
-        if draws[0]["output"] == draws[1]["output"]:
+        if _comparison_output(spec, draws[0]["output"]) == _comparison_output(
+            spec, draws[1]["output"]
+        ):
             rows.append({**draws[0], "origin": "real", "weight": 1.0, "agreement": "unanimous"})
             continue
         draws.append(third_by[rid])
-        counts = Counter(_output_key(draw["output"]) for draw in draws)
+        counts = Counter(
+            _output_key(_comparison_output(spec, draw["output"])) for draw in draws
+        )
         key, votes = counts.most_common(1)[0]
         if votes >= 2:
-            winner = next(draw for draw in draws if _output_key(draw["output"]) == key)
+            winner = next(
+                draw
+                for draw in draws
+                if _output_key(_comparison_output(spec, draw["output"])) == key
+            )
             rows.append(
                 {**winner, "origin": "real", "weight": round(2 / 3, 4), "agreement": "majority"}
             )
@@ -261,7 +297,7 @@ def _strata(spec: FunctionSpec, rows: list[Row], seed: int) -> dict[str, list[Ro
     rng = random.Random(seed)
     groups: dict[str, list[Row]] = defaultdict(list)
     for row in rows:
-        groups[json.dumps(primary_value(spec, row), sort_keys=True)].append(row)
+        groups[json.dumps(stratum_value(spec, row), sort_keys=True)].append(row)
     for group in groups.values():
         rng.shuffle(group)
     return dict(sorted(groups.items()))
@@ -348,7 +384,6 @@ def _imported_rows(
                 "id": row_id(item),
                 "input": item,
                 "output": output,
-                "reason": "",
                 "origin": "user-resolved" if resolved else "real",
                 **({"weight": 1.0} if resolved else {}),
             }
@@ -599,6 +634,15 @@ def build_dataset(
 ) -> dict[str, Any]:
     inputs, imported = normalize_item_records(spec, records)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if append and (out_dir / "meta.json").exists():
+        prior = json.loads((out_dir / "meta.json").read_text())
+        if prior.get("decision_hash") != spec.decision_hash():
+            raise ValueError(
+                "existing dataset was labeled under a different prompt, "
+                "contract, or teacher (or a pre-v0.3 schema); appending would "
+                "mix decision formats. Move the data directory aside or "
+                "relabel from scratch"
+            )
     existing_rows = read_jsonl(out_dir / "labeled.jsonl") if append else []
     existing_variants = [row for row in existing_rows if row.get("origin") not in REAL_ORIGINS]
     existing_splits = {row["id"]: row["split"] for row in existing_rows}
@@ -644,7 +688,12 @@ def build_dataset(
         for split in ("train", "dev", "eval"):
             atomic_jsonl(out_dir / f"{split}.jsonl", [row for row in rows if row["split"] == split])
         atomic_jsonl(out_dir / "labeled.jsonl", rows)
-        histogram = Counter(str(primary_value(spec, row)) for row in real_rows)
+        has_bounded = bool(spec.output.bounded_fields)
+        histogram = (
+            Counter(str(stratum_value(spec, row)) for row in real_rows)
+            if has_bounded
+            else Counter()
+        )
         meta = {
             "schema_version": 3,
             "function": spec.name,
@@ -661,12 +710,14 @@ def build_dataset(
                 split: dict(
                     sorted(
                         Counter(
-                            str(primary_value(spec, row))
+                            str(stratum_value(spec, row))
                             for row in real_rows
                             if row["split"] == split
                         ).items()
                     )
                 )
+                if has_bounded
+                else {}
                 for split in ("train", "dev", "eval")
             },
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),

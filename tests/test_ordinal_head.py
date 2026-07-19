@@ -111,11 +111,9 @@ def test_a_cumulative_head_from_an_old_build_fails_closed():
         predict_tfidf_pipelines(pipelines, spec, [{"title": "t", "body": "b"}])
 
 
-@pytest.mark.parametrize("decoder", [None, "argmax", "median", "within_one"])
-def test_predict_matches_the_standalone_template_arithmetic(decoder):
+def test_predict_matches_the_standalone_template_arithmetic():
     """The generated package reimplements the head in a few lines of numpy;
-    the two must agree for every decode rule and for heads persisted before
-    the decoder key existed."""
+    the two must agree on the argmax read — the only decode rule in v0.3."""
     template = (
         __import__("pathlib")
         .Path("src/smallbatch/standalone_templates/common.py.tmpl")
@@ -131,14 +129,14 @@ def test_predict_matches_the_standalone_template_arithmetic(decoder):
     )
     labels = [level for level in (0, 1, 2, 3) for _ in range(8)]
     head, _ = heads.fit_head([0, 1, 2, 3], features, labels)
-    if decoder is not None:
-        head["decoder"] = decoder
 
     probe = np.array([[0.3], [1.6], [3.2]])
     assert namespace["ordinal_predict"](head, probe) == heads.predict(head, probe)
 
 
-def test_tfidf_selects_and_persists_a_decoder(tmp_path):
+def test_tfidf_persists_a_decoderless_argmax_head(tmp_path):
+    """v0.3 removed decoder selection: no decoder state is persisted and
+    `decode` is no longer part of the candidate record."""
     import skops.io as sio
 
     from smallbatch.candidates import train_tfidf
@@ -146,34 +144,10 @@ def test_tfidf_selects_and_persists_a_decoder(tmp_path):
     spec = make_spec(output={"type": "int", "range": [0, 2]})
     rows = scale_rows()
     record = train_tfidf(spec, rows, tmp_path, dev_rows=rows)
-    assert record["decode"]["score"] in ("argmax", "median", "within_one")
-    assert record["dev_decode_comparison"]["score"]["selected"] == record["decode"]["score"]
-
-    # the decoder key persists inside the head under skops' strict trust policy
+    assert "decode" not in record
+    assert "dev_decode_comparison" not in record
     loaded = sio.load(tmp_path / "model.skops", trusted=[])
-    assert loaded["score"]["head"]["decoder"] == record["decode"]["score"]
-
-
-def test_tfidf_pinned_decoder_needs_no_dev_rows(tmp_path):
-    import skops.io as sio
-
-    from smallbatch.candidates import train_tfidf
-
-    spec = make_spec(output={"type": "int", "range": [0, 1]})
-    rows = [
-        {
-            "id": str(index),
-            "input": {"title": f"t{index}", "body": "withheld" if index % 2 else "asked"},
-            "output": index % 2,
-            "origin": "real",
-        }
-        for index in range(10)
-    ]
-    record = train_tfidf(spec, rows, tmp_path, decode="median")
-    assert record["decode"] == {"score": "median"}
-    assert record["dev_decode_comparison"] == {}
-    loaded = sio.load(tmp_path / "model.skops", trusted=[])
-    assert loaded["score"]["head"]["decoder"] == "median"
+    assert "decoder" not in loaded["score"]["head"]
 
 
 def test_tfidf_records_head_tuning_diagnostics_and_local_distributions(tmp_path):

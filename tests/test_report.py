@@ -88,21 +88,11 @@ def test_public_report_redacts_inputs_and_local_details_keep_them(tmp_path):
     assert json.loads(path.read_text())["selection_bias_note"]
 
 
-def test_markdown_shows_decoder_selection_and_head_diagnostics(tmp_path):
+def test_markdown_shows_head_training_and_text_sections(tmp_path):
     from smallbatch.report import render_markdown
 
-    comparison = {
-        "selected": "median",
-        "metric": "within_one",
-        "decoders": {
-            "argmax": {"exact": 0.5, "within_one": 0.7, "mae": 0.9},
-            "median": {"exact": 0.45, "within_one": 0.8, "mae": 0.7},
-            "within_one": {"exact": 0.4, "within_one": 0.8, "mae": 0.8},
-        },
-    }
     diagnostics = {
         "rows": 40,
-        "decoder": "median",
         "hidden": 64,
         "mean_confidence": 0.72,
         "levels": [
@@ -111,15 +101,11 @@ def test_markdown_shows_decoder_selection_and_head_diagnostics(tmp_path):
         ],
     }
     tfidf = candidate([1])
-    tfidf["decode"] = {"score": "median"}
-    tfidf["dev_decode_comparison"] = {"score": comparison}
     tfidf["head_diagnostics"] = {"score": diagnostics}
     setfit = candidate([1])
     setfit["backend"] = "setfit"
     setfit["field_training"] = {
         "score": {
-            "decode": "argmax",
-            "dev_decode_comparison": None,
             "head_diagnostics": None,
             "frozen_vs_tuned": {
                 "frozen_dev_within_one": 0.7,
@@ -131,38 +117,64 @@ def test_markdown_shows_decoder_selection_and_head_diagnostics(tmp_path):
     }
     lora = candidate([1])
     lora["backend"] = "lora"
-    lora["decode"] = "median"
-    lora["training"] = {
-        "dev_decode_comparison": {
-            "argmax": {"exact": 0.5, "within_one": 0.7, "mae": 0.9},
-            "median": {"exact": 0.45, "within_one": 0.8, "mae": 0.7},
-        }
+    lora["loss_weights"] = {"score": 1.0}
+    lora["text_fidelity"] = {
+        "bits_per_byte": 1.21,
+        "median_example_bpb": 1.1,
+        "p90_example_bpb": 2.0,
+        "token_nll": 0.9,
+        "perplexity": 2.46,
+        "top1_accuracy": 0.61,
     }
-    enum_lora = candidate([1])
-    enum_lora["backend"] = "lora"
-    enum_lora["decode"] = None  # enum output: no level distribution exists
+    lora["metrics"] = dict(lora["metrics"], structural_failures={"char_limit": 2}, n=10)
+    lora["training"] = {
+        "untuned_baselines": {"score": 2.1, "__format__": 0.4},
+        "format_loss_weight": 0.1,
+        "best_epoch": 3,
+        "epochs_run": 5,
+        "best_checkpoint_score": 0.44,
+        "stopped_reason": "early_stop(patience=2)",
+        "curve": [
+            {
+                "epoch": 1,
+                "checkpoint_score": 0.9,
+                "normalized_dev_losses": {"score": 0.9},
+            },
+            {
+                "epoch": 3,
+                "checkpoint_score": 0.44,
+                "normalized_dev_losses": {"score": 0.44},
+            },
+        ],
+    }
 
     spec = make_spec(output={"type": "int", "range": [0, 4]})
     report, _ = build_report(
         spec,
         [{"input": {"title": "t", "body": "b"}, "output": 1}],
-        {"tfidf": tfidf, "setfit": setfit, "lora": lora, "enum": enum_lora},
+        {"tfidf": tfidf, "setfit": setfit, "lora": lora},
         {},
     )
     markdown = render_markdown(report)
 
-    assert "Decode `score`: **median** (dev-selected)" in markdown
-    assert "| median * | 0.4500 | 0.8000 | 0.7000 |" in markdown
-    assert "Decode `score`: **argmax** (pinned)" in markdown
-    assert "Decode `decode`: **median** (dev-selected)" in markdown
-    assert "Ordinal head on dev: 64-hidden capacity, mean confidence 0.7200." in markdown
+    # head diagnostics: argmax read, no decoder-selection tables remain
+    assert "Ordinal head `score` on dev: 64-hidden capacity, argmax read" in markdown
     assert "| 0 | 0.2000 | 0.2500 |" in markdown
+    assert "Decode " not in markdown
+    # training configuration and checkpoint evidence are their own sections
+    assert "loss weights `score`=1.0" in markdown
+    assert "format loss fixed at 0.1" in markdown
+    assert "Untuned-base dev losses" in markdown
+    assert "Checkpoint: epoch 3 of 5" in markdown
+    # text evidence: fidelity framed as reference prediction, never correctness
+    assert "held-out teacher-text prediction" in markdown
+    assert "not correctness" in markdown
+    assert "| 1.2100 |" in markdown
+    assert "char_limit=2" in markdown
     assert (
         "Embedding `score`: frozen 0.7000 -> best 0.8500 dev within-one "
         "(delta 0.1500, kept epoch 1)" in markdown
     )
-    # a candidate with no level distribution shows no decode line
-    assert markdown.count("Decode ") == 3
 
 
 def test_integer_evidence_summary_includes_quality_and_operating_metrics():

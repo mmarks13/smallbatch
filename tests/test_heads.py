@@ -129,30 +129,21 @@ def test_dense_features_are_standardized_and_the_scaler_persists():
     assert (head["scaler"]["scale"] > 0).all()
 
 
-def test_select_decoder_persists_the_dev_winner_and_reports_the_comparison():
+def test_predict_reads_the_argmax_level():
+    """v0.3: one decode rule for every candidate family — the head's argmax,
+    with no per-head decoder state persisted or selectable."""
     features, labels = ordered_data()
     head, _ = heads.fit_head([0, 1, 2, 3], features, labels, features, labels)
-
-    comparison = heads.select_decoder(head, features, labels)
-    assert head["decoder"] in ("argmax", "median", "within_one")
-    assert comparison["selected"] == head["decoder"]
-    assert set(comparison["decoders"]) == {"argmax", "median", "within_one"}
-
-
-def test_select_decoder_pinned_and_missing_dev_paths():
-    head = {"kind": heads.KIND, "values": [0, 1]}
-    assert heads.select_decoder(head, None, None, "median") is None
-    assert head["decoder"] == "median"
-    head.pop("decoder")
-    assert heads.select_decoder(head, None, []) is None
-    assert head["decoder"] == "argmax"
+    assert "decoder" not in head
+    predictions = heads.predict(head, features)
+    matches = sum(p == r for p, r in zip(predictions, labels))
+    assert matches / len(labels) > 0.8
 
 
 def test_head_diagnostics_report_per_level_calibration_only():
     """Public evidence: level-mass summaries, never inputs or per-row values."""
     features, labels = ordered_data(levels=3)
     head, _ = heads.fit_head([0, 1, 2], features, labels, features, labels)
-    heads.select_decoder(head, features, labels)
 
     diagnostics = heads.head_diagnostics(
         head, features, labels, levels=["low", "mid", "high"]
@@ -172,7 +163,6 @@ def test_a_persisted_head_is_skops_loadable_under_the_strict_trust_policy(tmp_pa
 
     features, labels = ordered_data(levels=3)
     head, _ = heads.fit_head([0, 1, 2], features, labels)
-    heads.select_decoder(head, None, None, "argmax")
 
     path = tmp_path / "head.skops"
     sio.dump(head, path)

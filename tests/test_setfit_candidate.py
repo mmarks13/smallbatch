@@ -146,7 +146,7 @@ def test_setfit_trains_and_predicts_each_field(tmp_path, monkeypatch):
     assert predictions == ["normal", "urgent"]
 
 
-def test_setfit_ordinal_head_gets_a_dev_selected_decoder(tmp_path, monkeypatch):
+def test_setfit_ordinal_head_trains_on_the_capacity_grid(tmp_path, monkeypatch):
     install_fake_setfit(monkeypatch)
     stub_graded_embeddings(monkeypatch)
     spec = make_spec(
@@ -164,9 +164,7 @@ def test_setfit_ordinal_head_gets_a_dev_selected_decoder(tmp_path, monkeypatch):
 
     training = metadata["field_training"]["score"]
     assert training["objective"] == "ordinal"
-    assert training["decode"] in ("argmax", "median", "within_one")
-    assert training["dev_decode_comparison"]["selected"] == training["decode"]
-    assert training["dev_decode_comparison"]["metric"] == "within_one"
+    assert "decode" not in training  # v0.3: argmax is the only read
 
     # the head tried the capacity grid on dev
     assert training["head_tuning"]["metric"] == "within_one"
@@ -198,33 +196,6 @@ def test_setfit_ordinal_head_gets_a_dev_selected_decoder(tmp_path, monkeypatch):
         [{"title": "new", "body": bodies[0]}, {"title": "new", "body": bodies[2]}],
     )
     assert predictions == [0, 2]
-
-
-def test_setfit_ordinal_pinned_decoder_skips_the_comparison(tmp_path, monkeypatch):
-    install_fake_setfit(monkeypatch)
-    stub_graded_embeddings(monkeypatch)
-    spec = make_spec(
-        output={"type": "int", "range": [0, 2]},
-        candidates={
-            "bge-small": {
-                "type": "setfit",
-                "model": "BAAI/bge-small-en-v1.5",
-                "decode": "median",
-            }
-        },
-    )
-    bodies = {0: "calm question", 1: "slow response", 2: "slow down failure"}
-    rows = [
-        {"input": {"title": f"case {index}", "body": bodies[level]}, "output": level}
-        for level in bodies
-        for index in range(8)
-    ]
-
-    metadata = train_setfit(spec, spec.candidates["bge-small"], rows, [], tmp_path)
-
-    training = metadata["field_training"]["score"]
-    assert training["decode"] == "median"
-    assert training["dev_decode_comparison"] is None
 
 
 def test_setfit_default_embeds_every_training_row(tmp_path, monkeypatch):

@@ -311,8 +311,6 @@ def train_setfit(
                 args=args,
             )
         objective = "multinomial"
-        decoder = None
-        dev_decode_comparison = None
         head_diagnostics = None
         head_tuning = None
         if is_ordinal:
@@ -336,10 +334,6 @@ def train_setfit(
                 dev_labels,
                 setting=config.head,
             )
-            dev_decode_comparison = heads.select_decoder(
-                head, dev_embeddings, dev_labels, config.decode
-            )
-            decoder = head["decoder"]
             field_dir.mkdir(parents=True, exist_ok=True)
             if dev_embeddings is not None and dev_labels:
                 head_diagnostics = heads.head_diagnostics(
@@ -395,8 +389,6 @@ def train_setfit(
             "head_tuning": head_tuning,
             "classifier_train_rows": len(train_rows),
             "objective": objective,
-            "decode": decoder,
-            "dev_decode_comparison": dev_decode_comparison,
             "head_diagnostics": head_diagnostics,
             "resolved_args": resolved,
         }

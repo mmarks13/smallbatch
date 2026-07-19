@@ -24,7 +24,6 @@ def dev_distribution_rows(
     distribution = heads.class_distribution(head, features)
     return {
         "levels": head["values"] if levels is None else levels,
-        "decoder": head.get("decoder", "argmax"),
         "rows": [
             {
                 "id": row.get("id"),
@@ -78,14 +77,13 @@ def train_tfidf(
     train_rows: list[Row],
     out_dir: Path,
     dev_rows: list[Row] | None = None,
-    decode: str = "auto",
     head: str = "auto",
 ) -> dict[str, Any]:
     """Fit a TF-IDF vectorizer plus one head per output field and persist with
     skops. Integer scales get the shared softmax ordinal head — trained with
     the same CE+RPS objective as every other candidate family, its capacity
-    and decode rule selected on the development rows; enum labels get a
-    multinomial classifier. Returns format metadata for the candidate
+    selected on the development rows and read out by argmax; enum labels get
+    a multinomial classifier. Returns format metadata for the candidate
     record."""
     import sklearn
     import skops
@@ -101,8 +99,6 @@ def train_tfidf(
     dev_texts = _texts(spec, dev_rows) if dev_rows else []
     models: dict[str, Any] = {}
     objectives: dict[str, str] = {}
-    decoders: dict[str, str] = {}
-    dev_decode_comparison: dict[str, Any] = {}
     head_diagnostics: dict[str, Any] = {}
     head_tuning: dict[str, Any] = {}
     dev_distributions: dict[str, Any] = {}
@@ -125,10 +121,6 @@ def train_tfidf(
             )
             if tuning is not None:
                 head_tuning[name] = tuning
-            comparison = heads.select_decoder(head, dev_features, dev_references, decode)
-            decoders[name] = head["decoder"]
-            if comparison is not None:
-                dev_decode_comparison[name] = comparison
             if dev_features is not None and dev_references:
                 head_diagnostics[name] = heads.head_diagnostics(
                     head, dev_features, dev_references
@@ -159,8 +151,6 @@ def train_tfidf(
         "skops_version": skops.__version__,
         "fields": list(spec.output.fields),
         "objective": objectives,
-        "decode": decoders,
-        "dev_decode_comparison": dev_decode_comparison,
         "head_diagnostics": head_diagnostics,
         "head_tuning": head_tuning,
     }

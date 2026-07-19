@@ -5,39 +5,14 @@ import torch
 import torch.nn.functional as F
 
 from conftest import make_spec
-from smallbatch.spec import LoraCandidateSpec
-from smallbatch.training import ordinal_objective_applies
-
-
-def lora(**overrides) -> LoraCandidateSpec:
-    return LoraCandidateSpec(type="lora", **overrides)
 
 
 def int_spec(**overrides):
     return make_spec(output={"type": "int", "range": [0, 4]}, **overrides)
 
 
-def test_auto_uses_ordinal_only_for_scalar_int_decisions():
-    assert ordinal_objective_applies(int_spec(), lora())
-    # enum labels have no order to exploit
-    assert not ordinal_objective_applies(make_spec(), lora())
-    # a free-text rationale is not one of the legal completions
-    assert not ordinal_objective_applies(int_spec(), lora(rationale_distillation=True))
-
-
-def test_explicit_objective_overrides_and_fails_loudly():
-    assert not ordinal_objective_applies(int_spec(), lora(objective="token"))
-    assert ordinal_objective_applies(int_spec(), lora(objective="ordinal"))
-    with pytest.raises(ValueError, match="scalar integer output"):
-        ordinal_objective_applies(make_spec(), lora(objective="ordinal"))
-    with pytest.raises(ValueError, match="rationale"):
-        ordinal_objective_applies(
-            int_spec(), lora(objective="ordinal", rationale_distillation=True)
-        )
-
-
 def _rps_loss(class_logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """The loss implemented by OrdinalSFTTrainer, over given class scores."""
+    """The ordinal objective (`heads.ordinal_loss`), over given class scores."""
     classes = class_logits.size(-1)
     nll = F.cross_entropy(class_logits, target)
     probabilities = F.softmax(class_logits, dim=-1)
@@ -114,7 +89,7 @@ class FullLogitsModel:
 
 
 class KeepLogitsModel:
-    """Projects only the requested positions, like transformers causal LMs."""
+    """Projects only the last k positions, like transformers causal LMs."""
 
     def __init__(self, logits):
         self._logits = logits
@@ -124,7 +99,7 @@ class KeepLogitsModel:
         self.kept = logits_to_keep
         if logits_to_keep is None:
             return _Output(self._logits)
-        return _Output(self._logits[:, logits_to_keep, :])
+        return _Output(self._logits[:, -logits_to_keep:, :])
 
 
 class IgnoresKwargModel:
@@ -137,74 +112,46 @@ class IgnoresKwargModel:
         return _Output(self._logits)
 
 
-def test_compute_loss_reads_only_deciding_positions_however_logits_arrive():
-    """The trainer asks the model to project only the deciding positions
-    (the full sequence-by-vocabulary logits are what OOM small cards), and
-    must produce the identical loss when a model returns full logits instead,
-    whether by raising on the kwarg or by silently ignoring it."""
-    from smallbatch.training import _ordinal_trainer_class
+def test_int_field_loss_reads_only_deciding_positions_however_logits_arrive():
+    """The universal objective asks the model to project only the completion
+    region (the full sequence-by-vocabulary logits are what OOM small cards),
+    and must produce the identical ordinal loss when a model returns full
+    logits instead, whether by raising on the kwarg or silently ignoring it."""
+    from smallbatch import objective
 
-    trainer_cls = _ordinal_trainer_class(int_spec(), FakeTokenizer())
-    # two rows with different deciding positions, right-padded to length 5:
-    # row 0 answers at position 2 with " 3", row 1 at position 3 with " 1"
-    inputs = {
+    spec = int_spec()
+    codecs = objective.field_codecs(spec, FakeTokenizer())
+    assert codecs["score"]["legal_ids"] == [100, 101, 102, 103, 104]
+
+    # two rows, right-padded to length 5: row 0 answers " 3" at position 2,
+    # row 1 answers " 1" at position 3; owners: -1 prompt/pad, 0 format eos
+    batch = {
         "input_ids": torch.tensor([[1, 2, 103, 99, 0], [1, 2, 3, 101, 99]]),
+        "attention_mask": torch.tensor([[1, 1, 1, 1, 0], [1, 1, 1, 1, 1]]),
         "labels": torch.tensor(
             [[-100, -100, 103, 99, -100], [-100, -100, -100, 101, 99]]
         ),
+        "owners": torch.tensor([[-1, -1, 1, 0, -1], [-1, -1, -1, 1, 0]]),
     }
     logits = torch.zeros(2, 5, 200)
     logits[0, 1, 100:105] = torch.tensor([0.5, 0.0, 1.0, 4.0, 0.0])
     logits[1, 2, 100:105] = torch.tensor([1.0, 3.0, 0.0, 0.0, 2.0])
-    expected = _rps_loss(
-        torch.stack([logits[0, 1, 100:105], logits[1, 2, 100:105]]),
-        torch.tensor([3, 1]),
+    expected = torch.stack(
+        [
+            _rps_loss(logits[0, 1, 100:105].unsqueeze(0), torch.tensor([3])),
+            _rps_loss(logits[1, 2, 100:105].unsqueeze(0), torch.tensor([1])),
+        ]
     )
 
     keep_model = KeepLogitsModel(logits)
     for model in (keep_model, FullLogitsModel(logits), IgnoresKwargModel(logits)):
-        loss = trainer_cls.compute_loss(None, model, inputs)
-        assert float(loss) == pytest.approx(float(expected), abs=1e-6)
-    # the supporting model really was asked for just the deciding positions
-    assert keep_model.kept is not None
-    assert keep_model.kept.tolist() == [1, 2]
-
-
-def test_kept_and_full_shape_collision_resolves_by_rerunning():
-    """When the batch is exactly as long as the sequence, a kept projection
-    and full logits have identical shapes. The trainer must not guess which
-    arrived — it reruns the unambiguous full form — and the loss must match
-    for every model contract."""
-    from smallbatch.training import _ordinal_trainer_class
-
-    trainer_cls = _ordinal_trainer_class(int_spec(), FakeTokenizer())
-    # three rows, right-padded to length 3, with deciding positions chosen so
-    # that misreading kept columns as sequence positions changes the answer:
-    # row 0 answers " 3" at position 2, rows 1-2 answer at position 1
-    inputs = {
-        "input_ids": torch.tensor([[1, 2, 103], [1, 101, 99], [1, 102, 99]]),
-        "labels": torch.tensor(
-            [[-100, -100, 103], [-100, 101, 99], [-100, 102, 99]]
-        ),
-    }
-    logits = torch.zeros(3, 3, 200)
-    logits[0, 1, 100:105] = torch.tensor([0.5, 0.0, 1.0, 4.0, 0.0])
-    logits[1, 0, 100:105] = torch.tensor([1.0, 3.0, 0.0, 0.0, 2.0])
-    logits[2, 0, 100:105] = torch.tensor([0.0, 0.0, 5.0, 1.0, 0.0])
-    expected = _rps_loss(
-        torch.stack(
-            [logits[0, 1, 100:105], logits[1, 0, 100:105], logits[2, 0, 100:105]]
-        ),
-        torch.tensor([3, 1, 2]),
-    )
-
-    for model in (
-        KeepLogitsModel(logits),
-        FullLogitsModel(logits),
-        IgnoresKwargModel(logits),
-    ):
-        loss = trainer_cls.compute_loss(None, model, inputs)
-        assert float(loss) == pytest.approx(float(expected), abs=1e-6)
+        got, start = objective.completion_logits(model, batch)
+        losses = objective.row_losses(
+            got, batch["input_ids"], batch["owners"], spec, codecs, start
+        )
+        assert torch.allclose(losses["score"], expected, atol=1e-6)
+    # the supporting model really was asked for just the completion region
+    assert keep_model.kept == 4
 
 
 def test_scales_wider_than_one_digit_are_refused_by_the_spec():
@@ -230,8 +177,7 @@ def test_scales_wider_than_one_digit_are_refused_by_the_spec():
 def test_shared_completion_tokens_cancel_in_the_class_distribution():
     """Both paths normalize over the legal completions, so anything the
     completions share — the prompt, the leading space — cancels. Only the
-    deciding tokens may move the distribution, which is why the shared trailing
-    token is excluded from the scored span in both paths."""
+    deciding tokens may move the distribution."""
     deciding = torch.tensor([[0.4, 2.1, -1.0, 0.3, 1.7]])
     shared = -3.7  # identical for every completion
 

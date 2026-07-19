@@ -1,10 +1,29 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 FUNCTION = json.loads((ROOT / "function.json").read_text())
+
+# C0 controls other than newline and tab, plus NUL and DEL: never valid in a
+# generated text value
+_UNSAFE_TEXT_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+class InvalidOutputError(ValueError):
+    """The model's output violated this function's declared contract.
+
+    The output is atomic: when this is raised there is no partial result, no
+    repaired result, and no retry — the caller decides what to do. `category`
+    names the structural failure: `malformed_json`, `contract`, `empty_text`,
+    `char_limit`, or `budget_exhausted`.
+    """
+
+    def __init__(self, message, category="contract"):
+        super().__init__(message)
+        self.category = category
 
 
 def validate_input(item):
@@ -28,21 +47,84 @@ def validate_input(item):
     return {name: item[name] for name in schema}
 
 
+def _validate_text(name, field, value):
+    if not isinstance(value, str):
+        raise InvalidOutputError(f"output field {name!r} must be a string")
+    stripped = value.strip()
+    if not stripped:
+        raise InvalidOutputError(
+            f"output field {name!r} is empty", category="empty_text"
+        )
+    if _UNSAFE_TEXT_CHARS.search(stripped):
+        raise InvalidOutputError(
+            f"output field {name!r} contains an unsafe control character"
+        )
+    if len(stripped) > field["max_chars"]:
+        raise InvalidOutputError(
+            f"output field {name!r} is {len(stripped)} characters; the contract "
+            f"allows at most {field['max_chars']} (never truncated)",
+            category="char_limit",
+        )
+    return stripped
+
+
 def validate_output(value):
+    """Validate one complete output; returns the declared shape or raises
+    InvalidOutputError. Atomic: a single invalid field fails the whole value."""
     fields = FUNCTION["output"]["fields"]
     scalar = list(fields) == ["score"]
     values = {"score": value} if scalar else value
     if not isinstance(values, dict) or set(values) != set(fields):
-        raise ValueError("model output failed the function contract")
+        raise InvalidOutputError("model output failed the function contract")
+    checked = {}
     for name, field in fields.items():
         current = values[name]
-        if field.get("range") is not None:
+        if field.get("max_chars") is not None:
+            checked[name] = _validate_text(name, field, current)
+        elif field.get("range") is not None:
             lo, hi = field["range"]
             if not isinstance(current, int) or isinstance(current, bool) or not lo <= current <= hi:
-                raise ValueError(f"invalid integer output for {name}")
+                raise InvalidOutputError(f"invalid integer output for {name}")
+            checked[name] = current
         elif current not in field["labels"]:
-            raise ValueError(f"invalid enum output for {name}")
-    return values["score"] if scalar else values
+            raise InvalidOutputError(f"invalid enum output for {name}")
+        else:
+            checked[name] = current
+    return checked["score"] if scalar else checked
+
+
+def parse_strict_json(text, exhausted=False):
+    """Parse one generated completion as exactly the declared JSON value.
+
+    Tolerates only outer whitespace; rejects code fences, preambles, trailing
+    content, duplicate keys, and keys out of declared order (field order is
+    generation order, so a reordered object is a different function). Returns
+    the validated output or raises InvalidOutputError.
+    """
+
+    def no_duplicates(pairs):
+        keys = [key for key, _ in pairs]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate keys")
+        return dict(pairs)
+
+    stripped = text.strip()
+    try:
+        if not stripped:
+            raise ValueError("empty completion")
+        value, end = json.JSONDecoder(object_pairs_hook=no_duplicates).raw_decode(stripped)
+        if stripped[end:].strip():
+            raise ValueError("trailing content")
+    except ValueError:
+        raise InvalidOutputError(
+            "completion is not exactly one JSON value",
+            category="budget_exhausted" if exhausted else "malformed_json",
+        ) from None
+    fields = FUNCTION["output"]["fields"]
+    if list(fields) != ["score"]:
+        if not isinstance(value, dict) or list(value) != list(fields):
+            raise InvalidOutputError("JSON keys do not match the declared field order")
+    return validate_output(value)
 
 
 def render_input(item):
@@ -53,11 +135,9 @@ def render_input(item):
 
 
 def ordinal_predict(head, features):
-    """Class values from the softmax ordinal head: scale, one or two affine
-    layers, softmax over the levels — plain numpy arrays are the whole
-    runtime, no torch and no Smallbatch. The head's dev-selected decode rule
-    reads a level out of each row; heads persisted without one decode as
-    argmax, as they were evaluated."""
+    """Argmax class values from the softmax ordinal head: scale, one or two
+    affine layers, softmax over the levels — plain numpy arrays are the whole
+    runtime, no torch and no Smallbatch."""
     import numpy as np
 
     values = head["values"]
@@ -71,20 +151,7 @@ def ordinal_predict(head, features):
     if len(layers) > 1:
         out = np.maximum(out, 0.0)
         out = out @ layers[1]["weight"].T + layers[1]["bias"]
-    out -= out.max(axis=1, keepdims=True)
-    probabilities = np.exp(out)
-    probabilities /= probabilities.sum(axis=1, keepdims=True)
-    decoder = head.get("decoder", "argmax")
-    if decoder == "median":
-        chosen = (probabilities.cumsum(axis=1) >= 0.5).argmax(axis=1)
-    elif decoder == "within_one":
-        window = probabilities.copy()
-        window[:, :-1] += probabilities[:, 1:]
-        window[:, 1:] += probabilities[:, :-1]
-        chosen = window.argmax(axis=1)
-    else:
-        chosen = probabilities.argmax(axis=1)
-    return [values[int(index)] for index in chosen]
+    return [values[int(index)] for index in out.argmax(axis=1)]
 
 
 def metadata():
