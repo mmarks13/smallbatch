@@ -125,3 +125,28 @@ def test_doctor_surfaces_unresolved_decisions(tmp_path):
     assert any(
         level == "warn" and "unresolved decisions" in message for level, message in findings
     )
+
+
+def test_doctor_warns_when_reference_text_crowds_the_limit():
+    from smallbatch.doctor import inspect_items
+
+    spec = make_spec(
+        output={"type": "text", "max_chars": 40},
+        candidates={"granite": {"type": "lora"}},
+    )
+    crowded = [
+        {"input": {"title": f"t{i}", "body": "b"}, "output": "x" * 38}
+        for i in range(25)
+    ]
+    findings = inspect_items(spec, crowded)
+    warning = next(m for level, m in findings if level == "warn" and "max_chars" in m)
+    assert "p95" in warning and "raise max_chars" in warning
+
+    roomy = [
+        {"input": {"title": f"t{i}", "body": "b"}, "output": "short answer"}
+        for i in range(25)
+    ]
+    findings = inspect_items(spec, roomy)
+    assert any(level == "ok" and "fits max_chars" in m for level, m in findings)
+    # the contract itself never fails while every reference is valid
+    assert not any(level == "fail" for level, _ in findings)

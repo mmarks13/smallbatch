@@ -368,3 +368,52 @@ def test_passes_1_rows_and_meta_are_unchanged(tmp_path):
     assert noise["passes"] == 1
     assert noise["measured_rows"] == 0
     assert noise["self_agreement"]["overall"] is None
+
+
+def test_two_passes_compare_bounded_fields_only_text_variation_is_not_a_flip(tmp_path):
+    """Two draws whose decision matches but whose text is worded differently
+    are unanimous: text is excluded from categorical disagreement, and the
+    winning draw keeps its own text."""
+    spec = make_spec(
+        output={
+            "priority": {"labels": ["urgent", "normal"]},
+            "explanation": {"type": "text", "max_chars": 100},
+        },
+        candidates={"granite": {"type": "lora"}},
+        teacher={"backend": "codex-cli", "model": "test", "passes": 2},
+    )
+    teacher = ScriptedTeacher(
+        script={
+            # same decision, different wording: not a flip
+            "item 0": [
+                {"priority": "urgent", "explanation": "Server is down."},
+                {"priority": "urgent", "explanation": "The server went down."},
+            ],
+            # a real bounded flip still tie-breaks
+            "item 1": [
+                {"priority": "urgent", "explanation": "a"},
+                {"priority": "normal", "explanation": "b"},
+                {"priority": "urgent", "explanation": "c"},
+            ],
+        },
+        default={"priority": "normal", "explanation": "Routine question."},
+    )
+    build_dataset(spec, unlabeled_records(4), tmp_path, teacher=teacher)
+    rows = {row["input"]["title"]: row for row in read_jsonl(tmp_path / "labeled.jsonl")}
+    assert rows["item 0"]["agreement"] == "unanimous"
+    assert rows["item 0"]["weight"] == 1.0
+    assert rows["item 0"]["output"]["explanation"] == "Server is down."
+    assert rows["item 1"]["agreement"] == "majority"
+    assert rows["item 1"]["output"]["priority"] == "urgent"
+    # only the bounded flip spent a third draw
+    assert teacher.draws_by_title["item 0"] == 2
+    assert teacher.draws_by_title["item 1"] == 3
+
+
+def test_rows_no_longer_carry_a_reason_channel(tmp_path):
+    """v0.3 removed the separate reason channel: teacher rows store only the
+    output; explanations are ordinary declared text fields."""
+    spec = make_spec(teacher={"backend": "codex-cli", "model": "test"})
+    build_dataset(spec, unlabeled_records(4), tmp_path, teacher=ScriptedTeacher())
+    for row in read_jsonl(tmp_path / "labeled.jsonl"):
+        assert "reason" not in row

@@ -153,19 +153,18 @@ def train(
 
     The adapter written to out_dir/model is the best-scoring epoch's.
     """
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-    from transformers import Trainer, TrainerCallback, TrainingArguments
-
-    from . import objective
-    from .labeling import row_output
-    from .spec import effective_loss_weights
-
     if not dev_rows:
         raise ValueError(
             "LoRA training requires a development split: the checkpoint rule "
             "scores every epoch on teacher-forced development losses. Label "
             "more data"
         )
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from transformers import Trainer, TrainerCallback, TrainingArguments
+
+    from . import objective
+    from .labeling import row_output
+    from .spec import effective_loss_weights
     precision = pick_precision(config.precision)
     tokenizer, model = load_base_model(config.model, precision)
     codecs = objective.field_codecs(spec, tokenizer)

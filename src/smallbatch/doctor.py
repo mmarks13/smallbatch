@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import shutil
 from pathlib import Path
 
@@ -141,7 +142,44 @@ def inspect_items(spec: FunctionSpec, records: list[dict]) -> list[Finding]:
         )
     if outputs is not None and spec.augmentation and spec.teacher is None:
         findings.append(("fail", "augmentation of imported decisions requires a teacher"))
+    findings.extend(_text_headroom(spec, outputs))
     return findings
+
+
+# Warn when the p95 reference length crowds the declared limit. The contract
+# is never changed and nothing fails while every reference is valid — but a
+# limit this tight means generation will regularly run out of room.
+TEXT_HEADROOM_FRACTION = 0.8
+
+
+def _text_headroom(spec: FunctionSpec, outputs: list | None) -> list[Finding]:
+    text_field = spec.output.text_field
+    if text_field is None or not outputs:
+        return []
+    values = [
+        output[text_field] if isinstance(output, dict) else output
+        for output in outputs
+    ]
+    lengths = sorted(len(value) for value in values)
+    p95 = lengths[min(len(lengths) - 1, math.ceil(0.95 * len(lengths)) - 1)]
+    limit = spec.output.fields[text_field].max_chars
+    if p95 > TEXT_HEADROOM_FRACTION * limit:
+        return [
+            (
+                "warn",
+                f"text field {text_field!r}: p95 reference length is {p95} of "
+                f"max_chars {limit} (over {TEXT_HEADROOM_FRACTION:.0%}); "
+                "generation will often run out of room — raise max_chars or "
+                "ask the teacher for shorter text",
+            )
+        ]
+    return [
+        (
+            "ok",
+            f"text field {text_field!r}: p95 reference length {p95} fits "
+            f"max_chars {limit}",
+        )
+    ]
 
 
 def inspect_data(spec: FunctionSpec, data_dir: Path) -> list[Finding]:
