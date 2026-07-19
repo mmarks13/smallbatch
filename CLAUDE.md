@@ -95,7 +95,7 @@ no gold labels, acceptance gates, PASS/FAIL verdicts, or automatic winners.
 ## Commands
 
 ```bash
-smallbatch init <classifier|scorer|structured> <name>
+smallbatch init <classifier|scorer|structured|rewriter> <name>
 smallbatch doctor <spec> [--items items.json]
 smallbatch label <spec> --items items.json [--append] [--skip-calibration]
 smallbatch compile <spec> [--cpu-threads N]

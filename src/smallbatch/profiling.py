@@ -176,6 +176,11 @@ def _worker(build: Path, candidate: str, request_path: Path, result_path: Path) 
     cold_load = time.perf_counter() - started
     for item in items[: min(3, len(items))]:
         function(item)
+    # warm-up calls above must not count toward structural-failure evidence:
+    # only the timed full pass below describes the candidate's behavior
+    warmup_failures = getattr(function, "structural_failures", None)
+    if warmup_failures:
+        warmup_failures.clear()
     latencies: list[float] = []
     outputs: list[Any] = []
     progress_written = time.perf_counter()

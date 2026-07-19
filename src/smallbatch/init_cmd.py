@@ -25,6 +25,16 @@ candidates:
     precision: auto
 """
 
+# a text field must be generated, not selected, so text templates configure
+# only LoRA candidates — the spec would reject TF-IDF or SetFit
+_LORA_ONLY_CANDIDATES = """\
+candidates:
+  granite-350m:
+    type: lora
+    model: ibm-granite/granite-4.0-350m
+    precision: auto
+"""
+
 
 TEMPLATES = {
     "classifier": {
@@ -61,6 +71,21 @@ TEMPLATES = {
         ),
         "prompt": "Decide every output field using these criteria:\nTODO\n",
     },
+    "rewriter": {
+        "description": "TODO: what stable text transformation this function makes.",
+        "input_schema": {"query": "string"},
+        # one length-bounded text output; max_chars counts Unicode code
+        # points in the decoded text and over-limit outputs are invalid,
+        # never truncated
+        "output": "output:\n  type: text\n  max_chars: 300\n",
+        "prompt": (
+            "Rewrite the query as TODO: define the one narrow transformation\n"
+            "(e.g. a search rewrite, a normalized message, a short title).\n"
+            "Keep it under 300 characters. State what must be preserved and\n"
+            "what must be dropped.\n"
+        ),
+        "candidates": _LORA_ONLY_CANDIDATES,
+    },
 }
 
 
@@ -69,14 +94,15 @@ def _spec(name: str, template: dict) -> str:
         f"  {field}: {kind}" for field, kind in template["input_schema"].items()
     )
     prompt = "\n".join(f"  {line}" for line in template["prompt"].splitlines())
+    # the description contains a colon, which YAML forbids in a plain scalar
     return (
         f"name: {name}\n"
-        f"description: {template['description']}\n"
+        f"description: {json.dumps(template['description'])}\n"
         f"input_schema:\n{fields}\n"
         f"{template['output']}"
         f"prompt: |\n{prompt}\n"
         f"{_TEACHER}"
-        f"{_CANDIDATES}"
+        f"{template.get('candidates', _CANDIDATES)}"
     )
 
 

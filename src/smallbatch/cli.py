@@ -186,7 +186,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     init_parser = sub.add_parser("init", help="create a prompt-first function project")
-    init_parser.add_argument("template", choices=["classifier", "scorer", "structured"])
+    init_parser.add_argument(
+        "template", choices=["classifier", "scorer", "structured", "rewriter"]
+    )
     init_parser.add_argument("name")
     init_parser.add_argument("--dir")
     init_parser.set_defaults(fn=cmd_init)

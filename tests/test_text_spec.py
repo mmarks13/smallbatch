@@ -177,3 +177,19 @@ def test_removed_reason_channel_is_rejected_in_item_envelopes():
                 }
             ],
         )
+
+
+def test_every_init_template_produces_a_valid_spec(tmp_path):
+    """Generated starter specs must load under the current schema — including
+    the rewriter template, whose text output forces LoRA-only candidates."""
+    from smallbatch.init_cmd import TEMPLATES, init
+    from smallbatch.spec import load_spec
+
+    for template in TEMPLATES:
+        directory = init(template, f"demo-{template}", directory=str(tmp_path / template))
+        spec = load_spec(directory / "spec.yaml")
+        assert spec.name == f"demo-{template}"
+    rewriter = load_spec(tmp_path / "rewriter" / "spec.yaml")
+    assert rewriter.output.is_text_only
+    assert rewriter.output.scalar.max_chars == 300
+    assert all(c.type == "lora" for c in rewriter.candidates.values())

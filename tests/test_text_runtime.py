@@ -243,3 +243,15 @@ def test_invalid_package_outputs_block_selection(tmp_path, monkeypatch):
         artifacts.resolve_build(root, spec.name, compiled.build_id)
     )
     assert manifest["candidates"]["tfidf"]["status"] == "completed"
+
+    # the package source (written before evaluation) carries the resolved
+    # contract and the exact deterministic decoding settings
+    function_json = next((root / spec.name / "packages").rglob("function.json"))
+    function = json.loads(function_json.read_text())
+    assert function["output"]["fields"] == {
+        "score": {"range": None, "labels": ["urgent", "normal"], "max_chars": None}
+    }
+    decoding = function["runtime"]["decoding"]
+    assert decoding["strategy"] == "greedy"
+    assert decoding["do_sample"] is False
+    assert isinstance(decoding["max_new_tokens"], int)

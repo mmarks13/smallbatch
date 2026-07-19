@@ -331,3 +331,40 @@ def test_train_requires_a_development_split():
 
     with pytest.raises(ValueError, match="development split"):
         train(mixed_spec(), LoraCandidateSpec(type="lora"), [], None, dev_rows=[])
+
+
+def test_int_field_keeps_ordinal_loss_beside_a_text_field():
+    """Adding a text field must not demote an integer scale to token-only
+    supervision: its loss stays class NLL + RPS at the deciding token."""
+    from smallbatch.heads import ordinal_loss
+
+    spec = mixed_spec()
+    output = {"priority": 3, "explanation": "ok"}
+    codecs, row = encode(spec, output)
+    assert codecs["priority"]["kind"] == "int"
+    batch = batch_of([row])
+    width = len(row["input_ids"])
+    logits = uniform_logits(1, width)
+    deciding = next(
+        index for index, owner in enumerate(row["owners"]) if owner == 1
+    )
+    legal = codecs["priority"]["legal_ids"]
+    logits[0, deciding - 1, legal] = torch.tensor([0.5, 0.0, 1.0, 4.0, 0.0])
+
+    model = StaticModel(logits)
+    got, start = objective.completion_logits(model, batch)
+    losses = objective.row_losses(
+        got, batch["input_ids"], batch["owners"], spec, codecs, start
+    )
+    expected = ordinal_loss(
+        logits[0, deciding - 1, legal].unsqueeze(0), torch.tensor([3])
+    )
+    assert float(losses["priority"][0]) == pytest.approx(float(expected), abs=1e-5)
+    # distance sensitivity survives: mass far from the decision costs more
+    far = uniform_logits(1, width)
+    far[0, deciding - 1, legal] = torch.tensor([4.0, 0.0, 1.0, 0.5, 0.0])
+    got, start = objective.completion_logits(StaticModel(far), batch)
+    far_losses = objective.row_losses(
+        got, batch["input_ids"], batch["owners"], spec, codecs, start
+    )
+    assert float(far_losses["priority"][0]) > float(losses["priority"][0])
