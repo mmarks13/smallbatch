@@ -170,6 +170,43 @@ def test_compute_loss_reads_only_deciding_positions_however_logits_arrive():
     assert keep_model.kept.tolist() == [1, 2]
 
 
+def test_kept_and_full_shape_collision_resolves_by_rerunning():
+    """When the batch is exactly as long as the sequence, a kept projection
+    and full logits have identical shapes. The trainer must not guess which
+    arrived — it reruns the unambiguous full form — and the loss must match
+    for every model contract."""
+    from smallbatch.training import _ordinal_trainer_class
+
+    trainer_cls = _ordinal_trainer_class(int_spec(), FakeTokenizer())
+    # three rows, right-padded to length 3, with deciding positions chosen so
+    # that misreading kept columns as sequence positions changes the answer:
+    # row 0 answers " 3" at position 2, rows 1-2 answer at position 1
+    inputs = {
+        "input_ids": torch.tensor([[1, 2, 103], [1, 101, 99], [1, 102, 99]]),
+        "labels": torch.tensor(
+            [[-100, -100, 103], [-100, 101, 99], [-100, 102, 99]]
+        ),
+    }
+    logits = torch.zeros(3, 3, 200)
+    logits[0, 1, 100:105] = torch.tensor([0.5, 0.0, 1.0, 4.0, 0.0])
+    logits[1, 0, 100:105] = torch.tensor([1.0, 3.0, 0.0, 0.0, 2.0])
+    logits[2, 0, 100:105] = torch.tensor([0.0, 0.0, 5.0, 1.0, 0.0])
+    expected = _rps_loss(
+        torch.stack(
+            [logits[0, 1, 100:105], logits[1, 0, 100:105], logits[2, 0, 100:105]]
+        ),
+        torch.tensor([3, 1, 2]),
+    )
+
+    for model in (
+        KeepLogitsModel(logits),
+        FullLogitsModel(logits),
+        IgnoresKwargModel(logits),
+    ):
+        loss = trainer_cls.compute_loss(None, model, inputs)
+        assert float(loss) == pytest.approx(float(expected), abs=1e-6)
+
+
 def test_scales_wider_than_one_digit_are_refused_by_the_spec():
     """A level must be one token to be trained and scored as an ordered choice,
     so an integer range has to fit in 0-9: a 0-10 scale would split "10" into

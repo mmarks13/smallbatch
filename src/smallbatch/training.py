@@ -185,16 +185,23 @@ def _ordinal_trainer_class(spec: FunctionSpec, tokenizer):
                     attention_mask=attention_mask,
                     logits_to_keep=decides_at - 1,
                 ).logits
-            except TypeError:  # model predates the logits_to_keep contract
+                kept = logits.size(1) != input_ids.size(1)
+                if not kept and input_ids.size(0) == input_ids.size(1):
+                    # a kept projection has one column per row, so when the
+                    # batch is exactly as long as the sequence its shape
+                    # matches full logits and the two cannot be told apart;
+                    # rerun the unambiguous form instead of guessing
+                    raise TypeError("kept and full logits are the same shape")
+            except TypeError:  # no logits_to_keep contract, or shapes collide
+                kept = False
                 logits = model(
                     input_ids=input_ids, attention_mask=attention_mask
                 ).logits
-            if logits.size(1) == input_ids.size(1):
-                # full logits: the fallback ran, or the model ignored the kwarg
-                class_logits = logits[rows, decides_at - 1].float()[:, ids]
-            else:
+            if kept:
                 # kept logits: column k holds position decides_at[k] - 1
                 class_logits = logits[rows, rows].float()[:, ids]
+            else:
+                class_logits = logits[rows, decides_at - 1].float()[:, ids]
             answers = input_ids[rows, decides_at]
             target = (answers.unsqueeze(1) == ids.unsqueeze(0)).float().argmax(dim=1)
             return ordinal_loss(class_logits, target)
