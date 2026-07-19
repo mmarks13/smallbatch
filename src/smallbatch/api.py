@@ -284,10 +284,10 @@ def compile(  # noqa: A001
     data = Path(data_dir or f"data/{spec.name}")
     meta_path = data / "meta.json"
     if not meta_path.exists():
-        raise ValueError(f"no v0.2 decision dataset under {data}; run `smallbatch label` first")
+        raise ValueError(f"no v0.3 decision dataset under {data}; run `smallbatch label` first")
     data_meta = json.loads(meta_path.read_text())
     if data_meta.get("schema_version") != 3:
-        raise ValueError("pre-v0.2 datasets are unsupported; re-run `smallbatch label`")
+        raise ValueError("pre-v0.3 datasets are unsupported; re-run `smallbatch label`")
     if data_meta.get("decision_hash") != spec.decision_hash():
         raise ValueError(
             "dataset decisions belong to a different prompt, contract, or teacher; "

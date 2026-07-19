@@ -160,7 +160,7 @@ def inspect_items(spec: FunctionSpec, records: list[dict]) -> list[Finding]:
             (
                 "warn",
                 "teacher.passes: 1 draws each decision once, so the teacher's "
-                "self-agreement ceiling stays unknown; passes: 2 measures it and "
+                "self-agreement stays unknown; passes: 2 estimates stability and "
                 "tie-breaks unstable decisions",
             )
         )
@@ -213,7 +213,7 @@ def inspect_data(spec: FunctionSpec, data_dir: Path) -> list[Finding]:
     value = json.loads(meta.read_text())
     findings = []
     if value.get("schema_version") != 3:
-        findings.append(("fail", "dataset is pre-v0.2 and must be regenerated"))
+        findings.append(("fail", "dataset is pre-v0.3 and must be regenerated"))
     elif value.get("decision_hash") != spec.decision_hash():
         findings.append(("fail", "dataset belongs to a different prompt, contract, or teacher"))
     else:

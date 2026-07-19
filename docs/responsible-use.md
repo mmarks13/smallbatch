@@ -18,7 +18,7 @@ Smallbatch intentionally provides no gold-label subsystem or acceptance gate.
 Reports measure agreement and error against supplied decisions. A highly
 faithful candidate can reproduce a bad teacher, biased historical decisions,
 or an ambiguous prompt. Candidate selection on the same evaluation data makes
-the chosen result optimistic; v0.2 discloses this and provides no confirmation
+the chosen result optimistic; v0.3 discloses this and provides no confirmation
 set.
 
 Do not use a generated function as the sole decision-maker for high-impact

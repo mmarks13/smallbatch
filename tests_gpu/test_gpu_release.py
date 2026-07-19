@@ -58,16 +58,19 @@ def test_fp32_precision_trains(tmp_path):
     assert record["train_precision"] == "fp32"
 
 
-@pytest.mark.skipif(not _bf16_supported(), reason="GPU predates bf16 (capability < 8)")
 def test_bf16_precision_trains(tmp_path):
+    assert _bf16_supported(), (
+        "the release runner must support bf16 (CUDA capability 8+); "
+        "a skipped required precision path cannot satisfy the release gate"
+    )
     record = _train_bounded(tmp_path, precision="bf16")
     assert record["train_precision"] == "bf16"
 
 
-@pytest.mark.skipif(
-    not _bitsandbytes_available(), reason="bitsandbytes is not installed"
-)
 def test_qlora_precision_trains(tmp_path):
+    assert _bitsandbytes_available(), (
+        "bitsandbytes is required on the release runner; install the qlora extra"
+    )
     record = _train_bounded(tmp_path, precision="qlora")
     assert record["train_precision"] == "qlora"
 
@@ -126,7 +129,16 @@ def test_interrupted_compile_resumes_from_checkpoint(tmp_path):
     compiled = compile_fn(spec, data_dir=data, artifacts_root=root, cpu_threads=4)
     record = compiled.candidates["student"]
     assert record["status"] == "completed", record.get("error")
-    assert record["training"]["epochs_run"] >= 1
+    training = record["training"]
+    epochs = [entry["epoch"] for entry in training["curve"]]
+    assert epochs == list(range(1, training["epochs_run"] + 1)), (
+        "resumed training lost or duplicated pre-interruption DevScore evidence"
+    )
+    best = min(training["curve"], key=lambda entry: entry["checkpoint_score"])
+    assert training["best_epoch"] == best["epoch"]
+    assert training["best_checkpoint_score"] == pytest.approx(
+        best["checkpoint_score"], abs=5e-5
+    )
     state = json.loads(
         (compiled.version_dir / "build_state.json").read_text()
     )
@@ -161,9 +173,7 @@ def test_eval_oom_backoff_halves_the_batch_and_finishes(tmp_path):
     finally:
         torch.cuda.set_per_process_memory_fraction(1.0)
     assert len(outs) == len(texts)
-    if effective == 32:
-        pytest.skip(
-            f"memory fraction {fraction} did not force an OOM on this card; "
-            "lower it for this GPU"
-        )
-    assert effective < 32
+    assert effective < 32, (
+        f"memory fraction {fraction} did not force an OOM on this card; "
+        "tune the release test for the runner rather than skipping required coverage"
+    )

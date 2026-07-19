@@ -238,9 +238,9 @@ class TeacherSpec(BaseModel):
     batch_size: int = 40
     # decision-noise measurement. 2 labels every item twice (the second pass
     # with shuffled batch composition), tie-breaks flips with one targeted
-    # third draw, and records the teacher's self-agreement ceiling; items with
+    # third draw, and records the teacher's self-agreement stability; items with
     # three distinct categorical answers are set aside for optional user
-    # resolution. 1 is a single draw with the ceiling unknown.
+    # resolution. 1 is a single draw with stability unknown.
     passes: Literal[1, 2] = 1
     reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     base_url: str | None = None
@@ -646,19 +646,19 @@ def _validate_text(field: FieldSpec, value: Any, name: str) -> str:
             f"output field {name!r} must contain at least one non-whitespace "
             "character; empty text is not a valid result"
         )
-    bad = _UNSAFE_TEXT_CHARS.search(stripped)
+    bad = _UNSAFE_TEXT_CHARS.search(value)
     if bad:
         raise ValueError(
             f"output field {name!r} contains unsafe control character "
             f"{bad.group()!r}; only newline and tab are allowed"
         )
-    if len(stripped) > field.max_chars:
+    if len(value) > field.max_chars:
         raise ValueError(
-            f"output field {name!r} is {len(stripped)} characters; the contract "
+            f"output field {name!r} is {len(value)} characters; the contract "
             f"allows at most {field.max_chars}. Smallbatch never truncates: "
             "shorten the value or raise max_chars"
         )
-    return stripped
+    return value
 
 
 def _validate_field(field: FieldSpec, value: Any, name: str) -> Any:

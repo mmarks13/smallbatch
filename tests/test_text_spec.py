@@ -76,10 +76,9 @@ def test_text_values_validate_strictly():
     for bad in ("", "   ", "\n\t "):
         with pytest.raises(ValueError, match="non-whitespace"):
             validate_output(spec, bad)
-    # leading/trailing whitespace strips; internal newlines survive
-    assert validate_output(spec, "  First line\nSecond line  ") == (
-        "First line\nSecond line"
-    )
+    # leading/trailing whitespace is evidence and must survive unchanged
+    value = "  First line\nSecond line  "
+    assert validate_output(spec, value) == value
     # a newline counts as one character against the limit
     assert len(validate_output(text_spec(output={"type": "text", "max_chars": 21}),
                                "First line\nSecondline")) == 21
@@ -99,7 +98,7 @@ def test_mixed_output_is_atomic_in_validation():
     with pytest.raises(ValueError, match="never truncates"):
         validate_output(spec, {"priority": 3, "explanation": "x" * 101})
     good = validate_output(spec, {"priority": 3, "explanation": " ok "})
-    assert good == {"priority": 3, "explanation": "ok"}
+    assert good == {"priority": 3, "explanation": " ok "}
 
 
 def test_classifier_candidates_are_rejected_with_text():

@@ -73,7 +73,8 @@ smallbatch doctor ticket-priority/spec.yaml \
 # Imported decisions skip the teacher. Unlabeled inputs start with calibration.
 # `teacher.passes: 2` in the spec labels everything twice (~2.2x teacher cost),
 # tie-breaks flips with a third targeted draw, and reports the teacher's
-# self-agreement — the ceiling candidate agreement is judged against. Items
+# self-agreement as a stability reference. This is not an upper bound on
+# candidate agreement with the tie-broken consensus. Items
 # with no stable answer land in data/<function>/unresolved.jsonl for optional
 # hand resolution.
 smallbatch label ticket-priority/spec.yaml \
@@ -162,13 +163,13 @@ all of them, on the same machine, against the same 120 held-out decisions.
 One thing to know before reading the table: the teacher itself is not
 deterministic evidence. Re-labeling the same 120 evaluation rows with the
 shipped rubric (shuffled order, temperature 0), it repeated its own decision
-only 82% of the time — that's the ceiling any student can reliably reach, so
-the table below includes the teacher as a reference row rather than an
-implied 100%.
+only 82% of the time. That is useful stability context, but it is not an upper
+bound on agreement with the tie-broken reference used for evaluation. The
+table includes the teacher as a reference row rather than an implied 100%.
 
 | | exact agreement | mean error (0-4 scale) | p50 latency | ships as |
 |---|---:|---:|---:|---:|
-| **teacher vs. itself (ceiling)** | **82%** | **0.22** | GPU only | 65 GB |
+| **teacher vs. itself (stability reference)** | **82%** | **0.22** | GPU only | 65 GB |
 | TF-IDF | 54% | 0.60 | 1.2 ms | 27 MB |
 | SetFit (bge-small, 33M) | 57% | 0.55 | 42 ms | 135 MB |
 | LoRA (Qwen3-0.6B) | 63% | 0.45 | 0.8 s | 1.6 GB |

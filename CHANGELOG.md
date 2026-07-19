@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-07-19)
 
 ### Added
 
@@ -68,6 +68,21 @@
   the user-configurable ordinal `decode` (and its automatic dev-time
   argmax/median selection), and the TRL `loss_type` passthrough. Each removed
   option fails validation with its correction.
+
+### Fixed
+
+- Text validation now preserves leading and trailing whitespace exactly,
+  text-fidelity bpb uses decoded reference bytes, and completion budgets use
+  conservative UTF-8 bounds for multilingual text and long enum labels.
+- LoRA inference preserves tokenizer special tokens, and interrupted training
+  restores development curves, best-checkpoint selection, and patience state.
+- Appended user resolutions retain teacher provenance, report a mixed decision
+  source, and no longer count as synthetic variants.
+- Free-text wording no longer creates a false observed-dominance claim, and
+  teacher self-agreement is presented as stability evidence rather than an
+  upper bound on candidate agreement.
+- The release gate now requires every GPU precision, resume, and OOM regression
+  to execute successfully; skipped GPU jobs or required tests cannot publish.
 
 ### Roadmap
 

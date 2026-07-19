@@ -220,7 +220,6 @@ def _run_levels(tokenizer, model, prompts, levels):
         padding=True,
         truncation=True,
         max_length=2048,
-        add_special_tokens=False,
         return_token_type_ids=False,
     )
     with torch.no_grad():

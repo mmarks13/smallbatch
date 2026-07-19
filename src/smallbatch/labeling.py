@@ -214,8 +214,8 @@ def label_real_rows(
     differ — and tie-breaks flips with one targeted third draw. Rows carry
     `weight` (the fraction of draws matching the consensus) and `agreement`
     ("unanimous", "majority", or "median"); training may down-weight low
-    agreement, and the unanimous fraction is the teacher's self-agreement
-    ceiling reported as evidence. Items whose three draws are all distinct and
+    agreement, and the unanimous fraction is reported as teacher stability
+    evidence. Items whose three draws are all distinct and
     not an ordered integer scale are returned separately as unresolved: they
     get no decision, never block the run, and may be resolved by the user via
     the imported-decisions path.
@@ -590,9 +590,9 @@ def _noise_meta(
     """Teacher-noise evidence: self-agreement per split plus disclosure counts.
 
     Self-agreement is the fraction of measured rows whose two independent
-    draws matched — the ceiling candidate agreement is judged against. Rows
+    draws matched — a stability estimate, not a candidate-agreement bound. Rows
     labeled before measurement was on (or imported) carry no agreement data
-    and are excluded from the ceiling, never guessed at.
+    and are excluded from the estimate, never guessed at.
     """
     measured = [row for row in real_rows if "agreement" in row]
     user_resolved = sum(row.get("origin") == "user-resolved" for row in real_rows)
@@ -634,9 +634,10 @@ def build_dataset(
 ) -> dict[str, Any]:
     inputs, imported = normalize_item_records(spec, records)
     out_dir.mkdir(parents=True, exist_ok=True)
+    prior_meta = None
     if append and (out_dir / "meta.json").exists():
-        prior = json.loads((out_dir / "meta.json").read_text())
-        if prior.get("decision_hash") != spec.decision_hash():
+        prior_meta = json.loads((out_dir / "meta.json").read_text())
+        if prior_meta.get("decision_hash") != spec.decision_hash():
             raise ValueError(
                 "existing dataset was labeled under a different prompt, "
                 "contract, or teacher (or a pre-v0.3 schema); appending would "
@@ -653,15 +654,23 @@ def build_dataset(
         new_unresolved: list[dict] = []
         if imported is not None:
             new_rows = _imported_rows(spec, inputs, imported, records)
-            decision_source = "imported"
+            batch_source = "imported"
         else:
             if teacher is None:
                 raise ValueError("unlabeled inputs require a configured teacher")
             unseen = [item for item in inputs if row_id(item) not in existing_by_id]
             new_rows, new_unresolved = label_real_rows(teacher, spec, unseen, journal)
-            decision_source = "teacher"
+            batch_source = "teacher"
         real_rows = _dedupe([*existing_rows, *new_rows])
         real_rows = [row for row in real_rows if row.get("origin") in REAL_ORIGINS]
+        prior_source = (prior_meta or {}).get("decision_source")
+        decision_source = (
+            "mixed"
+            if existing_rows and prior_source not in (None, batch_source)
+            else prior_source or batch_source
+        )
+        if prior_source == "mixed":
+            decision_source = "mixed"
         assign_splits(
             spec,
             real_rows,
@@ -700,10 +709,15 @@ def build_dataset(
             "decision_hash": spec.decision_hash(),
             "dataset_hash": dataset_hash(rows),
             "decision_source": decision_source,
-            "teacher": spec.teacher.model_dump(mode="json") if decision_source == "teacher" else None,
+            "teacher": (
+                (prior_meta or {}).get("teacher")
+                or (spec.teacher.model_dump(mode="json") if spec.teacher else None)
+            )
+            if decision_source in {"teacher", "mixed"}
+            else None,
             "counts": {split: sum(row["split"] == split for row in rows) for split in ("train", "dev", "eval")},
             "real": len(real_rows),
-            "variants": sum(row.get("origin") != "real" for row in rows),
+            "variants": sum(row.get("origin") not in REAL_ORIGINS for row in rows),
             "label_histogram": dict(sorted(histogram.items())),
             "teacher_noise": _noise_meta(spec, decision_source, real_rows, unresolved_rows),
             "split_label_histograms": {
@@ -734,5 +748,3 @@ def read_jsonl(path: Path) -> list[Row]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-
-

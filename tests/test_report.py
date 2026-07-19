@@ -36,6 +36,19 @@ def test_observed_dominance_is_row_level_and_operational():
     assert observed_dominance(spec, completed, refs) == [{"dominates": "b", "candidate": "a"}]
 
 
+def test_text_wording_does_not_create_observed_dominance():
+    spec = make_spec(
+        output={"type": "text", "max_chars": 100},
+        candidates={"student": {"type": "lora"}},
+    )
+    refs = ["reference wording"]
+    completed = {
+        "a": candidate(["reference wording"]),
+        "b": candidate(["different valid wording"]),
+    }
+    assert observed_dominance(spec, completed, refs) == []
+
+
 def test_pairwise_reports_paired_delta_mcnemar_and_no_mae_for_enum():
     spec = make_spec()  # enum urgent/normal
     refs = ["urgent"] * 5
@@ -206,7 +219,7 @@ def test_integer_evidence_summary_includes_quality_and_operating_metrics():
         assert expected in summary
 
 
-def test_reference_stability_reports_ceiling_and_relative_agreement():
+def test_reference_stability_is_not_reported_as_an_agreement_ceiling():
     spec = make_spec()
     rows = [{"input": {"title": "t", "body": "b"}, "output": "urgent"} for _ in range(5)]
     meta = {
@@ -223,16 +236,16 @@ def test_reference_stability_reports_ceiling_and_relative_agreement():
     report, _ = build_report(spec, rows, completed, {}, data_meta=meta)
     stability = report["reference_stability"]
     assert stability["self_agreement"]["eval"] == 0.9
-    assert "ceiling" in stability["note"]
+    assert "not an upper bound" in stability["note"]
     markdown = render_markdown(report)
     assert "## Reference stability" in markdown
     assert "eval 90.0%" in markdown
-    assert "111% of the ceiling" in markdown  # 1.0 agreement vs 0.9 ceiling
+    assert "of the ceiling" not in markdown
     assert "2 items had no stable teacher answer" in markdown
     assert "1 decisions were resolved by the user" in markdown
 
 
-def test_single_pass_report_states_unknown_ceiling():
+def test_single_pass_report_states_unknown_self_agreement():
     spec = make_spec()
     rows = [{"input": {"title": "t", "body": "b"}, "output": "urgent"}]
     meta = {
@@ -246,7 +259,7 @@ def test_single_pass_report_states_unknown_ceiling():
         }
     }
     report, _ = build_report(spec, rows, {"a": candidate(["urgent"])}, {}, data_meta=meta)
-    assert "ceiling is unknown" in report["reference_stability"]["note"]
+    assert "self-agreement is unknown" in report["reference_stability"]["note"]
     assert "teacher.passes: 2" in report["reference_stability"]["note"]
     assert "single teacher draw" in render_markdown(report)
 

@@ -539,18 +539,15 @@ def text_fidelity(
             )
             targets = torch.tensor([int(row_ids[p]) for p in span], device=span_logits.device)
             nll = F.cross_entropy(span_logits, targets, reduction="none")
-            segment = next(
-                text
-                for owner, text in completion_segments(
-                    spec, rows[start + row]["output"]
-                )
-                if owner == text_field
-            )
+            output = rows[start + row]["output"]
+            text_value = output if spec.output.is_scalar else output[text_field]
             per_example.append(
                 {
                     "nll_sum": float(nll.sum()),
                     "tokens": len(span),
-                    "bytes": len(segment.encode("utf-8")),
+                    # Bits per byte is normalized by the decoded reference
+                    # value, not its JSON quotes and escapes.
+                    "bytes": len(text_value.encode("utf-8")),
                     "top1": int((span_logits.argmax(dim=-1) == targets).sum()),
                 }
             )

@@ -28,6 +28,6 @@ SetFit candidates remain available for comparison and selection. Re-running
 the same completed build retries errors in a new immutable revision and reuses
 the candidates that already completed.
 
-The selected LoRA package uses a Python PEFT CPU runtime in v0.2. GGUF and
+The selected LoRA package uses a Python PEFT CPU runtime in v0.3. GGUF and
 llama.cpp conversion are deferred because conversion and quantization can
 change behavior and therefore require a separate full evaluation.

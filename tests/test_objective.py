@@ -325,6 +325,30 @@ def test_text_fidelity_reports_reference_prediction_not_correctness():
     assert "not correctness" in fidelity["measures"]
 
 
+def test_text_fidelity_bpb_uses_decoded_reference_bytes_not_json_escapes():
+    spec = make_spec(
+        output={"type": "text", "max_chars": 20},
+        candidates={"granite": {"type": "lora"}},
+    )
+    value = 'a"\n'  # 3 raw bytes, but 5 supervised JSON-content bytes: a\"\n
+    rows = [{"input": {"title": "t", "body": "b"}, "output": value}]
+    tokenizer = CharTokenizer()
+    codecs = objective.field_codecs(spec, tokenizer)
+    encoded = objective.encode_row(
+        spec,
+        tokenizer,
+        codecs,
+        prompts.student_prompt(spec, rows[0]["input"]),
+        value,
+    )
+    model = StaticModel(uniform_logits(1, len(encoded["input_ids"])))
+
+    fidelity = objective.text_fidelity(model, tokenizer, spec, codecs, rows)
+
+    expected = 5 * math.log(VOCAB) / math.log(2) / len(value.encode("utf-8"))
+    assert fidelity["bits_per_byte"] == pytest.approx(round(expected, 4), abs=1e-3)
+
+
 def test_train_requires_a_development_split():
     from smallbatch.spec import LoraCandidateSpec
     from smallbatch.training import train

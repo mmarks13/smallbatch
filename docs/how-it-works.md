@@ -196,7 +196,7 @@ only the pointer, not prior builds or packages.
 Decision agreement measures reproduction of the supplied outputs. It cannot
 show that the prompt or decisions are correct, fair, lawful, or useful.
 Candidate comparison on one evaluation split also introduces selection bias;
-v0.2 does not claim an independent confirmation result.
+v0.3 does not claim an independent confirmation result.
 
 Latency, memory, and bytes are measured operating characteristics. They are
 not direct energy measurements.

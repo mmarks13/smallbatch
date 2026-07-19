@@ -55,17 +55,17 @@ def _validate_text(name, field, value):
         raise InvalidOutputError(
             f"output field {name!r} is empty", category="empty_text"
         )
-    if _UNSAFE_TEXT_CHARS.search(stripped):
+    if _UNSAFE_TEXT_CHARS.search(value):
         raise InvalidOutputError(
             f"output field {name!r} contains an unsafe control character"
         )
-    if len(stripped) > field["max_chars"]:
+    if len(value) > field["max_chars"]:
         raise InvalidOutputError(
-            f"output field {name!r} is {len(stripped)} characters; the contract "
+            f"output field {name!r} is {len(value)} characters; the contract "
             f"allows at most {field['max_chars']} (never truncated)",
             category="char_limit",
         )
-    return stripped
+    return value
 
 
 def validate_output(value):

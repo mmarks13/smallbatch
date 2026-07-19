@@ -11,7 +11,6 @@ on:
 
 jobs:
   gpu-release:
-    if: vars.GPU_RUNNER_READY == '1'
     runs-on: [self-hosted, gpu]
     timeout-minutes: 120
     steps:
@@ -22,7 +21,7 @@ jobs:
       - name: Install into the runner environment
         run: |
           source "$SMALLBATCH_RUNNER_VENV/bin/activate"
-          uv pip install -e ".[dev]"
+          uv pip install -e ".[dev,qlora]"
       - name: gpu-release tier (includes gpu-smoke)
         run: |
           source "$SMALLBATCH_RUNNER_VENV/bin/activate"

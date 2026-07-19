@@ -161,6 +161,7 @@ def train(
         )
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from transformers import Trainer, TrainerCallback, TrainingArguments
+    from transformers.trainer_callback import ExportableState
 
     from . import objective
     from .labeling import row_output
@@ -237,6 +238,7 @@ def train(
         save_total_limit=1,
         report_to=[],
         remove_unused_columns=False,
+        restore_callback_states_from_checkpoint=True,
     )
     adapter_dir = out_dir / "model"
 
@@ -252,7 +254,7 @@ def train(
             )
             return objective.combine_losses(losses, weights, baselines).mean()
 
-    class DevScore(TrainerCallback):
+    class DevScore(TrainerCallback, ExportableState):
         """Score dev each epoch, snapshot the best adapter, stop on patience.
 
         The saved adapter is always the best-so-far, so early stopping never
@@ -264,6 +266,20 @@ def train(
             self.best_epoch: int | None = None
             self.stale = 0
             self.stopped_reason = "max_epochs"
+
+        def state(self) -> dict:
+            """Persist the release evidence and early-stop state in each
+            Trainer checkpoint so a killed compile resumes one continuous run."""
+            return {
+                "args": {},
+                "attributes": {
+                    "curve": self.curve,
+                    "best": self.best,
+                    "best_epoch": self.best_epoch,
+                    "stale": self.stale,
+                    "stopped_reason": self.stopped_reason,
+                },
+            }
 
         def on_epoch_end(self, args, state, control, model=None, **kwargs):
             import torch
@@ -319,6 +335,13 @@ def train(
     )
     checkpoint = _latest_checkpoint(out_dir / "trainer")
     result = trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint else None)
+    # Transformers reconstructs exportable callbacks while restoring a
+    # checkpoint, so retain the live instance rather than the pre-resume one.
+    dev_cb = next(
+        callback
+        for callback in trainer.callback_handler.callbacks
+        if isinstance(callback, DevScore)
+    )
 
     if dev_cb.best_epoch is None:
         # dev never scored (e.g. zero epochs): fall back to the final adapter

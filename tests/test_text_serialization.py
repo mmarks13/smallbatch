@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+from pathlib import Path
 
+import smallbatch
 from conftest import make_spec
 from smallbatch import prompts
 
@@ -110,6 +113,57 @@ def test_json_escaping_and_multiline_text_round_trip():
     parsed, category = prompts.parse_generated(spec, completion.strip())
     assert category is None
     assert parsed == value
+
+
+def test_text_whitespace_round_trips_and_counts_against_the_contract():
+    spec = text_spec(output={"type": "text", "max_chars": 4})
+    parsed, category = prompts.parse_generated(spec, '" x "')
+    assert category is None
+    assert parsed == " x "
+    assert prompts.parse_generated(spec, '"  x  "') == (None, "char_limit")
+
+
+def test_standalone_validation_preserves_text_whitespace(tmp_path):
+    package = tmp_path / "standalone_common"
+    package.mkdir()
+    spec = text_spec(output={"type": "text", "max_chars": 4})
+    (package / "function.json").write_text(
+        json.dumps(spec.model_dump(mode="json"))
+    )
+    template = Path(smallbatch.__file__).parent / "standalone_templates" / "common.py.tmpl"
+    module_path = package / "common.py"
+    module_path.write_text(template.read_text())
+    module_spec = importlib.util.spec_from_file_location("standalone_common", module_path)
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    assert module.validate_output(" x ") == " x "
+    try:
+        module.validate_output("  x  ")
+    except module.InvalidOutputError as exc:
+        assert exc.category == "char_limit"
+    else:
+        raise AssertionError("standalone validator accepted over-limit whitespace")
+
+
+def test_completion_budget_covers_worst_case_unicode_and_long_labels():
+    scalar_text = text_spec(output={"type": "text", "max_chars": 3})
+    # leading space + JSON quotes + 4 UTF-8 bytes/codepoint + safety overhead
+    assert prompts.completion_budget(scalar_text) >= 1 + 2 + 4 * 3 + 8
+
+    long_label = "分類" * 20
+    enum = make_spec(output={"type": "enum", "labels": [long_label, "other"]})
+    encoded = prompts.student_completion(enum, long_label).encode("utf-8")
+    assert prompts.completion_budget(enum) >= len(encoded) + 8
+
+    mixed = mixed_spec()
+    worst_case = {
+        "priority": 4,
+        "explanation": "😀" * mixed.output.fields["explanation"].max_chars,
+    }
+    assert prompts.completion_budget(mixed) >= len(
+        prompts.student_completion(mixed, worst_case).encode("utf-8")
+    ) + 8
 
 
 def test_teacher_prompt_carries_the_character_limit():

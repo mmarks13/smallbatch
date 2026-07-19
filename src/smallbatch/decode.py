@@ -53,7 +53,6 @@ def score_levels(model, tokenizer, spec, texts: list[str], batch_size: int = 16)
             [text + tokenizer.decode(lead) if lead else text for text in batch],
             return_tensors="pt",
             padding=True,
-            add_special_tokens=False,
         )
         encoded = {key: value.to(model.device) for key, value in encoded.items()}
         with torch.no_grad():

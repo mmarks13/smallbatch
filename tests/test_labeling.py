@@ -341,6 +341,9 @@ def test_user_resolution_rides_import_path_and_clears_unresolved(tmp_path):
     assert noise["user_resolved"] == 1
     assert noise["unresolved"] == 0
     assert meta["real"] == 10
+    assert meta["variants"] == 0
+    assert meta["decision_source"] == "mixed"
+    assert meta["teacher"] == spec.teacher.model_dump(mode="json")
 
 
 def test_crash_between_passes_resumes_without_respending_pass_one(tmp_path):

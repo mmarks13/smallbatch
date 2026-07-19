@@ -9,6 +9,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import torch
+
 import smallbatch
 
 _COMMON_STUB = """\
@@ -126,3 +128,54 @@ def test_unconstrained_specs_cache_the_absence_too(tmp_path):
     assert module._constraint(tokenizer, 3) is None
     assert module._constraint(tokenizer, 3) is None
     assert tokenizer.calls == 0
+
+
+def test_ordinal_hot_path_preserves_prompt_special_tokens(tmp_path):
+    module = load_lora_template(
+        tmp_path,
+        {
+            "name": "fn",
+            "output": {"fields": {"score": {"labels": None, "range": [0, 1]}}},
+            "runtime": {"decoding": {"max_new_tokens": 8}},
+        },
+    )
+
+    class BosTokenizer:
+        padding_side = "right"
+
+        def __init__(self):
+            self.batch_add_special_tokens = None
+
+        def __call__(
+            self,
+            text,
+            add_special_tokens=True,
+            return_tensors=None,
+            padding=False,
+            truncation=False,
+            max_length=None,
+            return_token_type_ids=None,
+        ):
+            if isinstance(text, str):
+                assert add_special_tokens is False
+                return {"input_ids": [32, 10 if text.endswith("0") else 11]}
+            self.batch_add_special_tokens = add_special_tokens
+            rows = [[99, *[ord(char) % 40 for char in value]] for value in text]
+            return {
+                "input_ids": torch.tensor(rows),
+                "attention_mask": torch.ones((len(rows), len(rows[0])), dtype=torch.long),
+            }
+
+        def decode(self, ids):
+            return " " if ids else ""
+
+    class BosModel:
+        def __call__(self, input_ids, attention_mask):
+            assert torch.all(input_ids[:, 0] == 99), "BOS was omitted from standalone inference"
+            logits = torch.zeros(input_ids.shape[0], input_ids.shape[1], 120)
+            logits[:, -1, 11] = 2.0
+            return type("Out", (), {"logits": logits})()
+
+    tokenizer = BosTokenizer()
+    assert module._run_levels(tokenizer, BosModel(), ["prompt"], [0, 1]) == [1]
+    assert tokenizer.batch_add_special_tokens is True

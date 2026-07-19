@@ -25,13 +25,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          successes=$(gh api \
+          run_id=$(gh api \
             "repos/${GITHUB_REPOSITORY}/actions/workflows/gpu-release.yml/runs?head_sha=${GITHUB_SHA}&status=completed" \
-            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
-          if [ "${successes}" -lt 1 ]; then
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | sort_by(.run_number) | last | .id // empty')
+          if [ -z "${run_id}" ]; then
             echo "No successful gpu-release run found for ${GITHUB_SHA}."
             echo "Dispatch the gpu-release workflow on this commit, let it"
             echo "pass, then re-push the tag."
+            exit 1
+          fi
+          passed_job=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs" \
+            --jq '[.jobs[] | select(.name == "gpu-release" and .conclusion == "success")] | length')
+          if [ "${passed_job}" -lt 1 ]; then
+            echo "gpu-release run ${run_id} did not contain a successful gpu-release job."
+            echo "Skipped jobs do not satisfy the release gate."
             exit 1
           fi
 

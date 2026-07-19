@@ -81,8 +81,12 @@ def _row_errors(spec: FunctionSpec, predictions: list, references: list) -> list
                 row.append(float("inf"))
             elif field.type == "int":
                 row.append(abs(value - ref[name]))
-            else:
+            elif field.type == "enum":
                 row.append(0.0 if value == ref[name] else 1.0)
+            else:
+                # Free text has no semantic error metric. Any contract-valid
+                # value is tied here; fidelity is reported separately as bpb.
+                row.append(0.0)
         errors.append(row)
     return errors
 
@@ -247,12 +251,6 @@ def pairwise_comparisons(
     return comparisons
 
 
-def _candidate_agreement(record: dict) -> float | None:
-    metrics = record.get("metrics") or {}
-    value = metrics.get("decision_agreement", metrics.get("joint_decision_agreement"))
-    return float(value) if value is not None else None
-
-
 def reference_stability(data_meta: dict | None) -> dict | None:
     """Evidence about the reference's own noise, from labeling's meta.json.
 
@@ -263,23 +261,23 @@ def reference_stability(data_meta: dict | None) -> dict | None:
     noise = (data_meta or {}).get("teacher_noise")
     if not noise:
         return None
-    eval_ceiling = (noise.get("self_agreement") or {}).get("eval")
+    eval_stability = (noise.get("self_agreement") or {}).get("eval")
     if noise.get("passes", 1) < 2 and noise.get("measured_rows", 0) == 0:
         note = (
             "Agreement is measured against a single teacher draw per item; the "
-            "teacher's self-agreement ceiling is unknown. Set `teacher.passes: 2` "
-            "to measure it."
+            "teacher's self-agreement is unknown. Set `teacher.passes: 2` "
+            "to estimate its stability."
         )
-    elif eval_ceiling is not None:
+    elif eval_stability is not None:
         note = (
             "Self-agreement is the fraction of items where two independent teacher "
-            "draws matched. Candidate agreement cannot meaningfully exceed this "
-            "ceiling; judge candidates relative to it."
+            "draws matched. It is a stability estimate, not an upper bound on a "
+            "candidate's agreement with the tie-broken consensus reference."
         )
     else:
         note = (
             "Teacher self-agreement was measured, but no measured rows landed in "
-            "the evaluation split; the evaluation ceiling is unknown."
+            "the evaluation split; evaluation stability is unknown."
         )
     return {
         "teacher_passes": noise.get("passes"),
@@ -321,7 +319,7 @@ def build_report(
         "reference_stability": reference_stability(data_meta),
         "selection_bias_note": (
             "These candidates share one evaluation split. Selecting after comparison makes "
-            "the selected result optimistic; v0.2 does not provide an independent confirmation set."
+            "the selected result optimistic; v0.3 does not provide an independent confirmation set."
         ),
         "claims": {
             "decision_correctness_validated": False,
@@ -550,25 +548,16 @@ def _reference_stability_lines(report: dict) -> list[str]:
         return []
     lines = ["", "## Reference stability", "", stability["note"]]
     agreement = stability.get("self_agreement") or {}
-    eval_ceiling = agreement.get("eval")
-    if eval_ceiling is not None:
+    eval_stability = agreement.get("eval")
+    if eval_stability is not None:
         lines.extend(
             [
                 "",
                 f"Teacher self-agreement: overall {_pct(agreement.get('overall'))}, "
-                f"eval {_pct(eval_ceiling)} "
+                f"eval {_pct(eval_stability)} "
                 f"(measured on {stability['measured_rows']} rows).",
             ]
         )
-        if eval_ceiling > 0:
-            for name, record in report["candidates"].items():
-                value = _candidate_agreement(record)
-                if value is None:
-                    continue
-                lines.append(
-                    f"- `{name}` agreement {_pct(value)} = "
-                    f"{value / eval_ceiling:.0%} of the ceiling"
-                )
     if stability.get("unresolved"):
         lines.append(
             f"\n{stability['unresolved']} items had no stable teacher answer after "

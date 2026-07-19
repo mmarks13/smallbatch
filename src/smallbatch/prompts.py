@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import itertools
 import json
-import math
 import re
 from typing import Any
 
@@ -267,7 +266,7 @@ def parse_generated(
             return None, "contract"
         if not raw.strip():
             return None, "empty_text"
-        if len(raw.strip()) > field.max_chars:
+        if len(raw) > field.max_chars:
             return None, "char_limit"
     try:
         validated = validate_output(spec, value)
@@ -318,22 +317,44 @@ def incomplete_fields(spec: FunctionSpec, output: Any | None) -> list[str]:
 def completion_budget(spec: FunctionSpec) -> int:
     """Safe max_new_tokens for one completion.
 
-    For text-bearing outputs the budget is a safety mechanism, not the
-    contract: `max_chars` (Unicode code points, enforced after parsing) is
-    the contract. The tokenizer-aware estimate is 1.25 tokens per allowed
-    character — generous for BPE English (~0.3) and adequate for CJK (~1) —
-    plus fixed JSON overhead. Deterministic EOS ends generation long before
-    the budget in the normal case; spending the whole budget without a valid
-    output is recorded as a `budget_exhausted` structural failure.
+    The contract remains `max_chars` Unicode code points. The budget uses a
+    conservative UTF-8-byte upper bound (one token per byte, plus EOS and
+    tokenizer overhead), so CJK, emoji, long enum labels, and JSON syntax do
+    not get cut off by an English-centric token estimate. Deterministic EOS
+    normally ends generation earlier; exhausting this budget is recorded as
+    a structural failure.
     """
-    if spec.output.has_text:
-        text_chars = sum(
-            field.max_chars
-            for field in spec.output.fields.values()
-            if field.type == "text"
+    def value_bytes(field) -> int:
+        if field.type == "text":
+            # JSON quotes plus the maximum UTF-8 width of one Unicode code point.
+            return 2 + 4 * field.max_chars
+        return max(
+            len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+            for value in field.values()
         )
-        return 24 + 8 * len(spec.output.bounded_fields) + math.ceil(1.25 * text_chars)
-    return 8 if spec.output.is_scalar else 8 + 8 * len(spec.output.fields)
+
+    if spec.output.has_text:
+        if spec.output.is_scalar:
+            completion_bytes = 1 + value_bytes(spec.output.scalar)
+        else:
+            completion_bytes = len(b" {") + len(b"}")
+            for index, (name, field) in enumerate(spec.output.fields.items()):
+                separator = "" if index == 0 else ", "
+                key = json.dumps(name, ensure_ascii=False)
+                completion_bytes += len(f"{separator}{key}: ".encode())
+                completion_bytes += value_bytes(field)
+    else:
+        finite = allowed_completions(spec)
+        if finite is not None:
+            completion_bytes = max(len(value.encode("utf-8")) for value in finite)
+        elif spec.output.is_scalar:
+            completion_bytes = 1 + value_bytes(spec.output.scalar)
+        else:
+            completion_bytes = 1
+            for index, (name, field) in enumerate(spec.output.fields.items()):
+                completion_bytes += (1 if index else 0) + len(f"{name}: ".encode())
+                completion_bytes += value_bytes(field)
+    return completion_bytes + 8
 
 
 def extract_json(text: str) -> Any:
