@@ -113,7 +113,13 @@ def test_interrupted_compile_resumes_from_checkpoint(tmp_path):
     checkpoint = None
     try:
         while time.time() < deadline:
-            candidates = list(root.glob("*/builds/*/candidates/student/trainer/checkpoint-*"))
+            candidates = [
+                path
+                for path in root.glob(
+                    "*/builds/*/candidates/student/trainer/checkpoint-*"
+                )
+                if (path / "trainer_state.json").is_file()
+            ]
             if candidates:
                 checkpoint = candidates[0]
                 break
@@ -162,7 +168,13 @@ def test_eval_oom_backoff_halves_the_batch_and_finishes(tmp_path):
         for record in triage_records(text=False)[:32]
     ]
     torch.cuda.empty_cache()
-    fraction = 0.35  # small enough to break batch-32 fp32 generation
+    # Size the cap from the loaded model rather than total VRAM: a fixed
+    # fraction that starves an 8 GB runner can leave gigabytes free on a
+    # 16 GB card. 96 MiB is enough workspace for the batch-16 retry but less
+    # than batch 32 needs for this fixture.
+    total_memory = torch.cuda.get_device_properties(0).total_memory
+    memory_limit = torch.cuda.memory_allocated() + 96 * 1024**2
+    fraction = memory_limit / total_memory
     torch.cuda.set_per_process_memory_fraction(fraction)
     try:
         outs, effective = generate_batch(
@@ -174,6 +186,6 @@ def test_eval_oom_backoff_halves_the_batch_and_finishes(tmp_path):
         torch.cuda.set_per_process_memory_fraction(1.0)
     assert len(outs) == len(texts)
     assert effective < 32, (
-        f"memory fraction {fraction} did not force an OOM on this card; "
+        f"memory cap {memory_limit} bytes did not force an OOM on this card; "
         "tune the release test for the runner rather than skipping required coverage"
     )

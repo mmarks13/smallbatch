@@ -69,11 +69,14 @@ def test_load_tokenizer_does_not_hide_other_configuration_errors(monkeypatch, tm
         _load_tokenizer("example/model")
 
 
-def test_latest_checkpoint_compares_steps_numerically(tmp_path):
+def test_latest_checkpoint_ignores_incomplete_dirs_and_compares_steps_numerically(tmp_path):
     from smallbatch.training import _latest_checkpoint
 
     trainer_dir = tmp_path / "trainer"
     for name in ("checkpoint-200", "checkpoint-1000", "checkpoint-partial"):
         (trainer_dir / name).mkdir(parents=True)
+    (trainer_dir / "checkpoint-200" / "trainer_state.json").write_text("{}")
+    (trainer_dir / "checkpoint-1000" / "trainer_state.json").write_text("{}")
+    (trainer_dir / "checkpoint-2000").mkdir()
     assert _latest_checkpoint(trainer_dir).name == "checkpoint-1000"
     assert _latest_checkpoint(tmp_path / "missing") is None

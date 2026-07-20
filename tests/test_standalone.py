@@ -1,4 +1,5 @@
 import hashlib
+import json
 import zipfile
 
 import pytest
@@ -8,6 +9,40 @@ from smallbatch import artifacts, standalone
 from smallbatch.api import compile as compile_fn
 from smallbatch.api import label, select
 from smallbatch.runtime import load_fn
+
+
+def _write_active_test_wheel(root, name):
+    package = root / name / "packages" / "test"
+    package.mkdir(parents=True)
+    wheel = package / f"{name}.whl"
+    module = name.replace("-", "_")
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            f"smallbatch_functions/{module}/__init__.py",
+            "def metadata(): return {'function': '" + name + "'}\n"
+            "def run(item): return '" + name + "'\n"
+            "def run_batch(items): return ['" + name + "' for _ in items]\n",
+        )
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    (package / "package.json").write_text(
+        json.dumps({"wheel": wheel.name, "wheel_sha256": digest})
+    )
+    (root / name / "active.json").write_text(
+        json.dumps({"package": "packages/test", "wheel_sha256": digest})
+    )
+
+
+def test_load_fn_refreshes_cached_namespace_for_a_different_artifact_root(tmp_path):
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _write_active_test_wheel(first_root, "first-function")
+    _write_active_test_wheel(second_root, "second-function")
+
+    first = load_fn("first-function", artifacts_root=first_root)
+    second = load_fn("second-function", artifacts_root=second_root)
+
+    assert first({}) == "first-function"
+    assert second({}) == "second-function"
 
 
 def test_selected_wheel_has_no_smallbatch_runtime_dependency(tmp_path, monkeypatch):

@@ -91,8 +91,9 @@ def _load_active_package(root: Path, name: str) -> PackagedFunction:
     for loaded in [key for key in sys.modules if key == module_name or key.startswith(module_name + ".")]:
         del sys.modules[loaded]
     namespace = sys.modules.get("smallbatch_functions")
-    if namespace is not None and import_root not in namespace.__path__:
-        namespace.__path__ = [import_root, *list(namespace.__path__)]
+    namespace_root = str(extracted / "smallbatch_functions")
+    if namespace is not None and namespace_root not in namespace.__path__:
+        namespace.__path__ = [namespace_root, *list(namespace.__path__)]
     importlib.invalidate_caches()
     try:
         module = importlib.import_module(module_name)

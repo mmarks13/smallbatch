@@ -127,6 +127,10 @@ def _latest_checkpoint(trainer_dir: Path) -> Path | None:
         path
         for path in trainer_dir.glob("checkpoint-*")
         if path.name.rsplit("-", 1)[-1].isdigit()
+        # Transformers creates the directory before writing its contents and
+        # writes trainer_state.json last. A process killed during that window
+        # leaves a directory that cannot be resumed.
+        and (path / "trainer_state.json").is_file()
     ]
     if not checkpoints:
         return None
