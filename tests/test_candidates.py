@@ -34,6 +34,32 @@ def test_tfidf_requires_two_observed_classes(tmp_path):
         train_tfidf(spec, rows()[:2], tmp_path)
 
 
+def test_per_row_weight_shifts_the_enum_decision_boundary(tmp_path):
+    """Rows from a passes=2 labeling run carry a `weight` (agreement-derived);
+    the enum head's LogisticRegression must actually consume it as
+    sample_weight, not just carry it as inert metadata."""
+    ambiguous = {"title": "ambiguous", "body": "case text repeated"}
+    other = [
+        {"input": {"title": "outage", "body": "clear production outage"}, "output": "urgent"},
+        {"input": {"title": "help", "body": "clear routine account question"}, "output": "normal"},
+    ]
+
+    def rows(urgent_weight):
+        return [
+            {"input": ambiguous, "output": "normal", "weight": 1.0},
+            {"input": ambiguous, "output": "normal", "weight": 1.0},
+            {"input": ambiguous, "output": "urgent", "weight": urgent_weight},
+            *other,
+        ]
+
+    spec = make_spec()
+    train_tfidf(spec, rows(urgent_weight=1.0), tmp_path)
+    assert predict_tfidf(tmp_path, spec, [ambiguous])[0] == "normal"  # 2:1 majority
+
+    train_tfidf(spec, rows(urgent_weight=20.0), tmp_path)
+    assert predict_tfidf(tmp_path, spec, [ambiguous])[0] == "urgent"  # weight overrides it
+
+
 def test_structured_trains_one_pipeline_per_field(tmp_path):
     spec = make_spec(
         output={"priority": {"labels": ["urgent", "normal"]}, "score": {"range": [0, 1]}}

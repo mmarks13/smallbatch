@@ -301,6 +301,40 @@ def test_three_way_int_scale_resolves_to_median(tmp_path):
     assert not (tmp_path / "unresolved.jsonl").exists()
 
 
+def test_three_way_enum_split_on_mixed_decision_and_text_spec_is_unresolved(tmp_path):
+    """A three-way split unresolves on its bounded projection alone: the text
+    field varying too is irrelevant, and the full draws (bounded and text)
+    still land in the unresolved provenance for the user to inspect."""
+    spec = make_spec(
+        output={
+            "priority": {"labels": ["urgent", "normal", "low"]},
+            "explanation": {"type": "text", "max_chars": 100},
+        },
+        candidates={"granite": {"type": "lora"}},
+        teacher={"backend": "codex-cli", "model": "test", "passes": 2},
+    )
+    teacher = ScriptedTeacher(
+        script={
+            "item 2": [
+                {"priority": "urgent", "explanation": "a"},
+                {"priority": "normal", "explanation": "b"},
+                {"priority": "low", "explanation": "c"},
+            ],
+        },
+        default={"priority": "normal", "explanation": "routine"},
+    )
+    meta = build_dataset(spec, unlabeled_records(10), tmp_path, teacher=teacher)
+    rows = read_jsonl(tmp_path / "labeled.jsonl")
+    assert len(rows) == 9
+    assert all(row["input"]["title"] != "item 2" for row in rows)
+    unresolved = read_jsonl(tmp_path / "unresolved.jsonl")
+    assert len(unresolved) == 1
+    assert [draw["output"]["priority"] for draw in unresolved[0]["provenance"]["draws"]] == [
+        "urgent", "normal", "low",
+    ]
+    assert meta["teacher_noise"]["unresolved"] == 1
+
+
 def test_three_way_enum_split_is_set_aside_not_labeled(tmp_path, capsys):
     spec = passes2_spec(output={"type": "enum", "labels": ["urgent", "normal", "low"]})
     teacher = ScriptedTeacher(script={"item 2": ["urgent", "normal", "low"]})
@@ -346,6 +380,44 @@ def test_user_resolution_rides_import_path_and_clears_unresolved(tmp_path):
     assert meta["teacher"] == spec.teacher.model_dump(mode="json")
 
 
+def test_unresolved_entry_prunes_when_a_later_relabel_reaches_consensus(tmp_path):
+    """Resolution isn't only a user filling in `output`: relabeling the same
+    unlabeled item and drawing a stable answer this time also counts, and the
+    stale unresolved.jsonl entry drops out with no user action."""
+    spec = passes2_spec(output={"type": "enum", "labels": ["urgent", "normal", "low"]})
+    splitting = ScriptedTeacher(script={"item 2": ["urgent", "normal", "low"]})
+    build_dataset(spec, unlabeled_records(10), tmp_path, teacher=splitting)
+    assert (tmp_path / "unresolved.jsonl").exists()
+
+    agreeing = ScriptedTeacher()  # item 2 now draws the same default twice
+    meta = build_dataset(spec, unlabeled_records(10), tmp_path, teacher=agreeing, append=True)
+    assert not (tmp_path / "unresolved.jsonl").exists()
+    resolved = next(
+        row for row in read_jsonl(tmp_path / "labeled.jsonl")
+        if row["input"]["title"] == "item 2"
+    )
+    assert resolved["origin"] == "real"
+    assert resolved["agreement"] == "unanimous"
+    assert meta["teacher_noise"]["unresolved"] == 0
+
+
+def test_unresolved_entry_is_not_duplicated_while_still_split(tmp_path):
+    """Re-splitting the same still-unresolved item on a later relabel keeps
+    one entry, not a growing pile of duplicates for the same input."""
+    spec = passes2_spec(output={"type": "enum", "labels": ["urgent", "normal", "low"]})
+    first = ScriptedTeacher(script={"item 2": ["urgent", "normal", "low"]})
+    build_dataset(spec, unlabeled_records(10), tmp_path, teacher=first)
+    assert len(read_jsonl(tmp_path / "unresolved.jsonl")) == 1
+
+    still_splitting = ScriptedTeacher(script={"item 2": ["urgent", "normal", "low"]})
+    meta = build_dataset(
+        spec, unlabeled_records(10), tmp_path, teacher=still_splitting, append=True
+    )
+    unresolved = read_jsonl(tmp_path / "unresolved.jsonl")
+    assert len(unresolved) == 1
+    assert meta["teacher_noise"]["unresolved"] == 1
+
+
 def test_crash_between_passes_resumes_without_respending_pass_one(tmp_path):
     spec = passes2_spec()
     crashing = ScriptedTeacher(crash_at_call=2)
@@ -358,6 +430,25 @@ def test_crash_between_passes_resumes_without_respending_pass_one(tmp_path):
     assert set(resumed.draws_by_title.values()) == {1}
     rows = read_jsonl(tmp_path / "labeled.jsonl")
     assert len(rows) == 10 and all(row["agreement"] == "unanimous" for row in rows)
+
+
+def test_crash_during_tiebreak_resumes_without_respending_first_two_passes(tmp_path):
+    spec = passes2_spec()
+    crashing = ScriptedTeacher(
+        script={"item 3": ["urgent", "normal", "urgent"]}, crash_at_call=3
+    )
+    with pytest.raises(KeyboardInterrupt):
+        build_dataset(spec, unlabeled_records(10), tmp_path, teacher=crashing)
+    assert crashing.completions == 3  # pass 1 and pass 2 landed, tiebreak died
+    resumed = ScriptedTeacher(script={"item 3": ["urgent"]})
+    build_dataset(spec, unlabeled_records(10), tmp_path, teacher=resumed)
+    # pass 1 and pass 2 replay from the journal: only the tiebreak is repaid
+    assert resumed.draws_by_title == {"item 3": 1}
+    flipped = next(
+        row for row in read_jsonl(tmp_path / "labeled.jsonl")
+        if row["input"]["title"] == "item 3"
+    )
+    assert flipped["agreement"] == "majority" and flipped["output"] == "urgent"
 
 
 def test_passes_1_rows_and_meta_are_unchanged(tmp_path):
@@ -411,6 +502,40 @@ def test_two_passes_compare_bounded_fields_only_text_variation_is_not_a_flip(tmp
     # only the bounded flip spent a third draw
     assert teacher.draws_by_title["item 0"] == 2
     assert teacher.draws_by_title["item 1"] == 3
+
+
+def test_flip_ships_text_from_earliest_draw_matching_the_consensus(tmp_path):
+    """Ratified rule: on a majority resolution, the shipped draw is the
+    earliest of the three — pass one, then pass two, then the tiebreak —
+    whose bounded projection matches the winning consensus. Here pass one and
+    the tiebreak both land on score 3 (2-of-3), so pass one's text ships even
+    though the tiebreak drew last."""
+    spec = make_spec(
+        output={
+            "score": {"range": [0, 9]},
+            "text": {"type": "text", "max_chars": 100},
+        },
+        candidates={"granite": {"type": "lora"}},
+        teacher={"backend": "codex-cli", "model": "test", "passes": 2},
+    )
+    teacher = ScriptedTeacher(
+        script={
+            "item 0": [
+                {"score": 3, "text": "A"},
+                {"score": 2, "text": "B"},
+                {"score": 3, "text": "C"},
+            ],
+        },
+        default={"score": 3, "text": "default"},
+    )
+    build_dataset(spec, unlabeled_records(4), tmp_path, teacher=teacher)
+    row = next(
+        row for row in read_jsonl(tmp_path / "labeled.jsonl")
+        if row["input"]["title"] == "item 0"
+    )
+    assert row["output"] == {"score": 3, "text": "A"}
+    assert row["agreement"] == "majority"
+    assert row["weight"] == round(2 / 3, 4)
 
 
 def test_rows_no_longer_carry_a_reason_channel(tmp_path):

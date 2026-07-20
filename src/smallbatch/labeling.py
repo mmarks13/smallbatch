@@ -222,7 +222,11 @@ def label_real_rows(
 
     Draws are compared on their bounded fields only: a text field that is
     worded differently between passes is variation, not disagreement, and the
-    winning draw keeps its own text.
+    winning draw keeps its own text. On a majority (2-of-3) resolution, the
+    shipped draw is the earliest of the three — pass one, then pass two, then
+    the tiebreak — whose bounded projection matches the winning consensus,
+    not whichever draw happens to carry the votes; its text ships alongside
+    that consensus unchanged.
     """
     passes = spec.teacher.passes if spec.teacher else 1
     if passes == 1 or not items:
